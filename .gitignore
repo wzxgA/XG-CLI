@@ -1,0 +1,19 @@
+# 环境与密钥
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 编辑器
+.idea/
+.vscode/
