@@ -1,18 +1,21 @@
-"""配置读取：.env 文件 + 环境变量，环境变量优先。"""
+"""运行时配置快照与加载。
+
+Settings 是解析后的运行时快照（provider / model / key / 窗口等），
+由 ConfigManager 按「默认 < 用户级 < 项目级 < 环境变量」合并产出。
+"""
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from dotenv import load_dotenv
+from xg.config.manager import ConfigManager
 
 
 @dataclass
 class Settings:
-    """运行时配置。model 可被 /model 命令运行时修改。"""
+    """运行时配置快照。provider / model 可被 /model 命令运行时修改。"""
 
+    provider: str = ""
     api_base: str = ""
     api_key: str = ""
     model: str = ""
@@ -37,39 +40,22 @@ class Settings:
         return ascii_chars // 4 + non_ascii
 
 
-def load_settings(env_file: str | Path | None = None) -> Settings:
-    """加载配置。优先级：环境变量 > .env 文件 > 默认值。"""
-    if env_file is None:
-        # 从当前工作目录向上查找 .env（最多 3 层）
-        env_file = _find_env_file()
-    if env_file and Path(env_file).is_file():
-        load_dotenv(env_file, override=False)
-    else:
-        load_dotenv(override=False)  # 仅读进程已有环境变量
-
+def load_settings(manager: ConfigManager | None = None) -> Settings:
+    """加载配置并产出运行时快照。"""
+    manager = manager or ConfigManager()
+    active = manager.active()
     return Settings(
-        api_base=os.environ.get("XG_API_BASE", "").rstrip("/"),
-        api_key=os.environ.get("XG_API_KEY", ""),
-        model=os.environ.get("XG_MODEL", ""),
-        context_window=_get_int("XG_CONTEXT_WINDOW", 128_000),
-        tool_steps=_get_int("XG_TOOL_STEPS", 20),
+        provider=active.provider_name,
+        api_base=active.api_base,
+        api_key=active.api_key,
+        model=active.model,
+        context_window=active.context_window,
+        tool_steps=_get_int(manager.env, "XG_TOOL_STEPS", 20),
     )
 
 
-def _find_env_file() -> Path | None:
-    cur = Path.cwd()
-    for _ in range(3):
-        candidate = cur / ".env"
-        if candidate.is_file():
-            return candidate
-        if cur == cur.parent:
-            break
-        cur = cur.parent
-    return None
-
-
-def _get_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "")
+def _get_int(env: dict[str, str], name: str, default: int) -> int:
+    raw = env.get(name, "")
     try:
         return int(raw) if raw else default
     except ValueError:

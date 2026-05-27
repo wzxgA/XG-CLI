@@ -18,13 +18,35 @@ cp .env.example .env
 uv run xg
 ```
 
-`.env` 最小配置：
+`.env` 最小配置（单 provider）：
 
 ```
 XG_API_BASE=https://api.openai.com/v1   # 任意 OpenAI 兼容服务
 XG_API_KEY=sk-xxx
 XG_MODEL=gpt-4o-mini
 ```
+
+## 多 provider
+
+内置 openai / deepseek / glm / kimi 四个 provider（均可走 OpenAI 兼容协议）。为想用的 provider 配置专属 Key：
+
+```
+XG_OPENAI_API_KEY=sk-xxx
+XG_DEEPSEEK_API_KEY=sk-xxx
+XG_GLM_API_KEY=sk-xxx
+XG_KIMI_API_KEY=sk-xxx
+```
+
+启动后运行时切换（无需重启）：
+
+| 命令 | 行为 |
+|------|------|
+| `/model` | 列出所有 provider 与当前激活项 |
+| `/model deepseek` | 切换到该 provider 的默认模型 |
+| `/model glm/glm-4-plus` | 切换到指定模型 |
+| `/model gpt-4o` | 当前 provider 内切换模型名 |
+
+切换结果持久化到 `~/.xg/config.json`，重启后仍生效。配置优先级：环境变量/.env > 项目级 `.xg/config.json` > 用户级 `~/.xg/config.json` > 默认值。
 
 ## 使用
 
@@ -34,7 +56,11 @@ XG_MODEL=gpt-4o-mini
 
 | 命令 | 说明 |
 |------|------|
-| `/model <name>` | 运行时切换模型 |
+| `/model` | 切换 provider / 模型（见上） |
+| `/config` | 显示当前生效配置（Key 脱敏） |
+| `/config list` | provider 能力表 |
+| `/config get <key>` | 查看配置项 |
+| `/config set <key> <value>` | 设置并持久化到 `~/.xg/config.json` |
 | `/clear` | 清空当前对话上下文 |
 | `/exit` | 退出 |
 
@@ -42,13 +68,16 @@ XG_MODEL=gpt-4o-mini
 
 ## 配置项
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `XG_API_BASE` | - | OpenAI 兼容 API 地址 |
-| `XG_API_KEY` | - | API Key |
-| `XG_MODEL` | - | 模型名 |
-| `XG_CONTEXT_WINDOW` | 128000 | 上下文窗口（token），用于预算控制 |
-| `XG_TOOL_STEPS` | 20 | 单轮工具调用步数上限 |
+| 环境变量 | 说明 |
+|----------|------|
+| `XG_API_BASE` | OpenAI 兼容 API 地址（仅隐式 provider openai 生效） |
+| `XG_API_KEY` | 通用 Key（仅 openai 兜底使用） |
+| `XG_MODEL` | 默认模型（未配置 active_model 时生效） |
+| `XG_<PROVIDER>_API_KEY` | 各 provider 专属 Key，如 `XG_DEEPSEEK_API_KEY` |
+| `XG_CONTEXT_WINDOW` | 上下文窗口（token），覆盖 provider 能力声明 |
+| `XG_TOOL_STEPS` | 单轮工具调用步数上限（默认 20） |
+
+API Key 只从环境变量 / .env 读取，不写入配置文件；`/config` 显示时脱敏。
 
 ## 开发
 
@@ -58,4 +87,4 @@ uv run pytest                 # 全量测试
 uv run xg                     # 手工验收
 ```
 
-项目分层：`xg/agent`（ReAct 循环）、`xg/llm`（客户端抽象 + OpenAI 兼容实现）、`xg/tool`（工具注册表 + 内置工具）、`xg/cli`（交互层）、`xg/config`（配置）。
+项目分层：`xg/agent`（ReAct 循环）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（工具注册表 + 内置工具）、`xg/cli`（交互层）、`xg/config`（provider 注册表 / 配置合并 / 运行时快照）。
