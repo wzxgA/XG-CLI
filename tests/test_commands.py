@@ -34,7 +34,7 @@ def make_context(tmp_path: Path, env: dict) -> tuple[ReActAgent, Settings, Confi
     settings = Settings(
         provider="openai",
         api_base=env.get("XG_API_BASE", "https://api.openai.com/v1"),
-        api_key=env.get("XG_API_KEY", ""),
+        api_key=env.get("XG_OPENAI_API_KEY", ""),
         model=env.get("XG_MODEL", "gpt-4o-mini"),
         context_window=128_000,
     )
@@ -50,7 +50,7 @@ def run_cmd(agent, settings, manager, raw: str) -> str:
 
 class TestModelCommand:
     def test_list(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/model")
         assert "当前: openai / gpt-4o-mini" in output
         assert "deepseek" in output
@@ -58,7 +58,7 @@ class TestModelCommand:
 
     def test_switch_provider(self, tmp_path):
         agent, settings, manager = make_context(
-            tmp_path, {"XG_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
         )
         output = run_cmd(agent, settings, manager, "/model deepseek")
         assert "已切换: DeepSeek / deepseek-chat" in output
@@ -73,7 +73,7 @@ class TestModelCommand:
 
     def test_switch_provider_with_model(self, tmp_path):
         agent, settings, manager = make_context(
-            tmp_path, {"XG_API_KEY": "k", "XG_GLM_API_KEY": "gk"}
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_GLM_API_KEY": "gk"}
         )
         output = run_cmd(agent, settings, manager, "/model glm/glm-4-plus")
         assert "已切换: GLM / glm-4-plus" in output
@@ -83,7 +83,7 @@ class TestModelCommand:
         agent, settings, manager = make_context(
             tmp_path,
             {
-                "XG_API_KEY": "k",
+                "XG_OPENAI_API_KEY": "k",
                 "XG_DEEPSEEK_API_KEY": "dk",
                 "XG_DEEPSEEK_API_BASE": "https://my-proxy.test/v1",
             },
@@ -94,20 +94,19 @@ class TestModelCommand:
         assert agent.llm.api_base == "https://my-proxy.test/v1"  # type: ignore[attr-defined]
 
     def test_switch_model_within_provider(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/model gpt-4o")
         assert "已切换: OpenAI / gpt-4o" in output
         assert settings.model == "gpt-4o"
 
-    def test_switch_uses_universal_key_fallback(self, tmp_path):
-        """未配专属 Key 时，通用 XG_API_KEY 兜底允许切换。"""
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+    def test_switch_requires_specific_key(self, tmp_path):
+        """无通用兜底：目标 provider 未配专属 Key 时拒绝切换。"""
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "已切换: DeepSeek / deepseek-chat" in output
-        assert settings.provider == "deepseek"
-        assert settings.api_key == "k"
-        # llm 已重建为真实 OpenAICompatClient（走 deepseek base）
-        assert agent.llm.api_base == "https://api.deepseek.com/v1"  # type: ignore[attr-defined]
+        assert "缺少 XG_DEEPSEEK_API_KEY" in output
+        assert settings.provider == "openai"
+        assert isinstance(agent.llm, DummyClient)
+        assert not (tmp_path / "user_xg" / "config.json").exists()
 
     def test_switch_without_any_key_rejected(self, tmp_path):
         """完全没有 Key 时拒绝切换。"""
@@ -120,7 +119,7 @@ class TestModelCommand:
 
     def test_unknown_token_treated_as_model_name(self, tmp_path):
         """不在 provider 列表中的参数，按当前 provider 内切换模型处理。"""
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/model my-fancy-model")
         assert "已切换: OpenAI / my-fancy-model" in output
         assert settings.model == "my-fancy-model"
@@ -139,13 +138,13 @@ class TestModelCommand:
 
 class TestConfigCommand:
     def test_overview_masks_key(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "sk-abcdef"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "sk-abcdef"})
         output = run_cmd(agent, settings, manager, "/config")
         assert "api_key:  sk-a****" in output
         assert "sk-abcdef" not in output
 
     def test_list(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/config list")
         assert "openai" in output
         assert "deepseek" in output
@@ -153,46 +152,46 @@ class TestConfigCommand:
         assert "kimi" in output
 
     def test_get(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         manager.set_config_value("providers.deepseek.default_model", "deepseek-reasoner")
         output = run_cmd(agent, settings, manager, "/config get providers.deepseek.default_model")
         assert "deepseek-reasoner" in output
 
     def test_set_active_provider_switches(self, tmp_path):
         agent, settings, manager = make_context(
-            tmp_path, {"XG_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
         )
         output = run_cmd(agent, settings, manager, "/config set active_provider deepseek")
         assert "已切换: DeepSeek" in output
         assert settings.provider == "deepseek"
 
     def test_set_active_model(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/config set active_model gpt-4o")
         assert "已切换: OpenAI / gpt-4o" in output
         cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
         assert cfg["active_model"] == "gpt-4o"
 
     def test_set_other_key_persists(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/config set providers.openai.default_model gpt-4o")
         assert "已设置 providers.openai.default_model = gpt-4o" in output
 
 
 class TestOtherCommands:
     def test_unknown_command(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         message, should_exit = _handle_command(agent, settings, manager, "/foo")
         assert "未知命令" in message
         assert not should_exit
 
     def test_exit(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         _, should_exit = _handle_command(agent, settings, manager, "/exit")
         assert should_exit
 
     def test_clear(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         message, should_exit = _handle_command(agent, settings, manager, "/clear")
         assert "已清空" in message
         assert len(agent.messages) == 1

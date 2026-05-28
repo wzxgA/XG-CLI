@@ -36,7 +36,7 @@ class TestLegacyEnv:
     def test_implicit_openai_provider(self, tmp_path):
         manager = make_manager(
             tmp_path,
-            env={"XG_API_BASE": "https://legacy.test/v1", "XG_API_KEY": "k-123", "XG_MODEL": "old-model"},
+            env={"XG_API_BASE": "https://legacy.test/v1", "XG_OPENAI_API_KEY": "k-123", "XG_MODEL": "old-model"},
         )
         active = manager.active()
         assert active.provider_name == "openai"
@@ -66,18 +66,43 @@ class TestProviderKeyEnv:
         assert active.api_base == "https://api.deepseek.com/v1"
         assert active.model == "deepseek-chat"
 
-    def test_legacy_key_universal_fallback(self, tmp_path):
-        """XG_API_KEY 作为任意 provider 的通用兜底 Key。"""
+    def test_no_generic_fallback(self, tmp_path):
+        """无通用兜底：provider 未配专属 Key 时即为空。"""
         manager = make_manager(
             tmp_path,
             env={"XG_API_KEY": "legacy-key"},
             user_cfg={"active_provider": "glm"},
         )
-        assert manager.active().api_key == "legacy-key"
+        assert manager.active().api_key == ""
 
-    def test_openai_uses_legacy_key(self, tmp_path):
+    def test_openai_requires_specific_key(self, tmp_path):
         manager = make_manager(tmp_path, env={"XG_API_KEY": "legacy-key"})
-        assert manager.active().api_key == "legacy-key"
+        assert manager.active().api_key == ""
+
+
+class TestPlaceholderKeys:
+    """占位值（sk-xxx）应视为未配置，避免被当真实 key 使用（401 陷阱）。"""
+
+    def test_placeholder_specific_means_no_key(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "deepseek", "XG_DEEPSEEK_API_KEY": "sk-xxx"},
+        )
+        assert manager.active().api_key == ""
+
+    def test_real_specific_key_wins(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "deepseek", "XG_DEEPSEEK_API_KEY": "sk-real-dk"},
+        )
+        assert manager.active().api_key == "sk-real-dk"
+
+    def test_missing_specific_means_no_key(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "deepseek", "XG_API_KEY": "sk-real"},
+        )
+        assert manager.active().api_key == ""
 
 
 class TestEnvProviderSelection:
@@ -93,10 +118,10 @@ class TestEnvProviderSelection:
         assert active.api_base == "https://api.deepseek.com/v1"
         assert active.api_key == "dk"
 
-    def test_env_provider_with_legacy_key(self, tmp_path):
+    def test_env_provider_with_specific_key(self, tmp_path):
         manager = make_manager(
             tmp_path,
-            env={"XG_PROVIDER": "glm", "XG_API_KEY": "gk"},
+            env={"XG_PROVIDER": "glm", "XG_GLM_API_KEY": "gk"},
         )
         active = manager.active()
         assert active.provider_name == "glm"

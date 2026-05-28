@@ -94,7 +94,7 @@ class TestErrors:
             await collect(client, [Message(role="user", content="hi")])
 
     async def test_missing_config_raises(self):
-        with pytest.raises(LlmError, match="XG_API_BASE"):
+        with pytest.raises(LlmError, match="XG_<PROVIDER>_API_BASE"):
             OpenAICompatClient("", "", "m")
 
 

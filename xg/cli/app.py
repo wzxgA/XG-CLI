@@ -161,7 +161,7 @@ def _switch(
     key = manager.resolve_api_key(provider)
     if not key:
         return (
-            f"缺少 {provider.api_key_env}（或 XG_API_KEY）配置，无法切换到 {provider.name}。"
+            f"缺少 {provider.api_key_env} 配置，无法切换到 {provider.name}。"
             f"请在 .env / 环境变量中配置。"
         )
     model = model or provider.default_model

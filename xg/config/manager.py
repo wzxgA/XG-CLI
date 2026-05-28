@@ -40,6 +40,19 @@ def mask_key(key: str) -> str:
     return f"{key[:4]}****" if len(key) > 4 else "****"
 
 
+_PLACEHOLDER_EXACT = {"sk-xxx", "xxx", "your-api-key", "api-key", "changeme", "placeholder", "sk-xxx-xxx"}
+
+
+def _is_placeholder(value: str) -> bool:
+    """判断是否为占位值（如 sk-xxx / xxx）。占位值视为未配置。"""
+    v = value.strip().lower()
+    if not v:
+        return True
+    if v in _PLACEHOLDER_EXACT:
+        return True
+    return v.startswith("sk-xxx") or v.startswith("xxx")
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """递归合并两个 dict，override 按名覆盖 base。"""
     result = dict(base)
@@ -165,11 +178,14 @@ class ConfigManager:
         return env_base or provider.api_base
 
     def resolve_api_key(self, provider: Provider) -> str:
-        """API Key 读取链：provider.api_key_env → 通用兜底 XG_API_KEY。"""
-        value = self.env.get(provider.api_key_env)
-        if value:
+        """API Key：仅使用专属 XG_<NAME>_API_KEY，不设通用兜底。
+
+        占位值（如 sk-xxx / xxx）视为未配置，避免占位符被当真实 key 使用。
+        """
+        value = self.env.get(provider.api_key_env, "")
+        if not _is_placeholder(value):
             return value
-        return self.env.get("XG_API_KEY", "")
+        return ""
 
     def resolve_window(self, provider: Provider) -> int:
         """上下文窗口：XG_CONTEXT_WINDOW 环境变量 > provider 能力。"""

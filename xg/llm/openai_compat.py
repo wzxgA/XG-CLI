@@ -25,7 +25,7 @@ class OpenAICompatClient(LlmClient):
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         if not api_base or not api_key:
-            raise LlmError("缺少 API 配置：请设置 XG_API_BASE / XG_API_KEY（见 .env.example）")
+            raise LlmError("缺少 API 配置：请设置 XG_<PROVIDER>_API_BASE / XG_<PROVIDER>_API_KEY（见 .env.example）")
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.model = model

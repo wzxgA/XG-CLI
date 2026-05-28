@@ -18,12 +18,11 @@ cp .env.example .env
 uv run xg
 ```
 
-`.env` 最小配置（单 provider）：
+`.env` 最小配置（单 provider，openai 为默认 provider）：
 
 ```
-XG_API_BASE=https://api.openai.com/v1   # 任意 OpenAI 兼容服务
-XG_API_KEY=sk-xxx
-XG_MODEL=gpt-4o-mini
+XG_OPENAI_API_KEY=sk-xxx       # 至少配置一个 provider 的专属 Key
+XG_MODEL=gpt-4o-mini           # 可选
 ```
 
 ## 多 provider
@@ -42,7 +41,7 @@ XG_KIMI_API_BASE=https://api.moonshot.cn/v1
 XG_KIMI_API_KEY=sk-xxx
 ```
 
-Key 读取优先级：专属 `XG_<NAME>_API_KEY` > 通用 `XG_API_KEY`。URL 优先级：专属 `XG_<NAME>_API_BASE` > 配置文件/内置预设（`XG_API_BASE` 仅对 openai 兼容生效）。
+Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（无通用兜底），占位值（`sk-xxx`）会被忽略。URL 优先级：专属 `XG_<NAME>_API_BASE` > 配置文件/内置预设（`XG_API_BASE` 仅对 openai 兼容生效）。
 
 启动后运行时切换（无需重启）：
 
@@ -79,9 +78,8 @@ Key 读取优先级：专属 `XG_<NAME>_API_KEY` > 通用 `XG_API_KEY`。URL 优
 |----------|------|
 | `XG_PROVIDER` | 激活的 provider（openai / deepseek / glm / kimi 或自定义），优先于配置文件 |
 | `XG_<NAME>_API_BASE` | 各 provider 专属 URL，如 `XG_DEEPSEEK_API_BASE` |
-| `XG_<NAME>_API_KEY` | 各 provider 专属 Key，如 `XG_DEEPSEEK_API_KEY` |
+| `XG_<NAME>_API_KEY` | 各 provider 专属 Key（必配，无通用兜底），如 `XG_DEEPSEEK_API_KEY` |
 | `XG_API_BASE` | 旧键兼容，仅对 openai 生效 |
-| `XG_API_KEY` | 通用 Key（任意 provider 未配专属 Key 时的兜底） |
 | `XG_MODEL` | 默认模型（未配置 active_model 时生效） |
 | `XG_CONTEXT_WINDOW` | 上下文窗口（token），覆盖 provider 能力声明 |
 | `XG_TOOL_STEPS` | 单轮工具调用步数上限（默认 20） |
