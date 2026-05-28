@@ -79,18 +79,42 @@ class TestModelCommand:
         assert "已切换: GLM / glm-4-plus" in output
         assert agent.llm.model == "glm-4-plus"  # type: ignore[attr-defined]
 
+    def test_switch_respects_per_provider_url(self, tmp_path):
+        agent, settings, manager = make_context(
+            tmp_path,
+            {
+                "XG_API_KEY": "k",
+                "XG_DEEPSEEK_API_KEY": "dk",
+                "XG_DEEPSEEK_API_BASE": "https://my-proxy.test/v1",
+            },
+        )
+        output = run_cmd(agent, settings, manager, "/model deepseek")
+        assert "已切换: DeepSeek / deepseek-chat" in output
+        assert settings.api_base == "https://my-proxy.test/v1"
+        assert agent.llm.api_base == "https://my-proxy.test/v1"  # type: ignore[attr-defined]
+
     def test_switch_model_within_provider(self, tmp_path):
         agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/model gpt-4o")
         assert "已切换: OpenAI / gpt-4o" in output
         assert settings.model == "gpt-4o"
 
-    def test_switch_without_key_rejected(self, tmp_path):
+    def test_switch_uses_universal_key_fallback(self, tmp_path):
+        """未配专属 Key 时，通用 XG_API_KEY 兜底允许切换。"""
         agent, settings, manager = make_context(tmp_path, {"XG_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "缺少 XG_DEEPSEEK_API_KEY" in output
+        assert "已切换: DeepSeek / deepseek-chat" in output
+        assert settings.provider == "deepseek"
+        assert settings.api_key == "k"
+        # llm 已重建为真实 OpenAICompatClient（走 deepseek base）
+        assert agent.llm.api_base == "https://api.deepseek.com/v1"  # type: ignore[attr-defined]
+
+    def test_switch_without_any_key_rejected(self, tmp_path):
+        """完全没有 Key 时拒绝切换。"""
+        agent, settings, manager = make_context(tmp_path, {})
+        output = run_cmd(agent, settings, manager, "/model deepseek")
+        assert "缺少" in output
         assert settings.provider == "openai"
-        # llm 未被替换，仍是原 DummyClient
         assert isinstance(agent.llm, DummyClient)
         assert not (tmp_path / "user_xg" / "config.json").exists()
 

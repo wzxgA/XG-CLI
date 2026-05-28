@@ -76,18 +76,13 @@ async def test_same_task_on_two_providers(tmp_path):
     respx.post(f"{BASE_B}/chat/completions").mock(side_effect=handler_b)
 
     from xg.llm.factory import create_client
-    from xg.config.providers import Provider
 
-    for base, key, model, name in (
-        (BASE_A, "ka", "gpt-4o-mini", "openai"),
-        (BASE_B, "kb", "deepseek-chat", "deepseek"),
+    for base, key, model in (
+        (BASE_A, "ka", "gpt-4o-mini"),
+        (BASE_B, "kb", "deepseek-chat"),
     ):
-        provider = Provider(
-            name=name, display_name=name, api_base=base, api_key_env="X", default_model=model,
-            context_window=128_000,
-        )
-        settings = Settings(provider=name, api_base=base, api_key=key, model=model, context_window=128_000)
-        agent = ReActAgent(llm=create_client(provider, key, model), tools=build_registry(base_dir=tmp_path), settings=settings)
+        settings = Settings(provider="x", api_base=base, api_key=key, model=model, context_window=128_000)
+        agent = ReActAgent(llm=create_client(base, key, model), tools=build_registry(base_dir=tmp_path), settings=settings)
 
         events = [e async for e in agent.run("写一个文件")]
         assert events[-1].kind == "done"
@@ -121,7 +116,6 @@ async def test_switch_mid_conversation_preserves_history(tmp_path):
     respx.post(f"{BASE_A}/chat/completions").mock(side_effect=handler_a)
     respx.post(f"{BASE_B}/chat/completions").mock(side_effect=handler_b)
 
-    from xg.config.providers import Provider
     from xg.llm.factory import create_client
 
     env = {"XG_API_KEY": "ka", "XG_DEEPSEEK_API_KEY": "kb"}
@@ -129,9 +123,8 @@ async def test_switch_mid_conversation_preserves_history(tmp_path):
     settings = Settings(
         provider="openai", api_base=BASE_A, api_key="ka", model="gpt-4o-mini", context_window=128_000
     )
-    provider = Provider("openai", "OpenAI", BASE_A, "XG_OPENAI_API_KEY", "gpt-4o-mini", 128_000)
     agent = ReActAgent(
-        llm=create_client(provider, "ka", "gpt-4o-mini"),
+        llm=create_client(BASE_A, "ka", "gpt-4o-mini"),
         tools=build_registry(base_dir=tmp_path),
         settings=settings,
     )

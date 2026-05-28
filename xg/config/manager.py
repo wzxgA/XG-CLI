@@ -157,17 +157,19 @@ class ConfigManager:
     def list_providers(self) -> list[Provider]:
         return [p for name in self.provider_names() if (p := self.resolve_provider(name))]
 
-    def resolve_api_key(self, provider: Provider) -> str:
-        """API Key 读取链：provider.api_key_env → （仅隐式 openai）兼容旧键 XG_API_KEY。
+    def resolve_api_base(self, provider: Provider) -> str:
+        """URL 读取链：XG_<NAME>_API_BASE 环境变量 > 配置文件/预设 > （openai）兼容旧键 XG_API_BASE。"""
+        env_base = self.env.get(f"XG_{provider.name.upper()}_API_BASE")
+        if not env_base and provider.name == "openai":
+            env_base = self.env.get("XG_API_BASE")
+        return env_base or provider.api_base
 
-        避免把 XG_API_KEY（如 OpenAI 的 key）误发给其他 provider。
-        """
+    def resolve_api_key(self, provider: Provider) -> str:
+        """API Key 读取链：provider.api_key_env → 通用兜底 XG_API_KEY。"""
         value = self.env.get(provider.api_key_env)
         if value:
             return value
-        if provider.name == "openai":
-            return self.env.get("XG_API_KEY", "")
-        return ""
+        return self.env.get("XG_API_KEY", "")
 
     def resolve_window(self, provider: Provider) -> int:
         """上下文窗口：XG_CONTEXT_WINDOW 环境变量 > provider 能力。"""
@@ -181,7 +183,8 @@ class ConfigManager:
 
     def active(self) -> ActiveConfig:
         merged = self._merged_config()
-        provider_name = str(merged.get("active_provider", "") or "openai")
+        # 激活 provider：环境变量 XG_PROVIDER > 配置文件 active_provider > 默认 openai
+        provider_name = self.env.get("XG_PROVIDER", "") or str(merged.get("active_provider", "") or "") or "openai"
         provider = self.resolve_provider(provider_name) or self.registry.get("openai")
         if provider is None:
             provider = self.registry.all()[0]
@@ -193,10 +196,8 @@ class ConfigManager:
             or self.env.get("XG_MODEL", "")
             or provider.default_model
         )
-        # base url：仅隐式 provider（openai）允许 XG_API_BASE 覆盖，避免误伤其他 provider
-        api_base = provider.api_base
-        if provider.name == "openai" and self.env.get("XG_API_BASE"):
-            api_base = self.env["XG_API_BASE"]
+        # base url：专属环境变量 > 配置文件/预设；旧键 XG_API_BASE 仅兜底 openai
+        api_base = self.resolve_api_base(provider)
 
         return ActiveConfig(
             provider_name=provider.name,

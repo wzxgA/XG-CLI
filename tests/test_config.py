@@ -66,18 +66,45 @@ class TestProviderKeyEnv:
         assert active.api_base == "https://api.deepseek.com/v1"
         assert active.model == "deepseek-chat"
 
-    def test_legacy_key_only_for_openai(self, tmp_path):
-        """XG_API_KEY 只兜底 openai；其他 provider 需专属 key。"""
+    def test_legacy_key_universal_fallback(self, tmp_path):
+        """XG_API_KEY 作为任意 provider 的通用兜底 Key。"""
         manager = make_manager(
             tmp_path,
             env={"XG_API_KEY": "legacy-key"},
             user_cfg={"active_provider": "glm"},
         )
-        assert manager.active().api_key == ""
+        assert manager.active().api_key == "legacy-key"
 
     def test_openai_uses_legacy_key(self, tmp_path):
         manager = make_manager(tmp_path, env={"XG_API_KEY": "legacy-key"})
         assert manager.active().api_key == "legacy-key"
+
+
+class TestEnvProviderSelection:
+    def test_env_provider_wins(self, tmp_path):
+        """XG_PROVIDER 环境变量选择激活 provider，优先于配置文件。"""
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "deepseek", "XG_DEEPSEEK_API_KEY": "dk"},
+            user_cfg={"active_provider": "glm"},
+        )
+        active = manager.active()
+        assert active.provider_name == "deepseek"
+        assert active.api_base == "https://api.deepseek.com/v1"
+        assert active.api_key == "dk"
+
+    def test_env_provider_with_legacy_key(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "glm", "XG_API_KEY": "gk"},
+        )
+        active = manager.active()
+        assert active.provider_name == "glm"
+        assert active.api_key == "gk"
+
+    def test_env_provider_unknown_falls_back(self, tmp_path):
+        manager = make_manager(tmp_path, env={"XG_PROVIDER": "nope", "XG_API_KEY": "k"})
+        assert manager.active().provider_name == "openai"
 
 
 class TestMergePriority:
@@ -120,6 +147,40 @@ class TestMergePriority:
             user_cfg={"active_provider": "deepseek"},
         )
         assert manager.active().api_base == "https://api.deepseek.com/v1"
+
+
+class TestPerProviderUrl:
+    def test_deepseek_url_env_override(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "deepseek", "XG_DEEPSEEK_API_KEY": "dk",
+                 "XG_DEEPSEEK_API_BASE": "https://my-deepseek-proxy.test/v1"},
+        )
+        assert manager.active().api_base == "https://my-deepseek-proxy.test/v1"
+
+    def test_openai_specific_url_beats_legacy(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_API_KEY": "k", "XG_API_BASE": "https://legacy.test/v1",
+                 "XG_OPENAI_API_BASE": "https://openai-proxy.test/v1"},
+        )
+        assert manager.active().api_base == "https://openai-proxy.test/v1"
+
+    def test_url_env_wins_over_config_file(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "glm", "XG_GLM_API_KEY": "gk",
+                 "XG_GLM_API_BASE": "https://env.test/v1"},
+            user_cfg={"providers": {"glm": {"api_base": "https://config.test/v1"}}},
+        )
+        assert manager.active().api_base == "https://env.test/v1"
+
+    def test_no_url_env_uses_preset(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "kimi", "XG_KIMI_API_KEY": "kk"},
+        )
+        assert manager.active().api_base == "https://api.moonshot.cn/v1"
 
     def test_window_env_override(self, tmp_path):
         manager = make_manager(

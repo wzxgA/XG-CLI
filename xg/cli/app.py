@@ -15,7 +15,6 @@ from rich.text import Text
 
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.config.manager import ConfigManager, mask_key
-from xg.config.providers import Provider
 from xg.config.settings import Settings, load_settings
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
@@ -30,15 +29,7 @@ BANNER = """\
 
 
 def build_agent(settings: Settings, base_dir=None) -> ReActAgent:
-    provider = Provider(
-        name=settings.provider or "openai",
-        display_name=settings.provider or "OpenAI",
-        api_base=settings.api_base,
-        api_key_env="",
-        default_model=settings.model,
-        context_window=settings.context_window,
-    )
-    client = create_client(provider, settings.api_key, settings.model)
+    client = create_client(settings.api_base, settings.api_key, settings.model)
     tools = build_registry(base_dir=base_dir, max_output_chars=settings.max_tool_output_chars)
     return ReActAgent(llm=client, tools=tools, settings=settings)
 
@@ -175,12 +166,13 @@ def _switch(
         )
     model = model or provider.default_model
 
+    api_base = manager.resolve_api_base(provider)
     settings.provider = provider.name
     settings.model = model
-    settings.api_base = provider.api_base
+    settings.api_base = api_base
     settings.api_key = key
     settings.context_window = manager.resolve_window(provider)
-    agent.llm = create_client(provider, key, model)
+    agent.llm = create_client(api_base, key, model)
     manager.set_active(provider.name, model)
     return f"已切换: {provider.display_name} / {model}"
 
