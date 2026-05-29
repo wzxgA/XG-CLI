@@ -25,6 +25,12 @@ class Settings:
     budget_ratio: float = 0.8
     # 工具输出超出该字符数则截断，防止撑爆上下文
     max_tool_output_chars: int = 20_000
+    # 并行工具执行并发数（第 3 期）
+    max_parallel: int = 4
+    # 单工具执行超时（秒，第 3 期）
+    tool_timeout: float = 120.0
+    # HITL 审批默认开启（第 3 期）
+    hitl: bool = True
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -51,7 +57,18 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         model=active.model,
         context_window=active.context_window,
         tool_steps=_get_int(manager.env, "XG_TOOL_STEPS", 20),
+        max_parallel=_get_int(manager.env, "XG_MAX_PARALLEL", 4),
+        tool_timeout=_get_float(manager.env, "XG_TOOL_TIMEOUT", 120.0),
+        hitl=manager.env.get("XG_HITL", "on").lower() not in ("off", "0", "false"),
     )
+
+
+def _get_float(env: dict[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "")
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
 
 
 def _get_int(env: dict[str, str], name: str, default: int) -> int:

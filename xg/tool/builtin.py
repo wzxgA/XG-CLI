@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import glob as globlib
-import json
 import re
 import subprocess
-from datetime import datetime
 from pathlib import Path
 
 from xg.llm.types import ToolResult
@@ -19,12 +17,16 @@ IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".pytest
 DEFAULT_TIMEOUT = 60
 MAX_GREP_RESULTS = 200
 MAX_LIST_ENTRIES = 500
-AUDIT_LOG = ".xg/audit.log"
 
 
-def build_registry(base_dir: Path | None = None, max_output_chars: int = 20_000) -> ToolRegistry:
+def build_registry(
+    base_dir: Path | None = None,
+    max_output_chars: int = 20_000,
+    guard=None,
+    audit=None,
+) -> ToolRegistry:
     base = (base_dir or Path.cwd()).resolve()
-    registry = ToolRegistry(max_output_chars=max_output_chars)
+    registry = ToolRegistry(max_output_chars=max_output_chars, guard=guard, audit=audit)
     for tool in _tools(base):
         registry.register(tool)
     return registry
@@ -262,8 +264,6 @@ def _execute_command(base: Path, args: dict) -> ToolResult:
         output_parts.append(f"[stderr]\n{stderr}")
     output = "\n".join(output_parts) or "(无输出)"
 
-    _audit(base, command, proc.returncode, output)
-
     if proc.returncode != 0:
         return ToolResult(
             tool_call_id="", name="execute_command", ok=False,
@@ -280,20 +280,3 @@ def _decode(data: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return data.decode("utf-8", errors="replace")
-
-
-def _audit(base: Path, command: str, returncode: int, output: str) -> None:
-    """命令执行记录到 .xg/audit.log（JSONL）。失败不影响工具结果。"""
-    try:
-        log_dir = base / ".xg"
-        log_dir.mkdir(exist_ok=True)
-        record = {
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "command": command,
-            "returncode": returncode,
-            "output": output[:2000],
-        }
-        with (log_dir / "audit.log").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass

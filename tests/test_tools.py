@@ -99,12 +99,18 @@ class TestExecuteCommand:
         assert not result.ok
         assert "退出码 3" in result.error
 
-    def test_writes_audit_log(self, registry, tmp_project):
-        registry.execute("execute_command", {"command": "echo audit_me"})
+    def test_writes_audit_log(self, tmp_project):
+        from xg.safety.audit import AuditLogger
+        from xg.tool.builtin import build_registry
+
+        audit = AuditLogger(tmp_project / ".xg" / "audit.log")
+        reg = build_registry(base_dir=tmp_project, audit=audit)
+        reg.execute("execute_command", {"command": "echo audit_me"})
         log = tmp_project / ".xg" / "audit.log"
         assert log.is_file()
         record = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[-1])
-        assert record["command"] == "echo audit_me"
+        assert record["action"] == "tool_call"
+        assert record["tool"] == "execute_command"
 
     def test_timeout(self, registry):
         result = registry.execute(

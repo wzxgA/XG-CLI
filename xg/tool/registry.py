@@ -1,15 +1,21 @@
 """ToolRegistry：工具注册、schema 导出、按原始 tool_call 顺序执行。
 
-第 1 期为顺序执行的简单注册表；并行执行在第 3 期引入。
+- execute_calls：同步顺序执行（兼容旧调用）
+- aexecute_calls：asyncio 并行执行（第 3 期），默认 4 并发，统一超时/取消兜底，结果保序
+- 可选接入策略层（guard）与审计（audit），策略层拒绝为终审
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from xg.llm.types import ToolCall, ToolResult
+
+GuardFn = Callable[[str, dict], Any]  # (tool_name, args) -> GuardResult
 
 
 @dataclass
@@ -21,9 +27,16 @@ class Tool:
 
 
 class ToolRegistry:
-    def __init__(self, max_output_chars: int = 20_000) -> None:
+    def __init__(
+        self,
+        max_output_chars: int = 20_000,
+        guard: GuardFn | None = None,
+        audit=None,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
         self.max_output_chars = max_output_chars
+        self.guard = guard
+        self.audit = audit
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -46,12 +59,24 @@ class ToolRegistry:
         ]
 
     def execute(self, name: str, args: dict) -> ToolResult:
+        """策略校验 → 工具查找 → 执行 → 审计。"""
+        if self.guard is not None:
+            verdict = self.guard(name, args)
+            if not getattr(verdict, "ok", True):
+                if self.audit is not None:
+                    self.audit.blocked(reason=verdict.reason, tool=name, args=args)
+                return ToolResult(
+                    tool_call_id="", name=name, ok=False,
+                    error=f"策略拒绝（{verdict.reason}）: {verdict.detail}",
+                )
+
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(
                 tool_call_id="", name=name, ok=False,
                 error=f"未知工具: {name}，可用工具: {', '.join(self._tools)}",
             )
+        started = time.monotonic()
         try:
             result = tool.handler(args)
         except Exception as e:  # 工具内部异常统一转为 error 回灌
@@ -60,6 +85,13 @@ class ToolRegistry:
             result.output = (
                 result.output[: self.max_output_chars]
                 + f"\n... (输出已截断，原始长度 {len(result.output)} 字符)"
+            )
+        if self.audit is not None:
+            self.audit.tool_call(
+                tool=name,
+                args=args,
+                ok=result.ok,
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
         return result
 
@@ -70,4 +102,35 @@ class ToolRegistry:
             result = self.execute(call.name, call.parsed_arguments())
             result.tool_call_id = call.id
             results.append(result)
+        return results
+
+    async def aexecute_calls(
+        self,
+        calls: list[ToolCall],
+        concurrency: int = 4,
+        timeout: float = 120.0,
+    ) -> list[ToolResult]:
+        """asyncio 并行执行，结果按原始顺序返回（gather 天然保序）。"""
+        sem = asyncio.Semaphore(concurrency)
+
+        async def run(call: ToolCall) -> ToolResult:
+            async with sem:
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(self.execute, call.name, call.parsed_arguments()),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    return ToolResult(
+                        tool_call_id=call.id, name=call.name, ok=False,
+                        error=f"工具超时（{timeout}s）",
+                    )
+                except asyncio.CancelledError:
+                    return ToolResult(
+                        tool_call_id=call.id, name=call.name, ok=False, error="已取消"
+                    )
+
+        results = await asyncio.gather(*(run(c) for c in calls))
+        for call, result in zip(calls, results):
+            result.tool_call_id = call.id
         return results

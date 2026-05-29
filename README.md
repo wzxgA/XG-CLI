@@ -67,10 +67,19 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `/config list` | provider 能力表 |
 | `/config get <key>` | 查看配置项 |
 | `/config set <key> <value>` | 设置并持久化到 `~/.xg/config.json` |
+| `/hitl` | 查看 HITL 审批状态 |
+| `/hitl on\|off` | 开启 / 关闭危险操作审批 |
 | `/clear` | 清空当前对话上下文 |
 | `/exit` | 退出 |
 
-内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command`。命令执行记录写入 `.xg/audit.log`。
+## 安全机制（第 3 期）
+
+- **并行执行**：模型一轮返回多个工具调用时并行执行（默认 4 并发），结果按原始顺序回灌
+- **HITL 审批**：危险操作（默认 `execute_command` 必审、`write_file` 确认）执行前弹审批：`Enter` 批准 / `a` 本会话全部放行 / `r` 拒绝 / `s` 跳过 / `e` 改参后执行
+- **策略层**：路径越界（PathGuard，含 symlink 逃逸）与黑名单命令（CommandGuard）直接拒绝，**不可被审批绕过**
+- **审计日志**：所有工具调用/审批/拒绝记录到 `.xg/audit.log`（JSONL，敏感字段脱敏）
+
+内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command`。
 
 ## 配置项
 
@@ -83,6 +92,9 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `XG_MODEL` | 默认模型（未配置 active_model 时生效） |
 | `XG_CONTEXT_WINDOW` | 上下文窗口（token），覆盖 provider 能力声明 |
 | `XG_TOOL_STEPS` | 单轮工具调用步数上限（默认 20） |
+| `XG_MAX_PARALLEL` | 并行工具执行并发数（默认 4） |
+| `XG_TOOL_TIMEOUT` | 单工具执行超时秒数（默认 120） |
+| `XG_HITL` | 危险操作审批开关（on 默认 / off 危险模式） |
 
 API Key 只从环境变量 / .env 读取，不写入配置文件；`/config` 显示时脱敏。
 

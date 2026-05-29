@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -18,27 +20,97 @@ from xg.config.manager import ConfigManager, mask_key
 from xg.config.settings import Settings, load_settings
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
+from xg.safety.audit import AuditLogger
+from xg.safety.guards import guard_tool_call
+from xg.safety.hitl import ApprovalDecision, HITLPolicy
 from xg.tool.builtin import build_registry
 
 console = Console()
 
 BANNER = """\
 [XG] Agent CLI v0.1.0
-输入任务开始对话；/model 切换 provider 或模型，/config 查看/设置配置，/clear 清空上下文，/exit 退出。
+输入任务开始对话；/model 切换 provider 或模型，/config 查看/设置配置，
+/hitl 审批开关，/clear 清空上下文，/exit 退出。
 """
 
 
 def build_agent(settings: Settings, base_dir=None) -> ReActAgent:
+    base = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
     client = create_client(settings.api_base, settings.api_key, settings.model)
-    tools = build_registry(base_dir=base_dir, max_output_chars=settings.max_tool_output_chars)
-    return ReActAgent(llm=client, tools=tools, settings=settings)
+    audit = AuditLogger(base / ".xg" / "audit.log")
+    guard = lambda name, args: guard_tool_call(base, name, args)  # noqa: E731
+    tools = build_registry(
+        base_dir=base,
+        max_output_chars=settings.max_tool_output_chars,
+        guard=guard,
+        audit=audit,
+    )
+    hitl = HITLPolicy(enabled=settings.hitl)
+    return ReActAgent(
+        llm=client,
+        tools=tools,
+        settings=settings,
+        approval_policy=hitl,
+        audit=audit,
+    )
 
 
-async def handle_turn(agent: ReActAgent, user_input: str) -> None:
+class ApprovalUI:
+    """HITL 审批交互：绑定 Live 以暂停流式渲染，读取用户决策。"""
+
+    def __init__(self, session: PromptSession[str]) -> None:
+        self.session = session
+        self._live: Live | None = None
+
+    def bind_live(self, live: Live) -> None:
+        self._live = live
+
+    async def __call__(self, tool_name: str, level: str, args: dict) -> ApprovalDecision:
+        if self._live is not None:
+            self._live.stop()
+        console.print()
+        console.print(Panel(
+            Text(f"需要审批: {tool_name}（敏感度 {level}）\nargs: {json.dumps(args, ensure_ascii=False)}"),
+            style="yellow",
+        ))
+        decision = await self._read_choice(tool_name)
+        if self._live is not None:
+            self._live.start()
+        return decision
+
+    async def _read_choice(self, tool_name: str) -> ApprovalDecision:
+        while True:
+            answer = await self.session.prompt_async(
+                HTML("<ansiyellow>[HITL] 批准(Enter) 全部放行(a) 拒绝(r) 跳过(s) 改参(e) ></ansiyellow> ")
+            )
+            key = answer.strip().lower()
+            if key in ("", "y", "yes", "approve"):
+                return ApprovalDecision(allow=True, reason="user_approved")
+            if key == "a":
+                console.print(Text("本会话后续操作全部放行。", style="dim"))
+                return ApprovalDecision(allow=True, reason="user_approved_allow_all")
+            if key in ("r", "n", "no", "deny"):
+                return ApprovalDecision(allow=False, reason="user_rejected")
+            if key == "s":
+                return ApprovalDecision(allow=False, reason="user_skipped")
+            if key == "e":
+                raw = await self.session.prompt_async(HTML("<ansicyan>新参数 JSON ></ansicyan> "))
+                try:
+                    new_args = json.loads(raw.strip())
+                except json.JSONDecodeError:
+                    console.print(Text("JSON 解析失败，请重新输入。", style="red"))
+                    continue
+                return ApprovalDecision(allow=True, args=new_args, reason="user_modified")
+            console.print(Text("无效输入：Enter/a/r/s/e", style="yellow"))
+
+
+async def handle_turn(agent: ReActAgent, user_input: str, approval_ui: ApprovalUI | None = None) -> None:
     """执行一轮 ReAct 循环并渲染事件流。"""
     buffer = Text()
     with Live(console=console, vertical_overflow="visible", refresh_per_second=10) as live:
         live.update(Text(""))
+        if approval_ui is not None:
+            approval_ui.bind_live(live)
         async for event in agent.run(user_input):
             if event.kind == "content":
                 buffer.append(event.text)
@@ -47,6 +119,17 @@ async def handle_turn(agent: ReActAgent, user_input: str) -> None:
                 live.update(Text(""))
                 console.print(
                     Text(f"→ {event.tool_call.name}({event.tool_call.arguments})", style="dim cyan")
+                )
+                live.update(Text(""))
+            elif event.kind == "approval" and event.tool_call:
+                live.update(Text(""))
+                style = {
+                    "approved": "green",
+                    "modified": "yellow",
+                    "rejected": "red",
+                }.get(event.text, "yellow")
+                console.print(
+                    Text(f"  {event.text}: {event.tool_call.name}({event.tool_call.arguments})", style=style)
                 )
                 live.update(Text(""))
             elif event.kind == "tool_result" and event.tool_result:
@@ -74,6 +157,10 @@ async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager
     session: PromptSession[str] = PromptSession()
     console.print(Panel(BANNER, title="XG", border_style="cyan"))
 
+    approval_ui = ApprovalUI(session)
+    if agent.approval_policy is not None:
+        agent.approval_policy.requester = approval_ui
+
     while True:
         try:
             user_input = await session.prompt_async(HTML("<ansicyan>xg ></ansicyan> "))
@@ -94,7 +181,7 @@ async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager
             continue
 
         try:
-            await handle_turn(agent, user_input)
+            await handle_turn(agent, user_input, approval_ui)
         except KeyboardInterrupt:
             console.print(Text("（已中断本轮任务）", style="yellow"))
         except LlmError as e:
@@ -118,7 +205,29 @@ def _handle_command(
         return _cmd_model(agent, settings, manager, arg), False
     if cmd == "/config":
         return _cmd_config(agent, settings, manager, arg), False
-    return f"未知命令: {cmd}。可用: /model /config /clear /exit", False
+    if cmd == "/hitl":
+        return _cmd_hitl(agent, arg), False
+    return f"未知命令: {cmd}。可用: /model /config /hitl /clear /exit", False
+
+
+def _cmd_hitl(agent: ReActAgent, arg: str) -> str:
+    policy = getattr(agent, "approval_policy", None)
+    if policy is None:
+        return "HITL 未启用（未注入审批策略）"
+    sub = arg.split()[0].lower() if arg.split() else ""
+    if sub == "on":
+        policy.set_enabled(True)
+        return "HITL 已开启。"
+    if sub == "off":
+        policy.set_enabled(False)
+        policy.reset_session()
+        return "HITL 已关闭（危险模式，工具不再弹审批）。"
+    if sub == "reset":
+        policy.reset_session()
+        return "已清除「本会话全部放行」状态。"
+    status = "开启" if policy.enabled else "关闭"
+    allow_all = "是" if policy.session_allow_all else "否"
+    return f"HITL: {status}（本会话全部放行: {allow_all}）。用法: /hitl on|off|reset"
 
 
 def _cmd_model(
