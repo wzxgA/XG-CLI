@@ -31,6 +31,12 @@ class Settings:
     tool_timeout: float = 120.0
     # HITL 审批默认开启（第 3 期）
     hitl: bool = True
+    # 计划模式（第 4 期）：子任务数上限
+    plan_max_subtasks: int = 12
+    # 计划模式：每个子任务的最大工具步数
+    plan_subtask_steps: int = 10
+    # 计划模式：计划级允许的子任务失败数（超出终止剩余批次）
+    plan_max_failures: int = 3
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -60,6 +66,9 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         max_parallel=_get_int(manager.env, "XG_MAX_PARALLEL", 4),
         tool_timeout=_get_float(manager.env, "XG_TOOL_TIMEOUT", 120.0),
         hitl=manager.env.get("XG_HITL", "on").lower() not in ("off", "0", "false"),
+        plan_max_subtasks=_get_int(manager.env, "XG_PLAN_MAX_SUBTASKS", 12),
+        plan_subtask_steps=_get_int(manager.env, "XG_PLAN_SUBTASK_STEPS", 10),
+        plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
     )
 
 

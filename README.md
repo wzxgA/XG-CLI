@@ -1,6 +1,6 @@
 # XG-CLI
 
-Python Agent CLI 。终端交互的 Agent 命令行工具，ReAct 模式驱动，内置文件读写、代码搜索与命令执行工具。
+Python Agent CLI 。终端交互的 Agent 命令行工具，ReAct 直接执行 + `/plan` 计划模式（DAG 拆解、批次执行）双路径，内置文件读写、代码搜索与命令执行工具。
 
 
 ## 快速开始
@@ -62,6 +62,7 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 
 | 命令 | 说明 |
 |------|------|
+| `/plan <任务>` | 计划模式：先拆解为子任务 DAG，审阅后按批次执行（见下） |
 | `/model` | 切换 provider / 模型（见上） |
 | `/config` | 显示当前生效配置（Key 脱敏） |
 | `/config list` | provider 能力表 |
@@ -71,6 +72,18 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `/hitl on\|off` | 开启 / 关闭危险操作审批 |
 | `/clear` | 清空当前对话上下文 |
 | `/exit` | 退出 |
+
+## 计划模式（第 4 期）
+
+ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解为「子任务 + 依赖图」，经审阅后按依赖批次执行：
+
+1. **拆解**：LLM 独立调用生成结构化 JSON（子任务 + 依赖），自动校验与修复（JSON 解析失败带错误重试上限 2 次；未知依赖/自依赖自动移除；环检测；超上限截断）
+2. **批次生成**：Kahn 拓扑排序产出依赖批次，无依赖子任务同批并行
+3. **审阅**：渲染计划面板后交互决策——`Enter` 执行 / `d` 展开子任务详情 / `r` 输入补充要求重规划 / `ESC`（或 `c`）取消（不执行任何工具）
+4. **执行**：子任务以独立迷你 ReAct 循环执行（步数上限默认 10），依赖结果摘要注入下游上下文；子任务失败时错误注入依赖方让其自行调整，失败数超过上限（默认 3）终止剩余批次
+5. **汇总**：`plan_done` / `plan_failed` 面板展示各子任务状态与结果
+
+子任务执行复用第 3 期全部安全机制：并行工具、HITL 审批、策略层黑名单/路径越界拒绝、审计（含 `subtask_started` / `subtask_done` 事件）。
 
 ## 安全机制（第 3 期）
 
@@ -95,6 +108,9 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `XG_MAX_PARALLEL` | 并行工具执行并发数（默认 4） |
 | `XG_TOOL_TIMEOUT` | 单工具执行超时秒数（默认 120） |
 | `XG_HITL` | 危险操作审批开关（on 默认 / off 危险模式） |
+| `XG_PLAN_MAX_SUBTASKS` | 计划模式子任务数上限（默认 12，超出截断） |
+| `XG_PLAN_SUBTASK_STEPS` | 计划模式单个子任务最大工具步数（默认 10） |
+| `XG_PLAN_MAX_FAILURES` | 计划级允许失败数（默认 3，超出终止剩余批次） |
 
 API Key 只从环境变量 / .env 读取，不写入配置文件；`/config` 显示时脱敏。
 
@@ -106,4 +122,4 @@ uv run pytest                 # 全量测试
 uv run xg                     # 手工验收
 ```
 
-项目分层：`xg/agent`（ReAct 循环）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（工具注册表 + 内置工具）、`xg/cli`（交互层）、`xg/config`（provider 注册表 / 配置合并 / 运行时快照）。
+项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（工具注册表 + 内置工具）、`xg/cli`（交互层）、`xg/config`（provider 注册表 / 配置合并 / 运行时快照）。

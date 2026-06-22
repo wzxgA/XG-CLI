@@ -9,12 +9,15 @@ from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
+from xg.agent.plan import Plan, PlanEvent, PlanExecutor, PlanTask, ReviewDecision
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.config.manager import ConfigManager, mask_key
 from xg.config.settings import Settings, load_settings
@@ -29,8 +32,8 @@ console = Console()
 
 BANNER = """\
 [XG] Agent CLI v0.1.0
-输入任务开始对话；/model 切换 provider 或模型，/config 查看/设置配置，
-/hitl 审批开关，/clear 清空上下文，/exit 退出。
+输入任务开始对话；/plan 先拆解计划再执行，/model 切换 provider 或模型，
+/config 查看/设置配置，/hitl 审批开关，/clear 清空上下文，/exit 退出。
 """
 
 
@@ -64,6 +67,10 @@ class ApprovalUI:
 
     def bind_live(self, live: Live) -> None:
         self._live = live
+
+    def unbind_live(self) -> None:
+        """解绑 Live（进入 /plan 等无 Live 渲染的流程前调用，避免误停旧 Live）。"""
+        self._live = None
 
     async def __call__(self, tool_name: str, level: str, args: dict) -> ApprovalDecision:
         if self._live is not None:
@@ -153,6 +160,171 @@ async def handle_turn(agent: ReActAgent, user_input: str, approval_ui: ApprovalU
     console.print(Text(""))
 
 
+class PlanReviewUI:
+    """计划审阅交互：Enter 执行 / d 展开详情 / r 补充重规划 / ESC（或 c）取消。"""
+
+    def __init__(self, session: PromptSession[str]) -> None:
+        self.session = session
+
+    async def __call__(self, plan: Plan) -> ReviewDecision:
+        # 面板已由 plan_generated 事件渲染（含 warnings），这里只读决策，不重复打印
+        while True:
+            answer = (await self.session.prompt_async(
+                HTML("<ansiyellow>[plan] Enter 执行 / d 详情 / r 重规划 / ESC 取消 ></ansiyellow> "),
+                key_bindings=_escape_cancel_bindings(),
+            )).strip().lower()
+            if answer == "":
+                return ReviewDecision(action="execute")
+            if answer == "d":
+                _print_plan_details(plan)
+                continue
+            if answer == "r":
+                feedback = await self.session.prompt_async(
+                    HTML("<ansicyan>[plan] 补充要求（空行返回不重规划）></ansicyan> ")
+                )
+                feedback = feedback.strip()
+                if not feedback:
+                    continue
+                return ReviewDecision(action="replan", feedback=feedback)
+            if answer in ("c", "q", "esc"):
+                return ReviewDecision(action="cancel")
+            console.print(Text("无效输入：Enter 执行 / d 详情 / r 重规划 / ESC 取消", style="yellow"))
+
+
+def _escape_cancel_bindings() -> KeyBindings:
+    """ESC 直接提交为取消（保留 emacs 元前缀以外的行为）。"""
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    def _cancel(event) -> None:
+        event.app.current_buffer.text = "c"
+        event.app.current_buffer.validate_and_handle()
+
+    return kb
+
+
+def _print_plan_panel(plan: Plan, note: str = "") -> None:
+    table = Table.grid(padding=(0, 1))
+    table.add_column(style="cyan", justify="right", no_wrap=True)
+    table.add_column()
+    for i, batch in enumerate(plan.batches, 1):
+        table.add_row(f"批次 {i}", Text(", ".join(batch), style="bold"))
+        for tid in batch:
+            t = plan.task_by_id(tid)
+            assert t is not None
+            deps = f"（依赖 {', '.join(t.deps)}）" if t.deps else ""
+            table.add_row("", f"{t.id}  {t.title}{deps}")
+    lines = [table]
+    if note:
+        lines.append(Text(f"提示: {note}", style="yellow"))
+    console.print(Panel(*lines, title=f"计划: {plan.goal}", border_style="cyan"))
+
+
+def _print_plan_details(plan: Plan) -> None:
+    for i, batch in enumerate(plan.batches, 1):
+        console.print(Text(f"── 批次 {i}: {', '.join(batch)}", style="cyan"))
+        for tid in batch:
+            t = plan.task_by_id(tid)
+            assert t is not None
+            deps = f"（依赖 {', '.join(t.deps)}）" if t.deps else ""
+            console.print(Text(f"  {t.id} {t.title}{deps}", style="bold"))
+            console.print(Text(f"    {t.description}", style="dim"))
+
+
+def _print_plan_summary(plan: Plan) -> None:
+    table = Table.grid(padding=(0, 1))
+    table.add_column(style="cyan", no_wrap=True)
+    table.add_column(justify="center", no_wrap=True)
+    table.add_column()
+    status_style = {"done": "green", "failed": "red", "pending": "dim", "running": "yellow"}
+    for t in plan.tasks:
+        label = {"done": "done", "failed": "FAIL", "pending": "未执行"}.get(t.status, t.status)
+        table.add_row(t.id, Text(label, style=status_style.get(t.status, "dim")), t.title)
+        if t.result:
+            preview = t.result.strip().splitlines()[0] if t.result.strip() else ""
+            if len(preview) > 120:
+                preview = preview[:120] + " ..."
+            if preview:
+                table.add_row("", "", Text(preview, style="dim"))
+    console.print(Panel(table, title="plan_done", border_style="green"))
+
+
+def _render_plan_event(event: PlanEvent) -> None:
+    """渲染计划事件流（进度行 + 汇总面板）。"""
+    task = event.task
+    if event.kind == "plan_generated":
+        _print_plan_panel(event.plan, note=event.message)
+    elif event.kind == "review":
+        pass  # 审阅交互由 PlanReviewUI 负责
+    elif event.kind == "approved":
+        console.print(Text("计划已批准，开始执行。", style="green"))
+    elif event.kind == "cancelled":
+        msg = event.message or "用户取消"
+        console.print(Text(f"计划已取消: {msg}，未执行任何工具。", style="yellow"))
+    elif event.kind == "replanned":
+        console.print(Text(f"按反馈重新规划: {event.message}", style="dim"))
+    elif event.kind == "batch_started":
+        console.print(Text(f"── {event.message}: {', '.join(event.batch)}", style="cyan"))
+    elif event.kind == "subtask_started" and task:
+        console.print(Text(f"▶ {task.id} {task.title}", style="dim"))
+    elif event.kind == "subtask_event" and task and event.agent_event:
+        _render_subtask_event(task, event.agent_event)
+    elif event.kind == "subtask_done" and task:
+        preview = task.result.strip().splitlines()[0] if task.result.strip() else "(无输出)"
+        if len(preview) > 200:
+            preview = preview[:200] + " ..."
+        console.print(Text(f"OK {task.id} {task.title}: {preview}", style="green"))
+    elif event.kind == "subtask_failed" and task:
+        console.print(Text(f"FAIL {task.id} {task.title}: {task.result}", style="red"))
+    elif event.kind == "plan_done":
+        if event.plan is not None:
+            _print_plan_summary(event.plan)
+        console.print(Text(event.message, style="green"))
+    elif event.kind == "plan_failed":
+        console.print(Panel(Text(event.message), title="plan_failed", border_style="red"))
+
+
+def _render_subtask_event(task: PlanTask, ae: AgentEvent) -> None:
+    """渲染子任务内部转发的 AgentEvent（前缀子任务 id）。"""
+    prefix = f"  [{task.id}]"
+    if ae.kind == "tool_call" and ae.tool_call:
+        console.print(Text(f"{prefix} → {ae.tool_call.name}({ae.tool_call.arguments})", style="dim cyan"))
+    elif ae.kind == "approval" and ae.tool_call:
+        style = {"approved": "green", "modified": "yellow", "rejected": "red"}.get(ae.text, "yellow")
+        console.print(Text(f"{prefix} {ae.text}: {ae.tool_call.name}", style=style))
+    elif ae.kind == "tool_result" and ae.tool_result:
+        style = "green" if ae.tool_result.ok else "red"
+        preview = (ae.tool_result.output or ae.tool_result.error).strip()
+        if len(preview) > 200:
+            preview = preview[:200] + " ..."
+        console.print(Text(f"{prefix} {'OK' if ae.tool_result.ok else 'FAIL'}: {preview}", style=style))
+
+
+async def handle_plan_turn(
+    agent: ReActAgent,
+    settings: Settings,
+    goal: str,
+    session: PromptSession[str],
+    approval_ui: ApprovalUI | None = None,
+) -> None:
+    """执行 /plan 全流程并渲染事件流。"""
+    if approval_ui is not None:
+        approval_ui.unbind_live()  # 计划模式下无 Live，避免误停旧实例
+    executor = PlanExecutor(
+        llm=agent.llm,
+        tools=agent.tools,
+        settings=settings,
+        reviewer=PlanReviewUI(session),
+        approval_policy=agent.approval_policy,
+        audit=agent.audit,
+    )
+    try:
+        async for event in executor.run(goal):
+            _render_plan_event(event)
+    except LlmError as e:
+        console.print(Panel(Text(f"请求失败: {e}"), style="red"))
+
+
 async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager) -> None:
     session: PromptSession[str] = PromptSession()
     console.print(Panel(BANNER, title="XG", border_style="cyan"))
@@ -170,6 +342,17 @@ async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager
 
         user_input = user_input.strip()
         if not user_input:
+            continue
+
+        if user_input.startswith("/plan"):
+            goal = user_input[5:].strip()
+            if not goal:
+                console.print(Text("用法: /plan <任务描述>", style="yellow"))
+                continue
+            try:
+                await handle_plan_turn(agent, settings, goal, session, approval_ui)
+            except KeyboardInterrupt:
+                console.print(Text("（已中断计划执行）", style="yellow"))
             continue
 
         if user_input.startswith("/"):
@@ -207,7 +390,7 @@ def _handle_command(
         return _cmd_config(agent, settings, manager, arg), False
     if cmd == "/hitl":
         return _cmd_hitl(agent, arg), False
-    return f"未知命令: {cmd}。可用: /model /config /hitl /clear /exit", False
+    return f"未知命令: {cmd}。可用: /plan /model /config /hitl /clear /exit", False
 
 
 def _cmd_hitl(agent: ReActAgent, arg: str) -> str:
