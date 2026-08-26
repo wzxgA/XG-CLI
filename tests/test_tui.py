@@ -138,6 +138,8 @@ async def test_tui_pilot_layout_and_input(tmp_path):
     app = XgTuiApp(agent, settings, manager)
     async with app.run_test(size=(120, 30)) as pilot:
         assert app.query_one("#transcript")
+        assert app.query_one("#composer-area")
+        assert app.query_one("#composer-label").content == "输入"
         assert app.query_one("#composer").has_focus
         await pilot.press("h", "i")
         await pilot.press("escape")

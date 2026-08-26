@@ -35,10 +35,34 @@ Screen {
     color: $warning;
 }
 
-#composer {
+#composer-area {
     dock: bottom;
-    height: 3;
+    height: 4;
     margin: 0 1;
+}
+
+#composer-label {
+    height: 1;
+    padding: 0 1;
+    color: $text;
+    background: $panel;
+    text-style: bold;
+}
+
+#composer {
+    height: 3;
+    margin: 0;
+    border: round $primary;
+    background: $surface;
+}
+
+#composer:focus {
+    border: double $accent;
+}
+
+#composer:disabled {
+    border: solid #666666;
+    color: $text-muted;
 }
 
 #footer {

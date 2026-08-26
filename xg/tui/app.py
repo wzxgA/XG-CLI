@@ -55,7 +55,9 @@ class XgTuiApp(App[None]):
             yield TranscriptView(id="transcript")
             yield InspectorPanel(id="inspector")
         yield Static("", id="notification")
-        yield Composer()
+        with Vertical(id="composer-area"):
+            yield Static("输入", id="composer-label")
+            yield Composer()
         yield FooterBar()
 
     def on_mount(self) -> None:
