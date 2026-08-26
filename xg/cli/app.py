@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -409,6 +411,8 @@ def _handle_command(
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
 
+    if cmd in ("/help", "/?"):
+        return "用法: /plan /model /config /init /save /memory /hitl /clear /cancel /exit", False
     if cmd in ("/exit", "/quit"):
         return "再见。", True
     if cmd == "/clear":
@@ -659,7 +663,45 @@ def _cmd_config(
     )
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="xg", description="XG Agent CLI")
+    parser.add_argument("--tui", action="store_true", help="强制启动 Textual 全屏界面")
+    parser.add_argument("--inline", action="store_true", help="使用兼容的 inline CLI")
+    parser.add_argument("--no-tui", action="store_true", help="--inline 的兼容别名")
+    parser.add_argument("--version", action="store_true", help="显示版本")
+    return parser.parse_args(argv)
+
+
+def _tui_mode(args: argparse.Namespace) -> str:
+    if args.inline or args.no_tui:
+        return "inline"
+    if args.tui:
+        return "tui"
+    configured = os.environ.get("XG_TUI_MODE", "auto").lower()
+    return configured if configured in {"inline", "tui"} else "auto"
+
+
+def _run_tui_or_inline(agent: ReActAgent, settings: Settings, manager: ConfigManager, args: argparse.Namespace) -> None:
+    mode = _tui_mode(args)
+    if mode == "inline" or (mode == "auto" and not (sys.stdin.isatty() and sys.stdout.isatty())):
+        asyncio.run(run_loop(agent, settings, manager))
+        return
+    try:
+        from xg.tui.app import run_tui
+        run_tui(agent, settings, manager)
+    except Exception as exc:
+        if mode == "tui":
+            console.print(Panel(Text(f"Textual TUI 启动失败：{exc}\n请改用 xg --inline。"), style="red"))
+            raise SystemExit(1) from exc
+        console.print(Text(f"TUI 不可用，已降级到 inline：{exc}", style="yellow"))
+        asyncio.run(run_loop(agent, settings, manager))
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    if args.version:
+        print("xg-cli 0.1.0")
+        return
     manager = ConfigManager()
     settings = load_settings(manager)
     if not settings.api_base or not settings.api_key:
@@ -679,7 +721,7 @@ def main() -> None:
 
     agent = build_agent(settings)
     try:
-        asyncio.run(run_loop(agent, settings, manager))
+        _run_tui_or_inline(agent, settings, manager, args)
     except KeyboardInterrupt:
         console.print("再见。")
 

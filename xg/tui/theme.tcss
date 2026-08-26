@@ -1,0 +1,73 @@
+Screen {
+    background: $surface;
+}
+
+#header {
+    height: 1;
+    color: $text;
+    background: $panel;
+    padding: 0 1;
+}
+
+#body {
+    height: 1fr;
+}
+
+#transcript {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    scrollbar-size: 1 1;
+}
+
+#inspector {
+    width: 28;
+    min-width: 24;
+    border-left: solid $primary;
+    padding: 1;
+    color: $text-muted;
+}
+
+#notification {
+    height: auto;
+    max-height: 2;
+    padding: 0 1;
+    color: $warning;
+}
+
+#composer {
+    dock: bottom;
+    height: 3;
+    margin: 0 1;
+}
+
+#footer {
+    height: 1;
+    color: $text-muted;
+    background: $panel;
+    padding: 0 1;
+}
+
+ApprovalModal, PlanModal {
+    align: center middle;
+}
+
+#approval-dialog {
+    width: 70;
+    max-width: 90%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    background: $panel;
+    border: thick $warning;
+}
+
+#confirm-dialog {
+    width: 70;
+    max-width: 90%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    background: $panel;
+    border: thick $warning;
+}

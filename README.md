@@ -104,6 +104,18 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 - 长对话接近上下文预算时会自动压缩较旧的完整对话轮次，保留最近轮次和工具调用关系；无法安全压缩时才停止并提示。
 - `.xg/memory.db` 是本地明文数据库，项目记忆会发送给当前 LLM provider。不要在 `XG.md` 或 `/save` 中放置 API Key、密码等敏感信息。
 
+## 全屏 TUI
+
+第 6 期计划使用 Textual 将当前 inline CLI 升级为全屏终端界面：
+
+- Header：provider、model、上下文比例、HITL 和任务状态
+- Transcript：流式 Markdown、工具调用卡片、错误和计划进度
+- Composer：多行输入、命令补全、历史和快捷键
+- Modal：HITL 审批、Plan 审阅、`/init` 与记忆清空确认
+- Inspector：Session、Plan、Memory、Safety 状态面板
+
+当前入口为 `xg` 默认全屏、`xg --inline` 保留兼容模式，并支持 `xg --tui` 强制全屏、`xg --no-tui` 兼容 inline。全屏 TUI 不改变 ReAct、Plan、Memory、ToolRegistry 或安全策略核心；非交互终端仍使用 inline fallback。
+
 ## 配置项
 
 | 环境变量 | 说明 |
@@ -137,4 +149,4 @@ uv run pytest                 # 全量测试
 uv run xg                     # 手工验收
 ```
 
-项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（工具注册表 + 内置工具）、`xg/cli`（交互层）、`xg/config`（provider 注册表 / 配置合并 / 运行时快照）。
+项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（工具注册表 + 内置工具）、`xg/memory`（项目/长期记忆 + 上下文压缩）、`xg/tui`（第 6 期 Textual 全屏交互层）、`xg/cli`（入口与 inline fallback）、`xg/config`（provider 注册表 / 配置合并 / 运行时快照）。
