@@ -11,3 +11,11 @@ class StateChanged(Message):
     def __init__(self, state: TuiState) -> None:
         super().__init__()
         self.state = state
+
+
+class TraceCardToggled(Message):
+    """A user clicked or activated one collapsible execution card."""
+
+    def __init__(self, item_id: str) -> None:
+        super().__init__()
+        self.item_id = item_id

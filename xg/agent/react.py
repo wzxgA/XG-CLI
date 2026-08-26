@@ -1,7 +1,7 @@
 """ReAct 循环：LLM ↔ tool_calls ↔ tool_result 回灌。
 
 单轮 run() 产出事件流：
-  content（增量文本）→ tool_call / approval / tool_result（交替）→ … → done
+  thinking/content（增量文本）→ tool_call / approval / tool_result（交替）→ … → done
 步数上限与 token 预算触发时以终止事件收尾，循环安全停止。
 """
 
@@ -30,7 +30,8 @@ DEFAULT_SYSTEM_PROMPT = (
 class AgentEvent:
     """Agent 事件流单元。kind 含义：
 
-    - content: 增量文本
+    - content: 普通/最终回答增量文本
+    - thinking: Provider 明确返回的思考增量文本
     - tool_call: 模型发起一次工具调用（即将执行）
     - approval: HITL 审批结果（approved / rejected / modified）
     - tool_result: 工具执行完成（含被拒绝的 USER_REJECTED）
@@ -43,7 +44,7 @@ class AgentEvent:
     """
 
     kind: Literal[
-        "content", "tool_call", "approval", "tool_result", "step_limit",
+        "content", "thinking", "tool_call", "approval", "tool_result", "step_limit",
         "budget_exceeded", "context_compacted", "context_warning",
         "context_overflow", "error", "done"
     ]
@@ -116,7 +117,9 @@ class ReActAgent:
             tool_calls: list[ToolCall] = []
             try:
                 async for event in self.llm.stream_chat(request_messages, self.tools.schemas()):
-                    if event.kind == "content" and event.text:
+                    if event.kind == "thinking" and event.text:
+                        yield AgentEvent(kind="thinking", text=event.text)
+                    elif event.kind == "content" and event.text:
                         content_parts.append(event.text)
                         yield AgentEvent(kind="content", text=event.text)
                     elif event.kind == "tool_call" and event.tool_call:

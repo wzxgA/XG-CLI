@@ -10,7 +10,7 @@ from xg.agent.react import AgentEvent, ReActAgent
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient
-from xg.llm.types import StreamEvent
+from xg.llm.types import StreamEvent, ToolCall, ToolResult
 from xg.tool.builtin import build_registry
 from xg.tui.app import XgTuiApp
 from xg.tui.controller import SessionController
@@ -18,6 +18,7 @@ from xg.tui.reducer import reduce_agent_event
 from xg.tui.state import TuiState
 from xg.tui.state import ApprovalRequest
 from xg.tui.widgets.approval_modal import ApprovalModal
+from xg.tui.widgets.collapsible_card import CollapsibleCard
 
 
 class DummyClient(LlmClient):
@@ -29,6 +30,21 @@ class DummyClient(LlmClient):
 class MermaidClient(LlmClient):
     async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
         yield StreamEvent(kind="content", text="流程如下：\n\n```mermaid\nflowchart LR\nA[开始] --> B[完成]\n```")
+        yield StreamEvent(kind="done")
+
+
+class TraceClient(LlmClient):
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+        if any(message.role == "tool" for message in messages):
+            yield StreamEvent(kind="thinking", text="正在整理工具结果")
+            yield StreamEvent(kind="content", text="检查完成")
+        else:
+            yield StreamEvent(kind="thinking", text="先读取项目目录")
+            yield StreamEvent(kind="content", text="我先检查一下")
+            yield StreamEvent(
+                kind="tool_call",
+                tool_call=ToolCall(id="call-list", name="list_dir", arguments="{}"),
+            )
         yield StreamEvent(kind="done")
 
 
@@ -73,6 +89,37 @@ def test_reducer_merges_streaming_content_and_ignores_stale_turn():
     assert state.transcript[0].text == "hello"
     stale = reduce_agent_event(state, AgentEvent(kind="content", text="bad"), "turn-old")
     assert stale.transcript[0].text == "hello"
+
+
+def test_reducer_reclassifies_intermediate_content_and_collapses_trace():
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    state = reduce_agent_event(state, AgentEvent(kind="content", text="先检查"), "turn-1")
+    state = reduce_agent_event(
+        state,
+        AgentEvent(kind="tool_call", tool_call=ToolCall("call-1", "list_dir", "{}")),
+        "turn-1",
+    )
+    assert state.transcript[0].kind == "thinking"
+    assert state.transcript[1].collapsible is True
+    state = reduce_agent_event(
+        state,
+        AgentEvent(
+            kind="tool_result",
+            tool_result=ToolResult(
+                tool_call_id="call-1", name="list_dir", ok=True, output="README.md"
+            ),
+        ),
+        "turn-1",
+    )
+    assert state.transcript[0].collapsed is True
+    assert state.transcript[1].collapsed is True
+    assert state.transcript[2].collapsed is True
+    state = reduce_agent_event(state, AgentEvent(kind="content", text="完成"), "turn-1")
+    state = reduce_agent_event(state, AgentEvent(kind="done"), "turn-1")
+    trace = [item for item in state.transcript if item.collapsible]
+    assert trace and all(item.collapsed for item in trace)
+    assert state.transcript[-1].kind == "assistant"
+    assert state.transcript[-1].collapsed is False
 
 
 @pytest.mark.asyncio
@@ -181,3 +228,27 @@ async def test_tui_escape_cancels_running_task(tmp_path):
         await pilot.pause(0.2)
         assert app.controller.busy is False
         assert app.controller.state.phase == "idle"
+
+
+@pytest.mark.asyncio
+async def test_tui_trace_cards_auto_collapse_and_can_toggle(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    agent = ReActAgent(TraceClient(), build_registry(base_dir=project), settings)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.query_one("#composer").value = "inspect"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        trace = [item for item in app.controller.state.transcript if item.collapsible]
+        assert trace and all(item.collapsed for item in trace)
+        card = app.query(CollapsibleCard).first()
+        assert card is not None
+        assert await pilot.click(card)
+        await pilot.pause()
+        assert next(item for item in app.controller.state.transcript if item.id == trace[0].id).collapsed is False
+        await pilot.press("shift+d")
+        await pilot.pause()
+        assert all(item.collapsed is True for item in app.controller.state.transcript if item.collapsible)

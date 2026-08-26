@@ -21,6 +21,62 @@ def _mermaid_source(source: str) -> str:
     return "```mermaid\n" + _truncate(source) + "\n```"
 
 
+def _trace_status(item: TranscriptItem) -> str:
+    return {
+        "streaming": "进行中",
+        "running": "执行中",
+        "success": "成功",
+        "failed": "失败",
+        "cancelled": "已取消",
+        "done": "已完成",
+    }.get(item.status, item.status)
+
+
+def _trace_summary(item: TranscriptItem) -> str:
+    if item.kind == "thinking":
+        label = "思考"
+    elif item.kind == "tool_call":
+        label = f"工具调用 · {item.tool_name}"
+    elif item.kind == "tool_result":
+        label = f"工具结果 · {item.tool_name}"
+    else:
+        label = item.kind
+    source = item.text or item.tool_args or "无详细内容"
+    first_line = next((line.strip() for line in source.splitlines() if line.strip()), "无详细内容")
+    return f"{label} · {_trace_status(item)} · {first_line[:100]}"
+
+
+def trace_renderable(item: TranscriptItem):
+    """Render a collapsible trace item; the widget owns click behavior."""
+    marker = "▶" if item.collapsed else "▼"
+    if item.kind == "thinking":
+        label = "思考"
+        detail = _truncate(item.text, 12_000)
+    elif item.kind == "tool_call":
+        label = f"工具调用 · {item.tool_name}"
+        try:
+            detail = json.dumps(json.loads(item.tool_args), ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            detail = item.tool_args
+        detail = _truncate(detail, 4_000)
+    elif item.kind == "tool_result":
+        label = f"工具结果 · {item.tool_name}"
+        detail = _truncate(item.text, 12_000)
+    else:
+        label = f"审批 · {item.tool_name}"
+        detail = _truncate(item.text or "工具审批结果", 2_000)
+    body = detail if not item.collapsed else _trace_summary(item)
+    style = {
+        "streaming": "yellow",
+        "running": "yellow",
+        "success": "green",
+        "failed": "red",
+        "cancelled": "yellow",
+    }.get(item.status, "cyan")
+    title = f"{marker} {label} · {_trace_status(item)}"
+    return Panel(Text(body), title=title, border_style=style)
+
+
 class DiagramCard:
     """Rich renderable for one Mermaid block inside the transcript."""
 
@@ -83,6 +139,8 @@ def render_item(item: TranscriptItem):
         return Panel(Text(item.text), title="你", border_style="cyan")
     if item.kind == "assistant":
         return _assistant_renderable(item)
+    if item.kind in ("thinking", "tool_call", "tool_result", "approval") and item.collapsible:
+        return trace_renderable(item)
     if item.kind == "tool_call":
         try:
             args = json.dumps(json.loads(item.tool_args), ensure_ascii=False, indent=2)

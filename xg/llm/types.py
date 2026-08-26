@@ -82,12 +82,13 @@ class Usage:
 class StreamEvent:
     """流式事件。
 
-    - kind="content": text 为增量文本
+    - kind="content": text 为普通/最终回答增量文本
+    - kind="thinking": text 为 Provider 明确返回的思考增量文本
     - kind="tool_call": tool_call 为本轮聚合完成的 ToolCall（一次性发出，不再分片）
     - kind="done": 结束，含 finish_reason 与 usage
     """
 
-    kind: Literal["content", "tool_call", "done"]
+    kind: Literal["content", "thinking", "tool_call", "done"]
     text: str = ""
     tool_call: ToolCall | None = None
     finish_reason: str = ""

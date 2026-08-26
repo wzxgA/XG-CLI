@@ -99,6 +99,11 @@ class OpenAICompatClient(LlmClient):
 
             for choice in chunk.get("choices", []):
                 delta = choice.get("delta") or {}
+                # 不同 OpenAI-compatible provider 对显式 reasoning 的字段名
+                # 不统一；在 LLM 边界归一化，UI 不读取 provider 私有字段。
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                if reasoning:
+                    yield StreamEvent(kind="thinking", text=str(reasoning))
                 if delta.get("content"):
                     yield StreamEvent(kind="content", text=delta["content"])
 

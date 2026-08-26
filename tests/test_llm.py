@@ -42,6 +42,17 @@ class TestContentStreaming:
         assert events[2].finish_reason == "stop"
         assert events[2].usage.total_tokens == 12
 
+    @respx.mock
+    async def test_reasoning_content_is_normalized_to_thinking(self, settings):
+        respx.post(API_URL).mock(return_value=sse_response(
+            {"choices": [{"delta": {"reasoning_content": "先检查配置"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "检查完成"}, "finish_reason": "stop"}]},
+        ))
+        client = OpenAICompatClient(settings.api_base, settings.api_key, settings.model)
+        events = await collect(client, [Message(role="user", content="inspect")])
+        assert [event.kind for event in events] == ["thinking", "content", "done"]
+        assert events[0].text == "先检查配置"
+
 
 class TestToolCallAggregation:
     @respx.mock

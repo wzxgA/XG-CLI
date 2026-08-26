@@ -7,8 +7,11 @@ from typing import Any, Literal
 
 
 TranscriptKind = Literal[
-    "user", "assistant", "tool_call", "tool_result", "approval",
+    "user", "assistant", "thinking", "tool_call", "tool_result", "approval",
     "context", "plan", "error", "system",
+]
+TranscriptStatus = Literal[
+    "streaming", "running", "success", "failed", "cancelled", "done",
 ]
 TuiPhase = Literal[
     "idle", "running", "awaiting_approval", "awaiting_plan_review", "error",
@@ -26,9 +29,15 @@ class TranscriptItem:
     plan: Any | None = None
     tool_ok: bool | None = None
     collapsed: bool = True
+    collapsible: bool = False
+    user_collapsed: bool | None = None
     diagram_source_visible: bool = False
     streaming: bool = False
     turn_id: str = ""
+    trace_id: str = ""
+    parent_call_id: str = ""
+    status: TranscriptStatus = "done"
+    elapsed_ms: int | None = None
 
 
 @dataclass

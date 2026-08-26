@@ -442,7 +442,7 @@ class PlanExecutor:
         )
         async for event in agent.run(self._subtask_user_prompt(task)):
             if event.kind in (
-                "content", "tool_call", "approval", "tool_result",
+                "thinking", "content", "tool_call", "approval", "tool_result",
                 "context_compacted", "context_warning",
             ):
                 queue.put_nowait(PlanEvent(

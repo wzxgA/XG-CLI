@@ -14,7 +14,7 @@ from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.safety.hitl import ApprovalDecision
 from xg.tui.controller import SessionController
-from xg.tui.messages import StateChanged
+from xg.tui.messages import StateChanged, TraceCardToggled
 from xg.tui.state import TuiState
 from xg.tui.widgets.approval_modal import ApprovalModal
 from xg.tui.widgets.composer import Composer
@@ -33,6 +33,7 @@ class XgTuiApp(App[None]):
     BINDINGS = [
         ("enter", "plan_execute", "execute plan"),
         ("d", "plan_details", "plan details"),
+        ("shift+d", "trace_group", "trace details"),
         ("r", "plan_replan", "replan"),
         ("escape", "escape", "cancel or clear"),
         ("ctrl+c", "cancel_turn", "取消当前任务"),
@@ -68,6 +69,9 @@ class XgTuiApp(App[None]):
         self._state = message.state
         self._render_state(message.state)
         self._show_pending_modal(message.state)
+
+    def on_trace_card_toggled(self, message: TraceCardToggled) -> None:
+        self.controller.toggle_trace_item(message.item_id)
 
     def _render_state(self, state: TuiState) -> None:
         self.query_one("#header", HeaderBar).update_state(state)
@@ -153,7 +157,12 @@ class XgTuiApp(App[None]):
         if self._has_pending_plan() and not self._replan_mode:
             self.controller.toggle_plan_details()
         elif not self._replan_mode:
-            self.controller.toggle_diagram_source()
+            if not self.controller.toggle_diagram_source():
+                self.controller.toggle_latest_trace()
+
+    def action_trace_group(self) -> None:
+        if not self._has_pending_plan() and not self._replan_mode:
+            self.controller.toggle_trace_group()
 
     def action_plan_replan(self) -> None:
         if self._replan_mode:

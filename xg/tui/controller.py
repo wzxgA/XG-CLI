@@ -13,7 +13,7 @@ from xg.cli.commands import CommandContext, CommandResult, CommandService
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.safety.hitl import ApprovalDecision
-from xg.tui.reducer import reduce_agent_event, reduce_plan_event
+from xg.tui.reducer import finalize_trace, reduce_agent_event, reduce_plan_event
 from xg.tui.state import ApprovalRequest, ConfirmationRequest, TuiState, TranscriptItem
 
 
@@ -113,7 +113,8 @@ class SessionController:
             else:
                 await self._run_agent(text, turn_id)
         except asyncio.CancelledError:
-            self._set_state(replace(self.state, phase="idle", pending_approval=None, pending_plan=None, notification="当前任务已取消"))
+            cancelled = finalize_trace(self.state, turn_id, status="cancelled")
+            self._set_state(replace(cancelled, phase="idle", pending_approval=None, pending_plan=None, notification="当前任务已取消"))
             raise
         finally:
             if self._active_task is current:
@@ -196,7 +197,7 @@ class SessionController:
                 self._set_state(replace(self.state, transcript=items))
                 return
 
-    def toggle_diagram_source(self) -> None:
+    def toggle_diagram_source(self) -> bool:
         """Toggle Mermaid source for the latest assistant diagram."""
         items = list(self.state.transcript)
         for index in range(len(items) - 1, -1, -1):
@@ -204,7 +205,47 @@ class SessionController:
             if item.kind == "assistant" and "```mermaid" in item.text.lower():
                 items[index] = replace(item, diagram_source_visible=not item.diagram_source_visible)
                 self._set_state(replace(self.state, transcript=items))
+                return True
+        return False
+
+    def toggle_trace_item(self, item_id: str) -> None:
+        """Toggle one user-selected thinking/tool trace item."""
+        items = list(self.state.transcript)
+        for index, item in enumerate(items):
+            if item.id == item_id and item.collapsible:
+                expanded = item.collapsed
+                items[index] = replace(
+                    item,
+                    collapsed=not expanded,
+                    user_collapsed=not expanded,
+                )
+                self._set_state(replace(self.state, transcript=items))
                 return
+
+    def toggle_latest_trace(self) -> None:
+        """Toggle the newest collapsible thinking/tool item."""
+        for item in reversed(self.state.transcript):
+            if item.collapsible:
+                self.toggle_trace_item(item.id)
+                return
+
+    def toggle_trace_group(self) -> None:
+        """Toggle all collapsible items belonging to the newest trace."""
+        latest = next((item for item in reversed(self.state.transcript) if item.collapsible), None)
+        if latest is None:
+            return
+        trace_id = latest.trace_id
+        members = [item for item in self.state.transcript if item.collapsible and item.trace_id == trace_id]
+        # Mixed state is treated as "collapse all"; only an entirely
+        # collapsed group expands on the next group toggle.
+        expand = all(item.collapsed for item in members)
+        member_ids = {item.id for item in members}
+        items = [
+            replace(item, collapsed=not expand, user_collapsed=not expand)
+            if item.id in member_ids else item
+            for item in self.state.transcript
+        ]
+        self._set_state(replace(self.state, transcript=items))
 
     def refresh_diagrams(self) -> None:
         """Republish state so renderables recalculate their terminal layout."""
