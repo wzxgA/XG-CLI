@@ -77,6 +77,28 @@ def test_renderer_preserves_mixed_cjk_and_emoji_text() -> None:
     assert "完成" in result.text
 
 
+def test_renderer_routes_long_edges_around_intermediate_nodes() -> None:
+    model = parse_flowchart(
+        """flowchart TD
+        a[起点] --> b[分支一]
+        a --> c[分支二]
+        a --> d[跨轮依赖]
+        b --> d
+        c --> e[汇聚]
+        d --> e
+        """
+    )
+    result = render_flowchart(
+        model,
+        width=80,
+        rank_by_node={"a": 0, "b": 1, "c": 1, "d": 2, "e": 3},
+    )
+
+    assert result.mode == "unicode"
+    for label in ("起点", "分支一", "分支二", "跨轮依赖", "汇聚"):
+        assert any(label in line and "│" in line for line in result.text.splitlines())
+
+
 def test_assistant_mermaid_is_rendered_as_a_card_and_source_can_be_shown() -> None:
     item = TranscriptItem(
         id="assistant-1",
