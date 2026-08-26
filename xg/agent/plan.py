@@ -128,7 +128,7 @@ def build_batches(tasks: list[PlanTask]) -> list[list[str]]:
     while remaining:
         ready = [tid for tid, deps in remaining.items() if not deps]
         if not ready:
-            raise PlanError("依赖存在环（或引用了不存在的任务 id），无法生成批次")
+            raise PlanError("依赖存在环（或引用了不存在的任务 id），无法生成执行轮次")
         batches.append(sorted(ready))
         for tid in ready:
             remaining.pop(tid)
@@ -293,7 +293,7 @@ class PlanExecutor:
         for batch_no, batch in enumerate(plan.batches):
             yield PlanEvent(
                 kind="batch_started", plan=plan, batch=batch,
-                message=f"批次 {batch_no + 1}/{len(plan.batches)}",
+                message=f"第 {batch_no + 1} 轮 / 共 {len(plan.batches)} 轮",
             )
             async for event in self._run_batch(plan, batch):
                 if event.kind == "subtask_failed":

@@ -164,9 +164,9 @@ def render_item(item: TranscriptItem):
             return Panel(Text(item.text), title="计划", border_style="magenta")
         if item.plan_review:
             return PlanReviewCard(item)
-        lines = [f"目标：{plan.goal}", f"批次：{len(plan.batches)}"]
+        lines = [f"目标：{plan.goal}", f"共 {len(plan.batches)} 轮"]
         for batch_no, batch in enumerate(plan.batches, 1):
-            lines.append(f"批次 {batch_no}：{', '.join(batch)}")
+            lines.append(f"第 {batch_no} 轮：{', '.join(batch)}")
             for task_id in batch:
                 task = plan.task_by_id(task_id)
                 if task is None:

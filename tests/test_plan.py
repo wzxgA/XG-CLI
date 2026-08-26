@@ -285,6 +285,10 @@ class TestExecutorFlow:
             "batch_started", "subtask_started", "subtask_event", "subtask_done",
             "plan_done",
         ]
+        assert [e.message for e in events if e.kind == "batch_started"] == [
+            "第 1 轮 / 共 2 轮",
+            "第 2 轮 / 共 2 轮",
+        ]
         assert events[-1].message.startswith("计划完成: 2/2")
 
     async def test_subtask_tool_execution(self, settings, tmp_project):

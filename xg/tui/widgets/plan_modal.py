@@ -20,11 +20,16 @@ class PlanModal(ModalScreen[str]):
         yield from self._content()
 
     def _content(self) -> list:
-        lines = [f"目标：{self.plan.goal}", f"任务：{len(self.plan.tasks)} 个，批次：{len(self.plan.batches)}"]
-        for task in self.plan.tasks:
-            lines.append(f"{task.id} [{task.status}] {task.title}")
-            if self._details:
-                lines.append(f"  {task.description}")
+        lines = [f"目标：{self.plan.goal}", f"任务：{len(self.plan.tasks)} 个，共 {len(self.plan.batches)} 轮"]
+        for round_no, batch in enumerate(self.plan.batches, 1):
+            lines.append(f"第 {round_no} 轮")
+            for task_id in batch:
+                task = self.plan.task_by_id(task_id)
+                if task is None:
+                    continue
+                lines.append(f"{task.id} [{task.status}] {task.title}")
+                if self._details:
+                    lines.append(f"  {task.description}")
         return [Vertical(Static("\n".join(lines)), Input(placeholder="按 r 输入重新规划要求", id="plan-feedback"), Button("执行 (Enter)", id="execute", variant="success"), Button("取消 (Esc)", id="cancel", variant="error"))]
 
     def action_details(self) -> None:

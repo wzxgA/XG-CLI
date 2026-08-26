@@ -226,7 +226,7 @@ def _print_plan_panel(plan: Plan, note: str = "") -> None:
     table.add_column(style="cyan", justify="right", no_wrap=True)
     table.add_column()
     for i, batch in enumerate(plan.batches, 1):
-        table.add_row(f"批次 {i}", Text(", ".join(batch), style="bold"))
+        table.add_row(f"第 {i} 轮", Text(", ".join(batch), style="bold"))
         for tid in batch:
             t = plan.task_by_id(tid)
             assert t is not None
@@ -240,7 +240,7 @@ def _print_plan_panel(plan: Plan, note: str = "") -> None:
 
 def _print_plan_details(plan: Plan) -> None:
     for i, batch in enumerate(plan.batches, 1):
-        console.print(Text(f"── 批次 {i}: {', '.join(batch)}", style="cyan"))
+        console.print(Text(f"── 第 {i} 轮: {', '.join(batch)}", style="cyan"))
         for tid in batch:
             t = plan.task_by_id(tid)
             assert t is not None

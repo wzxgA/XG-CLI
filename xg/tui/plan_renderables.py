@@ -4,32 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rich.cells import cell_len
 from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.panel import Panel
 from rich.text import Text
 
-from xg.agent.plan import Plan
+from xg.agent.plan import Plan, PlanTask
 from xg.tui.diagrams.model import FlowchartEdge, FlowchartModel, FlowchartNode
 from xg.tui.diagrams.renderer import render_flowchart
 from xg.tui.state import TranscriptItem
-
-
-def _brief(value: str, limit: int = 100) -> str:
-    """Return a local, deterministic one-line task summary."""
-    first = next((line.strip() for line in value.splitlines() if line.strip()), "暂无概括")
-    first = " ".join(first.split())
-    if cell_len(first) <= limit:
-        return first
-    out = ""
-    used = 0
-    for char in first:
-        size = cell_len(char)
-        if used + size > max(1, limit - 1):
-            break
-        out += char
-        used += size
-    return out + "…"
 
 
 @dataclass(frozen=True)
@@ -81,23 +63,33 @@ def plan_to_flowchart(plan: Plan) -> PlanFlowchartData:
     )
 
 
-def _task_summary_lines(plan: Plan, ordered_ids: tuple[str, ...], detailed: bool) -> list[str]:
+def _task_title_text(task: PlanTask) -> Text:
+    """Render a task title with a consistent visual hierarchy."""
+    line = Text(style="bold")
+    line.append(task.id, style="cyan bold")
+    line.append(f" {task.title}", style="bold")
+    return line
+
+
+def _task_summary_renderable(plan: Plan, ordered_ids: tuple[str, ...], detailed: bool) -> Group:
+    """Render the task heading, keyboard hint, and task content separately."""
     tasks = {task.id: task for task in plan.tasks}
-    lines = ["任务详情" if detailed else "任务概括"]
+    renderables: list[object] = [
+        Text("任务详情" if detailed else "任务概括"),
+        Text("按 d 收起详情" if detailed else "按 d 显示详情", style="dim"),
+    ]
     for task_id in ordered_ids:
         task = tasks.get(task_id)
         if task is None:
             continue
-        if not detailed:
-            lines.append(f"{task.id} {task.title} · {_brief(task.description)}")
-            continue
-        deps = ", ".join(task.deps) if task.deps else "无"
-        lines.extend([
-            f"{task.id} {task.title}",
-            f"  描述：{task.description or '暂无描述'}",
-            f"  依赖：{deps}",
-        ])
-    return lines
+        renderables.append(_task_title_text(task))
+        if detailed:
+            deps = ", ".join(task.deps) if task.deps else "无"
+            renderables.extend([
+                Text(f"  描述：{task.description or '暂无描述'}", style="dim"),
+                Text(f"  依赖：{deps}", style="dim"),
+            ])
+    return Group(*renderables)
 
 
 class PlanReviewCard:
@@ -121,14 +113,14 @@ class PlanReviewCard:
         if chart.warnings:
             chart_parts.append(Text("\n\n⚠ " + "；".join(chart.warnings)))
         parts: list[object] = [
-            Text(f"目标：{plan.goal}\n批次：{len(plan.batches)}", style="bold"),
-            Panel(Group(*chart_parts), title="批次流程", border_style="cyan"),
+            Text(f"目标：{plan.goal}\n共 {len(plan.batches)} 轮", style="bold"),
+            Panel(Group(*chart_parts), title="轮次流程", border_style="cyan"),
         ]
         batch_lines = [
-            f"批次 {batch_no}: {', '.join(batch)}"
+            f"第 {batch_no} 轮：{', '.join(batch)}"
             for batch_no, batch in enumerate(plan.batches, 1)
         ]
         parts.append(Text("\n".join(batch_lines), style="dim"))
-        parts.append(Text("\n".join(_task_summary_lines(plan, data.ordered_ids, not self.item.collapsed))))
-        parts.append(Text("\nEnter 执行 · d 查看详细描述 · r 重规划 · Esc 取消", style="dim"))
+        parts.append(_task_summary_renderable(plan, data.ordered_ids, not self.item.collapsed))
+        parts.append(Text("\nEnter 执行 · r 重规划 · Esc 取消", style="dim"))
         yield Panel(Group(*parts), title="计划审阅", border_style="magenta")
