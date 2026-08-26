@@ -27,6 +27,7 @@ class TranscriptItem:
     tool_args: str = ""
     tool_call_id: str = ""
     plan: Any | None = None
+    plan_review: bool = False
     tool_ok: bool | None = None
     collapsed: bool = True
     collapsible: bool = False

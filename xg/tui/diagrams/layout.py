@@ -31,7 +31,12 @@ class FlowchartLayout:
         raise KeyError(node_id)
 
 
-def layout_flowchart(model: FlowchartModel, *, max_iterations: int | None = None) -> FlowchartLayout:
+def layout_flowchart(
+    model: FlowchartModel,
+    *,
+    max_iterations: int | None = None,
+    rank_by_node: dict[str, int] | None = None,
+) -> FlowchartLayout:
     """Assign nodes to stable layers without an unbounded graph traversal.
 
     DAGs use the longest known predecessor rank.  For cyclic graphs the same
@@ -48,6 +53,24 @@ def layout_flowchart(model: FlowchartModel, *, max_iterations: int | None = None
 
     limit = max_iterations if max_iterations is not None else max(1, len(node_ids))
     ranks = {node_id: 0 for node_id in node_ids}
+    if rank_by_node is not None:
+        # Callers such as Plan already have a business-level batch partition.
+        # Honor it while retaining a safe default for omitted nodes.
+        ranks.update({node_id: rank for node_id, rank in rank_by_node.items() if node_id in ranks and rank >= 0})
+        grouped: dict[int, list[str]] = {}
+        for node_id in node_ids:
+            grouped.setdefault(ranks[node_id], []).append(node_id)
+        ordered_ranks = sorted(grouped)
+        if model.direction in ("BT", "RL"):
+            ordered_ranks.reverse()
+        rank_lists = [tuple(grouped[rank]) for rank in ordered_ranks]
+        positions = tuple(
+            LayoutNode(node_id=node_id, rank=rank_no, order=order)
+            for rank_no, rank_nodes in enumerate(rank_lists)
+            for order, node_id in enumerate(rank_nodes)
+        )
+        return FlowchartLayout(nodes=positions, ranks=tuple(rank_lists), cyclic=False)
+
     changed = False
     for _ in range(limit):
         changed = False
@@ -85,4 +108,3 @@ def layout_flowchart(model: FlowchartModel, *, max_iterations: int | None = None
         for order, node_id in enumerate(rank_nodes)
     )
     return FlowchartLayout(nodes=positions, ranks=tuple(rank_lists), cyclic=cyclic)
-

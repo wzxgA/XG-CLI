@@ -15,6 +15,8 @@ class DiagramRender:
     text: str
     mode: str = "unicode"
     warnings: tuple[str, ...] = ()
+    width: int = 0
+    height: int = 0
 
 
 _UNICODE = {
@@ -85,8 +87,35 @@ def _blank(width: int, height: int) -> list[list[str]]:
     return [[" "] * width for _ in range(height)]
 
 
+_CONTINUATION = ""
+
+
+def _put_text(canvas: list[list[str]], x: int, y: int, value: str) -> None:
+    """Write text using terminal cells rather than Python character indexes."""
+    if not (0 <= y < len(canvas)):
+        return
+    for char in value:
+        char_width = cell_len(char)
+        if char_width <= 0:
+            if x > 0 and x <= len(canvas[y]) and canvas[y][x - 1] not in (" ", _CONTINUATION):
+                canvas[y][x - 1] += char
+            continue
+        if x >= len(canvas[y]):
+            break
+        if x >= 0:
+            canvas[y][x] = char
+            for offset in range(1, char_width):
+                if x + offset >= len(canvas[y]):
+                    break
+                canvas[y][x + offset] = _CONTINUATION
+        x += char_width
+
+
 def _put(canvas: list[list[str]], x: int, y: int, value: str) -> None:
+    """Write one-cell diagram content without corrupting wide characters."""
     if 0 <= y < len(canvas) and 0 <= x < len(canvas[y]):
+        if canvas[y][x] == _CONTINUATION:
+            return
         canvas[y][x] = value
 
 
@@ -96,6 +125,21 @@ def _draw_horizontal(canvas: list[list[str]], y: int, x1: int, x2: int, char: st
     start, end = sorted((x1, x2))
     for x in range(start, end + 1):
         _put(canvas, x, y, char)
+
+
+def _canvas_text(canvas: list[list[str]]) -> str:
+    lines = []
+    for row in canvas:
+        # A wide character already contributes its full terminal width.  Its
+        # continuation cells must not become literal spaces in the output,
+        # otherwise ``中文`` would be serialized as ``中 文``.
+        lines.append("".join(cell for cell in row if cell != _CONTINUATION).rstrip())
+    return "\n".join(lines).rstrip()
+
+
+def _text_dimensions(text: str) -> tuple[int, int]:
+    lines = text.splitlines() or [""]
+    return max((cell_len(line) for line in lines), default=0), len(lines)
 
 
 def _render_vertical(model: FlowchartModel, layout: FlowchartLayout, *, width: int, unicode: bool) -> str:
@@ -117,8 +161,7 @@ def _render_vertical(model: FlowchartModel, layout: FlowchartLayout, *, width: i
             node_width = widths[node_id]
             y = layer_y[rank]
             for row, line in enumerate(_box(node_by_id[node_id], node_width, unicode=unicode)):
-                for col, char in enumerate(line):
-                    _put(canvas, current_x + col, y + row, char)
+                _put_text(canvas, current_x, y + row, line)
             positions[node_id] = (current_x, y)
             current_x += node_width + gap_x
 
@@ -150,9 +193,8 @@ def _render_vertical(model: FlowchartModel, layout: FlowchartLayout, *, width: i
             label = _fit(edge.label, max(3, abs(end_x - start_x) - 2))
             if label and end_x != start_x:
                 label_x = min(start_x, end_x) + max(1, (abs(end_x - start_x) - cell_len(label)) // 2)
-                for col, char in enumerate(label):
-                    _put(canvas, label_x + col, mid_y, char)
-    return "\n".join("".join(row).rstrip() for row in canvas).rstrip()
+                _put_text(canvas, label_x, mid_y, label)
+    return _canvas_text(canvas)
 
 
 def _render_horizontal(model: FlowchartModel, layout: FlowchartLayout, *, width: int, unicode: bool) -> str:
@@ -175,8 +217,7 @@ def _render_horizontal(model: FlowchartModel, layout: FlowchartLayout, *, width:
             node_w = widths[node_id]
             node_x = x + (layer_widths[rank] - node_w) // 2
             for row, line in enumerate(_box(node_by_id[node_id], node_w, unicode=unicode)):
-                for col, char in enumerate(line):
-                    _put(canvas, node_x + col, y + row, char)
+                _put_text(canvas, node_x, y + row, line)
             positions[node_id] = (node_x, y)
             y += 3 + gap_y
         x += layer_widths[rank] + gap_x
@@ -205,9 +246,8 @@ def _render_horizontal(model: FlowchartModel, layout: FlowchartLayout, *, width:
         _put(canvas, end_x, end_y, chars["arrow_right"])
         if edge.label:
             label = _fit(edge.label, max(3, end_x - start_x - 2))
-            for col, char in enumerate(label):
-                _put(canvas, start_x + 1 + col, start_y, char)
-    return "\n".join("".join(row).rstrip() for row in canvas).rstrip()
+            _put_text(canvas, start_x + 1, start_y, label)
+    return _canvas_text(canvas)
 
 
 def _structured(model: FlowchartModel) -> str:
@@ -227,10 +267,11 @@ def render_flowchart(
     unicode: bool = True,
     max_width: int = 160,
     max_height: int = 120,
+    rank_by_node: dict[str, int] | None = None,
 ) -> DiagramRender:
     """Render a model, following the documented Unicode → ASCII → text order."""
-    width = max(20, min(width, max_width))
-    layout = layout_flowchart(model)
+    width = max(1, min(width, max_width))
+    layout = layout_flowchart(model, rank_by_node=rank_by_node)
     warnings = list(model.warnings)
     renderers = [(unicode, "unicode"), (False, "ascii")] if unicode else [(False, "ascii")]
     for use_unicode, mode in renderers:
@@ -239,9 +280,23 @@ def render_flowchart(
             if text.count("\n") + 1 <= max_height:
                 if layout.cyclic:
                     warnings.append("检测到循环边，已使用有限布局")
-                return DiagramRender(text=text, mode=mode, warnings=tuple(warnings))
+                render_width, render_height = _text_dimensions(text)
+                return DiagramRender(
+                    text=text,
+                    mode=mode,
+                    warnings=tuple(warnings),
+                    width=render_width,
+                    height=render_height,
+                )
         except ValueError:
             continue
     warnings.append("图表超出当前终端宽度或高度，已降级为结构化文本")
-    return DiagramRender(text=_structured(model), mode="structured", warnings=tuple(warnings))
-
+    text = _structured(model)
+    render_width, render_height = _text_dimensions(text)
+    return DiagramRender(
+        text=text,
+        mode="structured",
+        warnings=tuple(warnings),
+        width=render_width,
+        height=render_height,
+    )

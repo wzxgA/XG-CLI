@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rich.cells import cell_len
 from rich.console import Console
 
 from xg.tui.diagrams import parse_flowchart, render_flowchart, split_mermaid_blocks
@@ -45,6 +46,35 @@ def test_renderer_degrades_to_structured_text_when_too_narrow() -> None:
     result = render_flowchart(model, width=20)
     assert result.mode == "structured"
     assert "连线" in result.text
+
+
+def test_renderer_keeps_cjk_labels_aligned_in_a_branch_and_merge() -> None:
+    model = parse_flowchart(
+        """flowchart TD
+        t1[准备基础] --> t2[准备前端]
+        t1 --> t3[准备后端]
+        t2 --> t4[汇总结果]
+        t3 --> t4
+        """
+    )
+    result = render_flowchart(
+        model,
+        width=80,
+        rank_by_node={"t1": 0, "t2": 1, "t3": 1, "t4": 2},
+    )
+
+    assert result.mode == "unicode"
+    assert "汇总结果" in result.text
+    assert all(cell_len(line) <= result.width for line in result.text.splitlines())
+    assert result.width == max(cell_len(line) for line in result.text.splitlines())
+
+
+def test_renderer_preserves_mixed_cjk_and_emoji_text() -> None:
+    model = parse_flowchart("flowchart TD\nA[处理 🚀] --> B[完成]")
+    result = render_flowchart(model, width=80)
+
+    assert "处理 🚀" in result.text
+    assert "完成" in result.text
 
 
 def test_assistant_mermaid_is_rendered_as_a_card_and_source_can_be_shown() -> None:
