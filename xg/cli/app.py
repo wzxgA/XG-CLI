@@ -23,6 +23,7 @@ from xg.config.manager import ConfigManager, mask_key
 from xg.config.settings import Settings, load_settings
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
+from xg.memory.manager import MemoryManager, MemoryUnavailableError
 from xg.safety.audit import AuditLogger
 from xg.safety.guards import guard_tool_call
 from xg.safety.hitl import ApprovalDecision, HITLPolicy
@@ -33,7 +34,8 @@ console = Console()
 BANNER = """\
 [XG] Agent CLI v0.1.0
 输入任务开始对话；/plan 先拆解计划再执行，/model 切换 provider 或模型，
-/config 查看/设置配置，/hitl 审批开关，/clear 清空上下文，/exit 退出。
+/config 查看/设置配置，/init 初始化项目记忆，/save 保存记忆，
+/memory 管理记忆，/hitl 审批开关，/clear 清空上下文，/exit 退出。
 """
 
 
@@ -49,12 +51,18 @@ def build_agent(settings: Settings, base_dir=None) -> ReActAgent:
         audit=audit,
     )
     hitl = HITLPolicy(enabled=settings.hitl)
+    memory_manager = MemoryManager(
+        base,
+        project_memory_max_chars=settings.project_memory_max_chars,
+        memory_prompt_max_chars=settings.memory_prompt_max_chars,
+    )
     return ReActAgent(
         llm=client,
         tools=tools,
         settings=settings,
         approval_policy=hitl,
         audit=audit,
+        memory_manager=memory_manager,
     )
 
 
@@ -147,12 +155,20 @@ async def handle_turn(agent: ReActAgent, user_input: str, approval_ui: ApprovalU
                     preview = preview[:300] + " ..."
                 console.print(Text(f"  {'OK' if event.tool_result.ok else 'FAIL'}: {preview}", style=style))
                 live.update(Text(""))
-            elif event.kind in ("step_limit", "budget_exceeded", "error"):
+            elif event.kind == "context_compacted":
+                live.update(Text(""))
+                console.print(Text(event.text, style="dim cyan"))
+                live.update(Text(""))
+            elif event.kind == "context_warning":
+                live.update(Text(""))
+                console.print(Text(f"上下文提示：{event.text}", style="yellow"))
+                live.update(Text(""))
+            elif event.kind in ("step_limit", "budget_exceeded", "context_overflow", "error"):
                 live.update(Text(""))
                 if event.kind == "step_limit":
                     msg = "已达到单轮工具调用步数上限，循环终止。可继续输入让模型接着完成。"
-                elif event.kind == "budget_exceeded":
-                    msg = "上下文 token 已接近窗口上限，循环终止。可用 /clear 清空对话后继续。"
+                elif event.kind in ("budget_exceeded", "context_overflow"):
+                    msg = event.text or "上下文 token 已接近窗口上限，循环终止。可用 /clear 清空对话后继续。"
                 else:
                     msg = f"请求失败: {event.text}"
                 console.print(Panel(Text(msg), style="yellow"))
@@ -287,7 +303,11 @@ def _render_plan_event(event: PlanEvent) -> None:
 def _render_subtask_event(task: PlanTask, ae: AgentEvent) -> None:
     """渲染子任务内部转发的 AgentEvent（前缀子任务 id）。"""
     prefix = f"  [{task.id}]"
-    if ae.kind == "tool_call" and ae.tool_call:
+    if ae.kind == "context_compacted":
+        console.print(Text(f"{prefix} {ae.text}", style="dim cyan"))
+    elif ae.kind == "context_warning":
+        console.print(Text(f"{prefix} 上下文提示：{ae.text}", style="yellow"))
+    elif ae.kind == "tool_call" and ae.tool_call:
         console.print(Text(f"{prefix} → {ae.tool_call.name}({ae.tool_call.arguments})", style="dim cyan"))
     elif ae.kind == "approval" and ae.tool_call:
         style = {"approved": "green", "modified": "yellow", "rejected": "red"}.get(ae.text, "yellow")
@@ -317,6 +337,7 @@ async def handle_plan_turn(
         reviewer=PlanReviewUI(session),
         approval_policy=agent.approval_policy,
         audit=agent.audit,
+        memory_manager=agent.memory_manager,
     )
     try:
         async for event in executor.run(goal):
@@ -355,6 +376,15 @@ async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager
                 console.print(Text("（已中断计划执行）", style="yellow"))
             continue
 
+        if user_input.lower().startswith(("/init", "/save", "/memory")):
+            try:
+                message = await _handle_memory_command(agent, user_input, session)
+            except KeyboardInterrupt:
+                message = "（已取消记忆操作）"
+            if message:
+                console.print(Text(message, style="dim"))
+            continue
+
         if user_input.startswith("/"):
             message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:
@@ -390,7 +420,120 @@ def _handle_command(
         return _cmd_config(agent, settings, manager, arg), False
     if cmd == "/hitl":
         return _cmd_hitl(agent, arg), False
-    return f"未知命令: {cmd}。可用: /plan /model /config /hitl /clear /exit", False
+    if cmd == "/save":
+        return _cmd_memory_sync(agent, cmd, arg), False
+    if cmd == "/memory":
+        return _cmd_memory_sync(agent, cmd, arg), False
+    return f"未知命令: {cmd}。可用: /plan /model /config /init /save /memory /hitl /clear /exit", False
+
+
+def _memory_manager(agent: ReActAgent) -> MemoryManager | None:
+    return getattr(agent, "memory_manager", None)
+
+
+def _format_memory_entries(entries) -> str:
+    if not entries:
+        return "没有找到长期记忆。"
+    lines = []
+    for entry in entries:
+        timestamp = entry.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
+        preview = " ".join(entry.content.split())
+        if len(preview) > 120:
+            preview = preview[:120] + " ..."
+        lines.append(f"#{entry.id}  {timestamp}  {preview}")
+    return "\n".join(lines)
+
+
+def _cmd_memory_sync(agent: ReActAgent, cmd: str, arg: str) -> str:
+    memory = _memory_manager(agent)
+    if memory is None:
+        return "记忆功能未初始化。"
+    try:
+        if cmd == "/save":
+            if not arg:
+                return "用法: /save <要保存的项目记忆>"
+            entry, created, redacted = memory.save(arg)
+            action = "已保存" if created else "已存在，已刷新时间"
+            suffix = "（敏感片段已脱敏）" if redacted else ""
+            return f"{action}长期记忆 #{entry.id}{suffix}。"
+
+        parts = arg.split(maxsplit=1)
+        sub = parts[0].lower() if parts else "list"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if sub == "list":
+            limit = 20
+            if rest:
+                try:
+                    limit = int(rest)
+                except ValueError:
+                    return "用法: /memory list [limit]"
+            return _format_memory_entries(memory.list(limit))
+        if sub == "search":
+            if not rest:
+                return "用法: /memory search <关键词>"
+            return _format_memory_entries(memory.search(rest))
+        if sub == "delete":
+            try:
+                memory_id = int(rest)
+            except ValueError:
+                return "用法: /memory delete <id>"
+            return f"已删除长期记忆 #{memory_id}。" if memory.delete(memory_id) else f"不存在长期记忆 #{memory_id}。"
+        if sub == "clear":
+            return "清空长期记忆需要交互确认。"
+        return "用法: /memory list|search|delete|clear"
+    except (MemoryUnavailableError, OSError, ValueError) as exc:
+        return f"记忆操作失败：{exc}"
+
+
+async def _handle_memory_command(
+    agent: ReActAgent, raw: str, session: PromptSession[str]
+) -> str:
+    """处理需要 prompt 的第五期命令；普通 list/search/save 仍走同步逻辑。"""
+    parts = raw.split(maxsplit=1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    memory = _memory_manager(agent)
+    if memory is None:
+        return "记忆功能未初始化。"
+
+    if cmd == "/init":
+        try:
+            draft = await memory.generate_init_draft(agent.llm)
+        except FileExistsError as exc:
+            return str(exc)
+        except (LlmError, OSError, ValueError) as exc:
+            return f"生成 XG.md 失败：{exc}"
+        console.print(Panel(Markdown(draft), title="XG.md 草稿", border_style="cyan"))
+        answer = await session.prompt_async(
+            HTML("<ansiyellow>写入 XG.md？输入 y 确认，其他内容取消 ></ansiyellow> ")
+        )
+        if answer.strip().lower() not in ("y", "yes"):
+            return "已取消，未写入 XG.md。"
+        try:
+            path = memory.write_init_draft(draft)
+        except (FileExistsError, OSError) as exc:
+            return f"写入 XG.md 失败：{exc}"
+        return f"已生成项目记忆：{path.name}。"
+
+    if cmd == "/memory" and arg.lower() == "clear":
+        try:
+            count = memory.count()
+        except (MemoryUnavailableError, OSError) as exc:
+            return f"记忆操作失败：{exc}"
+        if count == 0:
+            return "当前项目没有长期记忆。"
+        answer = await session.prompt_async(
+            HTML(f"<ansiyellow>将清空当前项目 {count} 条长期记忆？输入 clear 确认 ></ansiyellow> ")
+        )
+        if answer.strip().lower() != "clear":
+            return "已取消，长期记忆未改变。"
+        try:
+            removed = memory.clear()
+        except (MemoryUnavailableError, OSError) as exc:
+            return f"记忆操作失败：{exc}"
+        return f"已清空当前项目的 {removed} 条长期记忆。"
+
+    return _cmd_memory_sync(agent, cmd, arg)
 
 
 def _cmd_hitl(agent: ReActAgent, arg: str) -> str:

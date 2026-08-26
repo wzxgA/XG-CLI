@@ -63,6 +63,9 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | 命令 | 说明 |
 |------|------|
 | `/plan <任务>` | 计划模式：先拆解为子任务 DAG，审阅后按批次执行（见下） |
+| `/init` | 分析当前项目，预览并生成 `XG.md` 项目记忆（已有文件不覆盖） |
+| `/save <内容>` | 显式保存一条当前项目长期记忆 |
+| `/memory list\|search\|delete\|clear` | 管理当前项目的长期记忆 |
 | `/model` | 切换 provider / 模型（见上） |
 | `/config` | 显示当前生效配置（Key 脱敏） |
 | `/config list` | provider 能力表 |
@@ -73,7 +76,7 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `/clear` | 清空当前对话上下文 |
 | `/exit` | 退出 |
 
-## 计划模式（第 4 期）
+## 计划模式
 
 ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解为「子任务 + 依赖图」，经审阅后按依赖批次执行：
 
@@ -83,9 +86,9 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 4. **执行**：子任务以独立迷你 ReAct 循环执行（步数上限默认 10），依赖结果摘要注入下游上下文；子任务失败时错误注入依赖方让其自行调整，失败数超过上限（默认 3）终止剩余批次
 5. **汇总**：`plan_done` / `plan_failed` 面板展示各子任务状态与结果
 
-子任务执行复用第 3 期全部安全机制：并行工具、HITL 审批、策略层黑名单/路径越界拒绝、审计（含 `subtask_started` / `subtask_done` 事件）。
+子任务执行复用全部安全机制：并行工具、HITL 审批、策略层黑名单/路径越界拒绝、审计（含 `subtask_started` / `subtask_done` 事件）。
 
-## 安全机制（第 3 期）
+## 安全机制
 
 - **并行执行**：模型一轮返回多个工具调用时并行执行（默认 4 并发），结果按原始顺序回灌
 - **HITL 审批**：危险操作（默认 `execute_command` 必审、`write_file` 确认）执行前弹审批：`Enter` 批准 / `a` 本会话全部放行 / `r` 拒绝 / `s` 跳过 / `e` 改参后执行
@@ -93,6 +96,13 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 - **审计日志**：所有工具调用/审批/拒绝记录到 `.xg/audit.log`（JSONL，敏感字段脱敏）
 
 内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command`。
+
+## 记忆与上下文
+
+- 项目根目录的 `XG.md`（共享）和 `XG.local.md`（本地可选）会自动注入每次任务；运行中修改后下一次顶层任务自动热加载。
+- `/save <内容>` 将用户明确提供的内容保存到项目 `.xg/memory.db`，不会自动保存普通聊天；`/clear` 不会清除长期记忆。
+- 长对话接近上下文预算时会自动压缩较旧的完整对话轮次，保留最近轮次和工具调用关系；无法安全压缩时才停止并提示。
+- `.xg/memory.db` 是本地明文数据库，项目记忆会发送给当前 LLM provider。不要在 `XG.md` 或 `/save` 中放置 API Key、密码等敏感信息。
 
 ## 配置项
 
@@ -104,6 +114,11 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 | `XG_API_BASE` | 旧键兼容，仅对 openai 生效 |
 | `XG_MODEL` | 默认模型（未配置 active_model 时生效） |
 | `XG_CONTEXT_WINDOW` | 上下文窗口（token），覆盖 provider 能力声明 |
+| `XG_CONTEXT_BUDGET_RATIO` | 自动压缩前的输入预算比例（默认 0.8，限制 0.5~0.9） |
+| `XG_CONTEXT_KEEP_RECENT_TURNS` | 自动压缩保留的最近完整对话轮次（默认 4） |
+| `XG_CONTEXT_SUMMARY_MAX_TOKENS` | 摘要输出动态预留上限（默认 4096） |
+| `XG_MEMORY_PROMPT_MAX_CHARS` | 自动注入长期记忆的字符上限（默认 8000） |
+| `XG_PROJECT_MEMORY_MAX_CHARS` | 单个项目记忆文件读取上限（默认 32000） |
 | `XG_TOOL_STEPS` | 单轮工具调用步数上限（默认 20） |
 | `XG_MAX_PARALLEL` | 并行工具执行并发数（默认 4） |
 | `XG_TOOL_TIMEOUT` | 单工具执行超时秒数（默认 120） |

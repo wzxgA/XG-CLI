@@ -23,6 +23,14 @@ class Settings:
     tool_steps: int = 20
     # token 预算阈值：messages 估算 token 超过 window * budget_ratio 时终止循环
     budget_ratio: float = 0.8
+    # 第 5 期：自动压缩时保留的最近完整对话轮次
+    context_keep_recent_turns: int = 4
+    # 第 5 期：摘要输出动态预留上限
+    context_summary_max_tokens: int = 4096
+    # 第 5 期：自动注入长期记忆的字符上限
+    memory_prompt_max_chars: int = 8000
+    # 第 5 期：单个 XG.md/XG.local.md 的读取字符上限
+    project_memory_max_chars: int = 32000
     # 工具输出超出该字符数则截断，防止撑爆上下文
     max_tool_output_chars: int = 20_000
     # 并行工具执行并发数（第 3 期）
@@ -63,6 +71,11 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         model=active.model,
         context_window=active.context_window,
         tool_steps=_get_int(manager.env, "XG_TOOL_STEPS", 20),
+        budget_ratio=_clamp_float(_get_float(manager.env, "XG_CONTEXT_BUDGET_RATIO", 0.8), 0.5, 0.9),
+        context_keep_recent_turns=max(0, _get_int(manager.env, "XG_CONTEXT_KEEP_RECENT_TURNS", 4)),
+        context_summary_max_tokens=max(512, _get_int(manager.env, "XG_CONTEXT_SUMMARY_MAX_TOKENS", 4096)),
+        memory_prompt_max_chars=max(256, _get_int(manager.env, "XG_MEMORY_PROMPT_MAX_CHARS", 8000)),
+        project_memory_max_chars=max(256, _get_int(manager.env, "XG_PROJECT_MEMORY_MAX_CHARS", 32000)),
         max_parallel=_get_int(manager.env, "XG_MAX_PARALLEL", 4),
         tool_timeout=_get_float(manager.env, "XG_TOOL_TIMEOUT", 120.0),
         hitl=manager.env.get("XG_HITL", "on").lower() not in ("off", "0", "false"),
@@ -86,3 +99,7 @@ def _get_int(env: dict[str, str], name: str, default: int) -> int:
         return int(raw) if raw else default
     except ValueError:
         return default
+
+
+def _clamp_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))

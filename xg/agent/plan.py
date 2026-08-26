@@ -20,6 +20,8 @@ from xg.agent.react import AgentEvent, DEFAULT_SYSTEM_PROMPT, ReActAgent
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.types import Message
+from xg.memory.context import ConversationContext
+from xg.memory.manager import MemoryManager
 from xg.safety.hitl import HITLPolicy
 from xg.tool.registry import ToolRegistry
 
@@ -237,6 +239,7 @@ class PlanExecutor:
         reviewer: PlanReviewer | None = None,
         approval_policy: HITLPolicy | None = None,
         audit=None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -244,6 +247,7 @@ class PlanExecutor:
         self.reviewer = reviewer
         self.approval_policy = approval_policy
         self.audit = audit
+        self.memory_manager = memory_manager
 
     async def run(self, goal: str) -> AsyncIterator[PlanEvent]:
         """执行完整流程：拆解 → 审阅（可循环重规划）→ 按批次执行 → 汇总。"""
@@ -321,10 +325,18 @@ class PlanExecutor:
 
         返回 (plan, warnings)；重试用尽返回 (None, warnings)。
         """
-        messages = [
-            Message(role="system", content=PLANNER_SYSTEM_PROMPT),
-            Message(role="user", content=self._planner_prompt(goal, feedback, previous)),
-        ]
+        planner_context = ConversationContext(
+            PLANNER_SYSTEM_PROMPT,
+            self.settings,
+            shared_provider=self.memory_manager.shared_sections if self.memory_manager else None,
+        )
+        planner_context.append(
+            Message(role="user", content=self._planner_prompt(goal, feedback, previous))
+        )
+        budget = await planner_context.ensure_budget(self.llm)
+        if not budget.proceed:
+            raise LlmError(budget.message or "规划上下文超出模型窗口")
+        messages = planner_context.build_messages()
         warnings: list[str] = []
         for _attempt in range(1 + PLAN_MAX_RETRIES):
             raw = await self._llm_text(messages)
@@ -426,9 +438,13 @@ class PlanExecutor:
             system_prompt=self._subtask_system_prompt(plan, task),
             approval_policy=self.approval_policy,
             audit=self.audit,
+            memory_manager=self.memory_manager,
         )
         async for event in agent.run(self._subtask_user_prompt(task)):
-            if event.kind in ("content", "tool_call", "approval", "tool_result"):
+            if event.kind in (
+                "content", "tool_call", "approval", "tool_result",
+                "context_compacted", "context_warning",
+            ):
                 queue.put_nowait(PlanEvent(
                     kind="subtask_event", plan=plan, task=task, agent_event=event
                 ))
@@ -436,8 +452,8 @@ class PlanExecutor:
                 return "", f"LLM 请求失败: {event.text}"
             elif event.kind == "step_limit":
                 return "", f"达到子任务步数上限（{self.settings.plan_subtask_steps}）"
-            elif event.kind == "budget_exceeded":
-                return "", "子任务上下文 token 超限"
+            elif event.kind in ("budget_exceeded", "context_overflow"):
+                return "", event.text or "子任务上下文 token 超限"
         # 成功：取最后一条含内容的 assistant 消息作为结果摘要
         final = ""
         for m in reversed(agent.messages):

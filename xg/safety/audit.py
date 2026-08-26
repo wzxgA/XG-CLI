@@ -14,7 +14,18 @@ from uuid import uuid4
 
 _SENSITIVE_KEY_RE = re.compile(r"^(api_key|apikey|token|authorization|password|secret|private_key)$", re.I)
 _BEARER_RE = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]+", re.I)
+_SECRET_ASSIGN_RE = re.compile(
+    r"\b(api[_-]?key|access[_-]?token|auth(?:orization)?|password|secret)"
+    r"(\s*[:=]\s*)(?!Bearer\b)([^\s,;]+)",
+    re.I,
+)
 _REDACTED = "***"
+
+
+def redact_text(value: str) -> str:
+    """脱敏文本中的 Bearer token 与常见 key=value 形式敏感值。"""
+    value = _BEARER_RE.sub(r"\1***", value)
+    return _SECRET_ASSIGN_RE.sub(r"\1\2***", value)
 
 
 def redact(value: Any) -> Any:
@@ -27,7 +38,7 @@ def redact(value: Any) -> Any:
     if isinstance(value, list):
         return [redact(v) for v in value]
     if isinstance(value, str):
-        return _BEARER_RE.sub(r"\1***", value)
+        return redact_text(value)
     return value
 
 

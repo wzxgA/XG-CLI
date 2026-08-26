@@ -14,6 +14,8 @@ from typing import AsyncIterator, Literal
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.types import Message, ToolCall, ToolResult
+from xg.memory.context import ConversationContext
+from xg.memory.manager import MemoryManager
 from xg.safety.hitl import ApprovalDecision, HITLPolicy
 from xg.tool.registry import ToolRegistry
 
@@ -33,12 +35,18 @@ class AgentEvent:
     - approval: HITL 审批结果（approved / rejected / modified）
     - tool_result: 工具执行完成（含被拒绝的 USER_REJECTED）
     - step_limit: 达到步数上限，循环终止
-    - budget_exceeded: token 预算超限，循环终止
+    - context_compacted: 历史已自动压缩
+    - context_warning: 共享记忆被截断或记忆功能不可用
+    - context_overflow / budget_exceeded: 上下文仍超限，循环终止
     - error: LLM 请求失败
     - done: 本轮正常结束
     """
 
-    kind: Literal["content", "tool_call", "approval", "tool_result", "step_limit", "budget_exceeded", "error", "done"]
+    kind: Literal[
+        "content", "tool_call", "approval", "tool_result", "step_limit",
+        "budget_exceeded", "context_compacted", "context_warning",
+        "context_overflow", "error", "done"
+    ]
     text: str = ""
     tool_call: ToolCall | None = None
     tool_result: ToolResult | None = None
@@ -54,42 +62,60 @@ class ReActAgent:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         approval_policy: HITLPolicy | None = None,
         audit=None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
         self.settings = settings
         self.approval_policy = approval_policy
         self.audit = audit
-        self.messages: list[Message] = [Message(role="system", content=system_prompt)]
+        self.memory_manager = memory_manager
+        self.context = ConversationContext(
+            system_prompt,
+            settings,
+            shared_provider=memory_manager.shared_sections if memory_manager else None,
+        )
+        self._reported_memory_warnings: set[str] = set()
+        # 保持前四期公开属性兼容：外部追加 messages 会直接进入短期历史。
+        self.messages = self.context.history
 
     def clear(self) -> None:
-        """清空对话上下文（保留 system prompt）。"""
-        self.messages = [self.messages[0]]
+        """清空短期对话与摘要（保留基础 prompt 和共享记忆）。"""
+        self.context.clear()
 
     def estimate_tokens(self) -> int:
-        return sum(
-            self.settings.estimate_tokens(m.content)
-            + sum(
-                self.settings.estimate_tokens(tc.name + tc.arguments)
-                for tc in m.tool_calls
-            )
-            for m in self.messages
-        )
+        return self.context.estimate_request_tokens(self.tools.schemas())
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """执行一轮 ReAct 循环。"""
-        self.messages.append(Message(role="user", content=user_input))
+        self.context.append(Message(role="user", content=user_input))
 
         for _step in range(self.settings.tool_steps):
-            # token 预算检查：超限则终止并提示
-            if self.estimate_tokens() > self.settings.token_budget:
-                yield AgentEvent(kind="budget_exceeded")
+            if self.memory_manager is not None:
+                for warning in self.memory_manager.warnings():
+                    if warning not in self._reported_memory_warnings:
+                        self._reported_memory_warnings.add(warning)
+                        yield AgentEvent(kind="context_warning", text=warning)
+            budget = await self.context.ensure_budget(self.llm, self.tools.schemas())
+            for warning in budget.warnings:
+                yield AgentEvent(kind="context_warning", text=warning)
+            if budget.status == "compacted":
+                yield AgentEvent(kind="context_compacted", text=budget.message)
+            elif budget.status == "error":
+                yield AgentEvent(kind="context_warning", text=budget.message)
+            if not budget.proceed:
+                # context_overflow 是第五期语义事件；budget_exceeded 保留给前四期
+                # 调用方，确保旧 CLI/测试仍能识别安全终止。
+                yield AgentEvent(kind="context_overflow", text=budget.message)
+                yield AgentEvent(kind="budget_exceeded", text=budget.message)
                 return
+
+            request_messages = self.context.build_messages()
 
             content_parts: list[str] = []
             tool_calls: list[ToolCall] = []
             try:
-                async for event in self.llm.stream_chat(self.messages, self.tools.schemas()):
+                async for event in self.llm.stream_chat(request_messages, self.tools.schemas()):
                     if event.kind == "content" and event.text:
                         content_parts.append(event.text)
                         yield AgentEvent(kind="content", text=event.text)
@@ -101,12 +127,12 @@ class ReActAgent:
 
             if not tool_calls:
                 # 无工具调用：本轮结束
-                self.messages.append(Message(role="assistant", content="".join(content_parts)))
+                self.context.append(Message(role="assistant", content="".join(content_parts)))
                 yield AgentEvent(kind="done")
                 return
 
             # 记录 assistant 消息（含 tool_calls）
-            self.messages.append(
+            self.context.append(
                 Message(role="assistant", content="".join(content_parts), tool_calls=tool_calls)
             )
             for call in tool_calls:
@@ -163,7 +189,7 @@ class ReActAgent:
                     tool_call_id=call.id, name=call.name, ok=False, error="未执行"
                 )
                 yield AgentEvent(kind="tool_result", tool_result=result)
-                self.messages.append(
+                self.context.append(
                     Message(
                         role="tool",
                         content=result.to_message_content(),
