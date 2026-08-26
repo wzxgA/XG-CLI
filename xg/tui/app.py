@@ -34,7 +34,7 @@ class XgTuiApp(App[None]):
         ("enter", "plan_execute", "execute plan"),
         ("d", "plan_details", "plan details"),
         ("r", "plan_replan", "replan"),
-        ("escape", "plan_cancel", "cancel plan"),
+        ("escape", "escape", "cancel or clear"),
         ("ctrl+c", "cancel_turn", "取消当前任务"),
         ("ctrl+l", "clear_transcript", "清屏"),
         ("ctrl+r", "toggle_inspector", "侧栏"),
@@ -165,9 +165,22 @@ class XgTuiApp(App[None]):
         note.update("请输入重新规划要求，Enter 提交；Esc 取消计划")
         note.display = True
 
-    def action_plan_cancel(self) -> None:
-        if self._has_pending_plan() and not self._replan_mode:
-            asyncio.create_task(self.controller.review_plan(ReviewDecision(action="cancel")))
+    async def action_escape(self) -> None:
+        """Give Escape a useful, state-aware meaning in every main-screen state."""
+        if self._has_pending_plan():
+            self._replan_mode = False
+            composer = self.query_one("#composer", Composer)
+            composer.value = ""
+            composer.placeholder = "输入任务或 /help …"
+            composer.disabled = True
+            await self.controller.review_plan(ReviewDecision(action="cancel"))
+            return
+        if self.controller.busy:
+            await self.controller.cancel()
+            return
+        composer = self.query_one("#composer", Composer)
+        if not composer.disabled:
+            composer.value = ""
 
     def action_toggle_inspector(self) -> None:
         inspector = self.query_one("#inspector", InspectorPanel)

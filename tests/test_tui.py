@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -34,6 +35,18 @@ class PlanClient(LlmClient):
             )
         else:
             yield StreamEvent(kind="content", text="完成")
+        yield StreamEvent(kind="done")
+
+
+class SlowClient(LlmClient):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+        self.started.set()
+        await self.release.wait()
+        yield StreamEvent(kind="content", text="finished")
         yield StreamEvent(kind="done")
 
 
@@ -74,6 +87,9 @@ async def test_tui_pilot_layout_and_input(tmp_path):
         assert app.query_one("#transcript")
         assert app.query_one("#composer").has_focus
         await pilot.press("h", "i")
+        await pilot.press("escape")
+        assert app.query_one("#composer").value == ""
+        await pilot.press("h", "i")
         await pilot.press("enter")
         await pilot.pause()
         assert app.controller.state.phase == "idle"
@@ -110,6 +126,30 @@ async def test_tui_plan_renders_inline_without_opening_screen(tmp_path):
         await pilot.pause()
         plan_item = next(item for item in app.controller.state.transcript if item.kind == "plan")
         assert plan_item.collapsed is False
-        await pilot.press("enter")
+        await pilot.press("r")
         await pilot.pause()
+        assert app._replan_mode is True
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.controller.state.phase == "idle"
+        assert app._replan_mode is False
+
+
+@pytest.mark.asyncio
+async def test_tui_escape_cancels_running_task(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    client = SlowClient()
+    agent = ReActAgent(client, build_registry(base_dir=project), settings)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.query_one("#composer").value = "long task"
+        await pilot.press("enter")
+        await asyncio.wait_for(client.started.wait(), 1)
+        assert app.controller.busy is True
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert app.controller.busy is False
         assert app.controller.state.phase == "idle"
