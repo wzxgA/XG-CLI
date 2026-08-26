@@ -99,6 +99,29 @@ def test_renderer_routes_long_edges_around_intermediate_nodes() -> None:
         assert any(label in line and "│" in line for line in result.text.splitlines())
 
 
+def test_renderer_keeps_dependency_arrows_distinct_and_wraps_long_titles() -> None:
+    model = parse_flowchart(
+        """flowchart TD
+        a[起点] --> b[分支一]
+        a --> c[分支二]
+        b --> d[这是一个很长很长很长很长很长的任务标题]
+        c --> d
+        """
+    )
+    result = render_flowchart(
+        model,
+        width=100,
+        rank_by_node={"a": 0, "b": 1, "c": 1, "d": 2},
+    )
+
+    assert result.mode == "unicode"
+    assert result.text.count("▼") == 4
+    assert "这是一个很长很长很长" in result.text
+    assert "很长的任务标题" in result.text
+    assert "…" not in result.text
+    assert all(cell_len(line) <= 100 for line in result.text.splitlines())
+
+
 def test_assistant_mermaid_is_rendered_as_a_card_and_source_can_be_shown() -> None:
     item = TranscriptItem(
         id="assistant-1",

@@ -46,21 +46,43 @@ def _fit(value: str, width: int) -> str:
     return result + "…"
 
 
+def _wrap(value: str, width: int) -> list[str]:
+    """Wrap text by terminal cells without dropping CJK or emoji characters."""
+    if width <= 0:
+        return [""]
+    lines: list[str] = []
+    for raw_line in value.replace("\r", "").split("\n"):
+        current = ""
+        used = 0
+        for char in raw_line:
+            char_width = cell_len(char)
+            if char_width > 0 and current and used + char_width > width:
+                lines.append(current)
+                current = ""
+                used = 0
+            current += char
+            used += char_width
+        lines.append(current)
+    return lines or [""]
+
+
 def _node_width(node: FlowchartNode, *, unicode: bool) -> int:
-    # Two spaces of padding plus a little room for shape markers.  The shape
-    # itself remains an approximation in a monospace terminal.
-    return max(7, cell_len(_fit(node.label, 38)) + 4)
+    # Keep nodes bounded so long titles wrap instead of forcing the whole
+    # diagram beyond the terminal width.
+    longest_line = max((cell_len(line) for line in node.label.splitlines()), default=0)
+    return max(7, min(38, longest_line) + 4)
 
 
 def _box(node: FlowchartNode, width: int, *, unicode: bool) -> list[str]:
     chars = _UNICODE if unicode else _ASCII
-    label = _fit(node.label, width - 4)
-    padding = max(0, width - 2 - cell_len(label))
-    left = padding // 2
-    right = padding - left
     top = chars["tl"] + chars["h"] * (width - 2) + chars["tr"]
-    middle = chars["v"] + " " * left + label + " " * right + chars["v"]
     bottom = chars["bl"] + chars["h"] * (width - 2) + chars["br"]
+    middle: list[str] = []
+    for label in _wrap(node.label, width - 4):
+        padding = max(0, width - 2 - cell_len(label))
+        left = padding // 2
+        right = padding - left
+        middle.append(chars["v"] + " " * left + label + " " * right + chars["v"])
     if node.shape == "round":
         if unicode:
             top = "╭" + "─" * (width - 2) + "╮"
@@ -80,7 +102,7 @@ def _box(node: FlowchartNode, width: int, *, unicode: bool) -> list[str]:
         # widths while avoiding a large, fragile multi-line polygon.
         top = "<" + "-" * (width - 2) + ">" if not unicode else "◇" + "─" * (width - 2) + "◇"
         bottom = top
-    return [top, middle, bottom]
+    return [top, *middle, bottom]
 
 
 def _blank(width: int, height: int) -> list[list[str]]:
@@ -131,6 +153,12 @@ def _merge_edge_char(existing: str, value: str, *, unicode: bool) -> str:
     """Merge crossing connector characters without destroying either path."""
     if existing in (" ", _CONTINUATION):
         return value
+    # An arrow is the semantic endpoint of an edge.  It must win over the
+    # vertical segment that was drawn immediately before it.
+    if value in {"▼", "▶", "v", ">"}:
+        return value
+    if existing in {"▼", "▶", "v", ">"}:
+        return existing
     if existing == value:
         return existing
     if not unicode:
@@ -149,13 +177,13 @@ def _put_edge(
     value: str,
     *,
     unicode: bool,
-    node_regions: list[tuple[int, int, int, int]],
+    node_regions: list[tuple[int, int, int, int, int]],
 ) -> None:
     """Write a connector while protecting every node rectangle."""
     if not (0 <= y < len(canvas) and 0 <= x < len(canvas[y])):
         return
-    if any(left <= x < left + node_width and top <= y < top + 3
-           for left, top, node_width, _ in node_regions):
+    if any(left <= x < left + node_width and top <= y < top + node_height
+           for left, top, node_width, node_height, _ in node_regions):
         return
     existing = canvas[y][x]
     if existing == _CONTINUATION:
@@ -171,7 +199,7 @@ def _draw_edge_horizontal(
     char: str,
     *,
     unicode: bool,
-    node_regions: list[tuple[int, int, int, int]],
+    node_regions: list[tuple[int, int, int, int, int]],
 ) -> None:
     start, end = sorted((x1, x2))
     for x in range(start, end + 1):
@@ -186,7 +214,7 @@ def _draw_edge_vertical(
     char: str,
     *,
     unicode: bool,
-    node_regions: list[tuple[int, int, int, int]],
+    node_regions: list[tuple[int, int, int, int, int]],
 ) -> None:
     start, end = sorted((y1, y2))
     for y in range(start, end + 1):
@@ -198,17 +226,14 @@ def _safe_vertical_lanes(
     *,
     source_rank: int,
     target_rank: int,
-    node_regions: list[tuple[int, int, int, int]],
-    layer_y: list[int],
+    node_regions: list[tuple[int, int, int, int, int]],
 ) -> list[int]:
     """Return x columns that stay outside nodes crossed by a long edge."""
     blocked: set[int] = set()
     for rank in range(source_rank + 1, target_rank):
-        top = layer_y[rank]
-        for left, node_top, node_width, _ in node_regions:
-            if node_top != top:
-                continue
-            blocked.update(range(left, left + node_width))
+        for left, _, node_width, _, node_rank in node_regions:
+            if node_rank == rank:
+                blocked.update(range(left, left + node_width))
     return [x for x in range(canvas_width) if x not in blocked]
 
 
@@ -243,45 +268,97 @@ def _text_dimensions(text: str) -> tuple[int, int]:
 def _render_vertical(model: FlowchartModel, layout: FlowchartLayout, *, width: int, unicode: bool) -> str:
     node_by_id = {node.id: node for node in model.nodes}
     gap_x = 5
-    gap_y = 2
     widths = {node.id: _node_width(node, unicode=unicode) for node in model.nodes}
+    boxes = {node.id: _box(node, widths[node.id], unicode=unicode) for node in model.nodes}
+    heights = {node.id: len(boxes[node.id]) for node in model.nodes}
     layer_widths = [sum(widths[n] for n in layer) + gap_x * max(0, len(layer) - 1) for layer in layout.ranks]
     rank_by_node = {
         node_id: rank
         for rank, layer in enumerate(layout.ranks)
         for node_id in layer
     }
-    long_edge_count = sum(
-        1
-        for edge in model.edges
-        if edge.source in rank_by_node
+    layer_heights = [max((heights[node_id] for node_id in layer), default=3) for layer in layout.ranks]
+    adjacent_edges: dict[int, list[tuple[int, object]]] = {}
+    for edge_index, edge in enumerate(model.edges):
+        source_rank = rank_by_node.get(edge.source)
+        target_rank = rank_by_node.get(edge.target)
+        if source_rank is not None and target_rank == source_rank + 1:
+            adjacent_edges.setdefault(source_rank, []).append((edge_index, edge))
+
+    # Each direct dependency gets its own horizontal routing row.  Without
+    # this extra space, all edges between two rounds collapse into one bus.
+    layer_gaps = {
+        rank: max(2, len(edges) + 1)
+        for rank, edges in adjacent_edges.items()
+    }
+    layer_y = [0]
+    for rank in range(max(0, len(layout.ranks) - 1)):
+        layer_y.append(layer_y[-1] + layer_heights[rank] + layer_gaps.get(rank, 2))
+
+    # Reserve a small outer channel for edges which must pass around one or
+    # more intermediate ranks.  Multiple channels are selected below so
+    # long edges remain individually traceable.
+    long_edge_count = any(
+        edge.source in rank_by_node
         and edge.target in rank_by_node
         and rank_by_node[edge.target] - rank_by_node[edge.source] > 1
+        for edge in model.edges
     )
-    # Reserve a small outer channel for edges which must pass around one or
-    # more intermediate ranks.  Multiple edges may share the channel; their
-    # crossings are merged instead of overwriting nodes or other connectors.
     routing_margin = 2 if long_edge_count else 0
     canvas_width = max(layer_widths or [1]) + routing_margin * 2
     if canvas_width > width:
         raise ValueError("flowchart width exceeded")
-    box_h = 3
-    layer_y = [rank * (box_h + gap_y) for rank in range(len(layout.ranks))]
-    canvas = _blank(canvas_width, max(1, len(layout.ranks) * (box_h + gap_y) - gap_y))
+    canvas_height = (layer_y[-1] + layer_heights[-1]) if layer_y else 1
+    canvas = _blank(canvas_width, max(1, canvas_height))
     positions: dict[str, tuple[int, int]] = {}
-    node_regions: list[tuple[int, int, int, int]] = []
+    node_regions: list[tuple[int, int, int, int, int]] = []
     for rank, layer in enumerate(layout.ranks):
         current_x = (canvas_width - layer_widths[rank]) // 2
         for node_id in layer:
             node_width = widths[node_id]
             y = layer_y[rank]
-            for row, line in enumerate(_box(node_by_id[node_id], node_width, unicode=unicode)):
+            for row, line in enumerate(boxes[node_id]):
                 _put_text(canvas, current_x, y + row, line)
             positions[node_id] = (current_x, y)
-            node_regions.append((current_x, y, node_width, rank))
+            node_regions.append((current_x, y, node_width, heights[node_id], rank))
             current_x += node_width + gap_x
 
     chars = _UNICODE if unicode else _ASCII
+    edge_index_by_identity = {id(edge): edge_index for edge_index, edge in enumerate(model.edges)}
+    incoming_edges: dict[str, list[int]] = {}
+    for edge_index, edge in enumerate(model.edges):
+        if edge.source in positions and edge.target in positions:
+            incoming_edges.setdefault(edge.target, []).append(edge_index)
+    target_ports: dict[int, int] = {}
+    for target, edge_indices in incoming_edges.items():
+        target_x, _ = positions[target]
+        target_width = widths[target]
+        inner_width = max(1, target_width - 2)
+        ordered_edges = sorted(
+            edge_indices,
+            key=lambda edge_index: (
+                model.edges[edge_index].source,
+                model.edges[edge_index].target,
+                edge_index,
+            ),
+        )
+        for order, edge_index in enumerate(ordered_edges):
+            if len(ordered_edges) == 1:
+                offset = inner_width // 2
+            else:
+                offset = round(order * (inner_width - 1) / (len(ordered_edges) - 1))
+            target_ports[edge_index] = target_x + 1 + offset
+
+    edge_rows: dict[int, dict[int, int]] = {}
+    for rank, edges in adjacent_edges.items():
+        start = layer_y[rank] + layer_heights[rank]
+        end = layer_y[rank + 1] - 1
+        rows = list(range(start, end + 1))
+        edge_rows[rank] = {
+            edge_index: rows[min(order, len(rows) - 1)]
+            for order, (edge_index, _) in enumerate(edges)
+        }
+    used_long_lanes: set[int] = set()
     for edge in sorted(
         model.edges,
         key=lambda item: (
@@ -297,23 +374,29 @@ def _render_vertical(model: FlowchartModel, layout: FlowchartLayout, *, width: i
         tx, ty = positions[edge.target]
         source_w = widths[edge.source]
         target_w = widths[edge.target]
-        start_x, end_x = sx + source_w // 2, tx + target_w // 2
-        start_y, end_y = sy + box_h, ty - 1
+        source_h = heights[edge.source]
+        edge_index = edge_index_by_identity[id(edge)]
+        start_x = sx + source_w // 2
+        end_x = target_ports.get(edge_index, tx + target_w // 2)
+        start_y, end_y = sy + source_h, ty - 1
         if end_y < start_y:
             continue  # backward/cyclic edge: do not overwrite another box
-        line_char = "." if edge.style == "dotted" else "=" if edge.style == "thick" else chars["v"]
+        horizontal_char = "." if edge.style == "dotted" else "=" if edge.style == "thick" else chars["h"]
+        vertical_char = "." if edge.style == "dotted" else "=" if edge.style == "thick" else chars["v"]
         source_rank = rank_by_node[edge.source]
         target_rank = rank_by_node[edge.target]
         if target_rank - source_rank <= 1:
-            # Adjacent ranks have a clear gap, so route directly through it.
-            _draw_edge_horizontal(
-                canvas, start_y, start_x, end_x,
-                chars["h"] if line_char != "." else ".",
-                unicode=unicode,
-                node_regions=node_regions,
+            # Route each adjacent edge through its own row in the gap.
+            route_y = edge_rows.get(source_rank, {}).get(
+                edge_index,
+                layer_y[source_rank] + layer_heights[source_rank],
             )
+            _draw_edge_vertical(canvas, start_x, start_y, route_y, vertical_char,
+                                unicode=unicode, node_regions=node_regions)
+            _draw_edge_horizontal(canvas, route_y, start_x, end_x, horizontal_char,
+                                  unicode=unicode, node_regions=node_regions)
             _draw_edge_vertical(
-                canvas, end_x, start_y, end_y, line_char,
+                canvas, end_x, route_y, end_y, vertical_char,
                 unicode=unicode,
                 node_regions=node_regions,
             )
@@ -323,28 +406,27 @@ def _render_vertical(model: FlowchartModel, layout: FlowchartLayout, *, width: i
                 source_rank=source_rank,
                 target_rank=target_rank,
                 node_regions=node_regions,
-                layer_y=layer_y,
             )
-            lane = _choose_vertical_lane(lanes, start_x, end_x)
+            unused_lanes = [lane for lane in lanes if lane not in used_long_lanes]
+            lane = _choose_vertical_lane(unused_lanes or lanes, start_x, end_x)
             if lane is None:
                 # This should only occur for an invalid layout with no spare
                 # column. Keep the edge out of node cells rather than drawing
                 # a misleading line through another task.
                 continue
+            used_long_lanes.add(lane)
             _draw_edge_horizontal(
-                canvas, start_y, start_x, lane,
-                chars["h"] if line_char != "." else ".",
+                canvas, start_y, start_x, lane, horizontal_char,
                 unicode=unicode,
                 node_regions=node_regions,
             )
             _draw_edge_vertical(
-                canvas, lane, start_y, end_y, line_char,
+                canvas, lane, start_y, end_y, vertical_char,
                 unicode=unicode,
                 node_regions=node_regions,
             )
             _draw_edge_horizontal(
-                canvas, end_y, lane, end_x,
-                chars["h"] if line_char != "." else ".",
+                canvas, end_y, lane, end_x, horizontal_char,
                 unicode=unicode,
                 node_regions=node_regions,
             )
@@ -356,8 +438,9 @@ def _render_vertical(model: FlowchartModel, layout: FlowchartLayout, *, width: i
         if edge.label:
             label = _fit(edge.label, max(3, abs(end_x - start_x) - 2))
             if label and end_x != start_x and target_rank - source_rank <= 1:
+                route_y = edge_rows.get(source_rank, {}).get(edge_index, start_y)
                 label_x = min(start_x, end_x) + max(1, (abs(end_x - start_x) - cell_len(label)) // 2)
-                _put_text(canvas, label_x, start_y, label)
+                _put_text(canvas, label_x, route_y, label)
     return _canvas_text(canvas)
 
 
@@ -365,11 +448,13 @@ def _render_horizontal(model: FlowchartModel, layout: FlowchartLayout, *, width:
     node_by_id = {node.id: node for node in model.nodes}
     gap_x, gap_y = 7, 2
     widths = {node.id: _node_width(node, unicode=unicode) for node in model.nodes}
+    boxes = {node.id: _box(node, widths[node.id], unicode=unicode) for node in model.nodes}
+    heights = {node.id: len(boxes[node.id]) for node in model.nodes}
     layer_widths = [max((widths[n] for n in layer), default=7) for layer in layout.ranks]
     canvas_width = sum(layer_widths) + gap_x * max(0, len(layer_widths) - 1)
     if canvas_width > width:
         raise ValueError("flowchart width exceeded")
-    layer_heights = [len(layer) * 3 + max(0, len(layer) - 1) * gap_y for layer in layout.ranks]
+    layer_heights = [sum(heights[node_id] for node_id in layer) + max(0, len(layer) - 1) * gap_y for layer in layout.ranks]
     canvas_height = max(layer_heights or [3])
     canvas = _blank(canvas_width, canvas_height)
     positions: dict[str, tuple[int, int]] = {}
@@ -380,10 +465,10 @@ def _render_horizontal(model: FlowchartModel, layout: FlowchartLayout, *, width:
         for node_id in layer:
             node_w = widths[node_id]
             node_x = x + (layer_widths[rank] - node_w) // 2
-            for row, line in enumerate(_box(node_by_id[node_id], node_w, unicode=unicode)):
+            for row, line in enumerate(boxes[node_id]):
                 _put_text(canvas, node_x, y + row, line)
             positions[node_id] = (node_x, y)
-            y += 3 + gap_y
+            y += heights[node_id] + gap_y
         x += layer_widths[rank] + gap_x
 
     chars = _UNICODE if unicode else _ASCII
@@ -393,7 +478,7 @@ def _render_horizontal(model: FlowchartModel, layout: FlowchartLayout, *, width:
         sx, sy = positions[edge.source]
         tx, ty = positions[edge.target]
         start_x, end_x = sx + widths[edge.source], tx - 1
-        start_y, end_y = sy + 1, ty + 1
+        start_y, end_y = sy + heights[edge.source] // 2, ty + heights[edge.target] // 2
         if end_x < start_x:
             continue
         line_char = "." if edge.style == "dotted" else "=" if edge.style == "thick" else chars["h"]
