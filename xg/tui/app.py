@@ -22,7 +22,6 @@ from xg.tui.widgets.confirm_modal import ConfirmModal
 from xg.tui.widgets.footer import FooterBar
 from xg.tui.widgets.header import HeaderBar
 from xg.tui.widgets.inspector import InspectorPanel
-from xg.tui.widgets.plan_modal import PlanModal
 from xg.tui.widgets.transcript import TranscriptView
 
 
@@ -32,6 +31,10 @@ class XgTuiApp(App[None]):
     TITLE = "XG"
     CSS_PATH = "theme.tcss"
     BINDINGS = [
+        ("enter", "plan_execute", "execute plan"),
+        ("d", "plan_details", "plan details"),
+        ("r", "plan_replan", "replan"),
+        ("escape", "plan_cancel", "cancel plan"),
         ("ctrl+c", "cancel_turn", "取消当前任务"),
         ("ctrl+l", "clear_transcript", "清屏"),
         ("ctrl+r", "toggle_inspector", "侧栏"),
@@ -43,6 +46,7 @@ class XgTuiApp(App[None]):
         self.controller = SessionController(agent, settings, manager, self._on_state_change)
         self._state = self.controller.snapshot()
         self._modal_kind = ""
+        self._replan_mode = False
 
     def compose(self) -> ComposeResult:
         yield HeaderBar(id="header")
@@ -79,9 +83,6 @@ class XgTuiApp(App[None]):
         if state.pending_approval is not None and self._modal_kind != "approval":
             self._modal_kind = "approval"
             self.push_screen(ApprovalModal(state.pending_approval), self._approval_closed)
-        elif state.pending_plan is not None and self._modal_kind != "plan":
-            self._modal_kind = "plan"
-            self.push_screen(PlanModal(state.pending_plan), self._plan_closed)
         elif state.pending_confirmation is not None and self._modal_kind != "confirm":
             self._modal_kind = "confirm"
             self.push_screen(ConfirmModal(state.pending_confirmation), self._confirm_closed)
@@ -104,16 +105,6 @@ class XgTuiApp(App[None]):
             decision = decisions.get(value or "reject", ApprovalDecision(allow=False, reason="user_rejected"))
         asyncio.create_task(self.controller.approve_tool(decision))
 
-    def _plan_closed(self, value: str | None) -> None:
-        self._modal_kind = ""
-        if value == "execute":
-            decision = ReviewDecision(action="execute")
-        elif value and value.startswith("replan:"):
-            decision = ReviewDecision(action="replan", feedback=value[7:])
-        else:
-            decision = ReviewDecision(action="cancel")
-        asyncio.create_task(self.controller.review_plan(decision))
-
     def _confirm_closed(self, value: str | None) -> None:
         self._modal_kind = ""
         asyncio.create_task(self.controller.confirm_command(value == "confirm"))
@@ -122,7 +113,15 @@ class XgTuiApp(App[None]):
         text = event.value.strip()
         event.input.value = ""
         if text:
-            asyncio.create_task(self._submit_text(text))
+            if self._replan_mode:
+                self._replan_mode = False
+                event.input.disabled = True
+                event.input.placeholder = "输入任务或 /help …"
+                asyncio.create_task(
+                    self.controller.review_plan(ReviewDecision(action="replan", feedback=text))
+                )
+            else:
+                asyncio.create_task(self._submit_text(text))
 
     async def _submit_text(self, text: str) -> None:
         try:
@@ -142,6 +141,33 @@ class XgTuiApp(App[None]):
         await self.controller.execute_command("/clear")
         self._state = self.controller.snapshot()
         self._render_state(self._state)
+
+    def _has_pending_plan(self) -> bool:
+        return self.controller.state.phase == "awaiting_plan_review" and self.controller.state.pending_plan is not None
+
+    def action_plan_execute(self) -> None:
+        if self._has_pending_plan() and not self._replan_mode:
+            asyncio.create_task(self.controller.review_plan(ReviewDecision(action="execute")))
+
+    def action_plan_details(self) -> None:
+        if self._has_pending_plan() and not self._replan_mode:
+            self.controller.toggle_plan_details()
+
+    def action_plan_replan(self) -> None:
+        if not self._has_pending_plan() or self._replan_mode:
+            return
+        self._replan_mode = True
+        composer = self.query_one("#composer", Composer)
+        composer.disabled = False
+        composer.placeholder = "输入重新规划要求，Enter 提交"
+        composer.focus()
+        note = self.query_one("#notification", Static)
+        note.update("请输入重新规划要求，Enter 提交；Esc 取消计划")
+        note.display = True
+
+    def action_plan_cancel(self) -> None:
+        if self._has_pending_plan() and not self._replan_mode:
+            asyncio.create_task(self.controller.review_plan(ReviewDecision(action="cancel")))
 
     def action_toggle_inspector(self) -> None:
         inspector = self.query_one("#inspector", InspectorPanel)

@@ -23,6 +23,7 @@ class TranscriptItem:
     tool_name: str = ""
     tool_args: str = ""
     tool_call_id: str = ""
+    plan: Any | None = None
     tool_ok: bool | None = None
     collapsed: bool = True
     streaming: bool = False

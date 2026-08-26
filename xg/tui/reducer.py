@@ -116,13 +116,17 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
         out.phase = "awaiting_plan_review"
         out.inspector.plan_status = "review"
         out.plan_tasks = {task.id: task.status for task in event.plan.tasks}
-        _append(out, TranscriptItem(id=f"plan-{len(out.transcript)}", kind="plan", text=event.plan.goal, turn_id=turn_id))
+        _append(out, TranscriptItem(
+            id=f"plan-{len(out.transcript)}", kind="plan", text=event.plan.goal,
+            plan=event.plan, turn_id=turn_id,
+        ))
         return out
     if kind == "review":
         out.phase = "awaiting_plan_review"
         return out
     if kind in ("approved", "replanned"):
         out.phase = "running"
+        out.pending_plan = None
         out.inspector.plan_status = "running"
         return out
     if kind == "batch_started":

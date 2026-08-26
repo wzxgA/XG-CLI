@@ -38,7 +38,23 @@ def render_item(item: TranscriptItem):
     if item.kind == "context":
         return Panel(Text(item.text), title="上下文", border_style="blue")
     if item.kind == "plan":
-        return Panel(Text(item.text), title="计划待审阅", border_style="magenta")
+        plan = item.plan
+        if plan is None:
+            return Panel(Text(item.text), title="计划", border_style="magenta")
+        lines = [f"目标：{plan.goal}", f"批次：{len(plan.batches)}"]
+        for batch_no, batch in enumerate(plan.batches, 1):
+            lines.append(f"批次 {batch_no}：{', '.join(batch)}")
+            for task_id in batch:
+                task = plan.task_by_id(task_id)
+                if task is None:
+                    continue
+                lines.append(f"  [{task.status}] {task.id}  {task.title}")
+                if not item.collapsed:
+                    deps = f"（依赖：{', '.join(task.deps)}）" if task.deps else ""
+                    lines.append(f"      {task.description}{deps}")
+        lines.append("")
+        lines.append("Enter 执行 · d 展开/折叠详情 · r 重规划 · Esc 取消")
+        return Panel(Text("\n".join(lines)), title="计划审阅", border_style="magenta")
     if item.kind == "error":
         return Panel(Text(item.text), title="错误", border_style="red")
     return Text(item.text, style="dim")

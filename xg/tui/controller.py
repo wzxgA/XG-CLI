@@ -187,6 +187,15 @@ class SessionController:
         if future is not None and not future.done():
             future.set_result(decision)
 
+    def toggle_plan_details(self) -> None:
+        """Toggle the latest inline plan card without opening another screen."""
+        items = list(self.state.transcript)
+        for index in range(len(items) - 1, -1, -1):
+            if items[index].kind == "plan":
+                items[index] = replace(items[index], collapsed=not items[index].collapsed)
+                self._set_state(replace(self.state, transcript=items))
+                return
+
     async def execute_command(self, raw: str) -> CommandResult:
         if raw.strip().lower() in ("/cancel", "/c"):
             await self.cancel()
