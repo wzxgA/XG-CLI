@@ -26,6 +26,7 @@ class TranscriptItem:
     plan: Any | None = None
     tool_ok: bool | None = None
     collapsed: bool = True
+    diagram_source_visible: bool = False
     streaming: bool = False
     turn_id: str = ""
 

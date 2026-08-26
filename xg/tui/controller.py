@@ -196,6 +196,20 @@ class SessionController:
                 self._set_state(replace(self.state, transcript=items))
                 return
 
+    def toggle_diagram_source(self) -> None:
+        """Toggle Mermaid source for the latest assistant diagram."""
+        items = list(self.state.transcript)
+        for index in range(len(items) - 1, -1, -1):
+            item = items[index]
+            if item.kind == "assistant" and "```mermaid" in item.text.lower():
+                items[index] = replace(item, diagram_source_visible=not item.diagram_source_visible)
+                self._set_state(replace(self.state, transcript=items))
+                return
+
+    def refresh_diagrams(self) -> None:
+        """Republish state so renderables recalculate their terminal layout."""
+        self._publish()
+
     async def execute_command(self, raw: str) -> CommandResult:
         if raw.strip().lower() in ("/cancel", "/c"):
             await self.cancel()

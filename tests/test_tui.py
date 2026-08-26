@@ -26,6 +26,12 @@ class DummyClient(LlmClient):
         yield StreamEvent(kind="done")
 
 
+class MermaidClient(LlmClient):
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+        yield StreamEvent(kind="content", text="流程如下：\n\n```mermaid\nflowchart LR\nA[开始] --> B[完成]\n```")
+        yield StreamEvent(kind="done")
+
+
 class PlanClient(LlmClient):
     async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
         if messages and "任务规划器" in messages[0].content:
@@ -133,6 +139,28 @@ async def test_tui_plan_renders_inline_without_opening_screen(tmp_path):
         await pilot.pause()
         assert app.controller.state.phase == "idle"
         assert app._replan_mode is False
+
+
+@pytest.mark.asyncio
+async def test_tui_mermaid_renders_inline_and_d_toggles_source(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    agent = ReActAgent(MermaidClient(), build_registry(base_dir=project), settings)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.query_one("#composer").value = "show diagram"
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert app.controller.state.phase == "idle"
+        item = next(item for item in app.controller.state.transcript if item.kind == "assistant")
+        assert item.diagram_source_visible is False
+        assert len(app.screen_stack) == 1
+        await pilot.press("d")
+        await pilot.pause()
+        item = next(item for item in app.controller.state.transcript if item.kind == "assistant")
+        assert item.diagram_source_visible is True
 
 
 @pytest.mark.asyncio

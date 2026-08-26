@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 
+from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from xg.tui.diagrams import FlowchartModel, FlowchartParseError, parse_flowchart, render_flowchart, split_mermaid_blocks
 from xg.tui.state import TranscriptItem
 
 
@@ -15,15 +17,72 @@ def _truncate(value: str, limit: int = 20_000) -> str:
     return value if len(value) <= limit else value[:limit] + "\n… (输出已截断)"
 
 
+def _mermaid_source(source: str) -> str:
+    return "```mermaid\n" + _truncate(source) + "\n```"
+
+
+class DiagramCard:
+    """Rich renderable for one Mermaid block inside the transcript."""
+
+    def __init__(
+        self,
+        source: str,
+        model: FlowchartModel | None,
+        *,
+        error: str = "",
+        source_visible: bool = False,
+    ) -> None:
+        self.source = source
+        self.model = model
+        self.error = error
+        self.source_visible = source_visible
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        available = max(20, options.max_width - 4)
+        if self.model is None:
+            body = f"Mermaid flowchart 暂无法渲染：{self.error}\n\n{_mermaid_source(self.source)}"
+            title = "Flowchart · parse failed"
+        else:
+            result = render_flowchart(self.model, width=available)
+            body = result.text
+            if result.warnings:
+                body += "\n\n⚠ " + "；".join(result.warnings)
+            title = f"Flowchart · {self.model.direction} · {len(self.model.nodes)} nodes · {len(self.model.edges)} edges"
+            if result.mode != "unicode":
+                title += f" · {result.mode}"
+        if self.source_visible:
+            body += "\n\n" + _mermaid_source(self.source)
+        body += "\n\n[d] 查看/隐藏 Mermaid 源码 · [r] 重新布局"
+        yield Panel(Text(_truncate(body)), title=title, border_style="bright_blue")
+
+
+def _assistant_renderable(item: TranscriptItem):
+    parts: list[object] = []
+    for text, block in split_mermaid_blocks(_truncate(item.text)):
+        if block is None:
+            if text:
+                try:
+                    parts.append(Markdown(text))
+                except Exception:
+                    parts.append(Text(text))
+            continue
+        try:
+            model = parse_flowchart(block.source)
+            parts.append(DiagramCard(block.source, model, source_visible=item.diagram_source_visible))
+        except FlowchartParseError as exc:
+            # An unsupported block remains visible as source; a malformed
+            # diagram must never prevent the rest of the assistant message.
+            parts.append(DiagramCard(block.source, None, error=str(exc), source_visible=True))
+    if not parts:
+        parts.append(Text("…"))
+    return Panel(Group(*parts), title="XG", border_style="green" if not item.streaming else "yellow")
+
+
 def render_item(item: TranscriptItem):
     if item.kind == "user":
         return Panel(Text(item.text), title="你", border_style="cyan")
     if item.kind == "assistant":
-        try:
-            body = Markdown(_truncate(item.text) or "…")
-        except Exception:
-            body = Text(item.text)
-        return Panel(body, title="XG", border_style="green" if not item.streaming else "yellow")
+        return _assistant_renderable(item)
     if item.kind == "tool_call":
         try:
             args = json.dumps(json.loads(item.tool_args), ensure_ascii=False, indent=2)

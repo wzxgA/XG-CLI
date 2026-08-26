@@ -152,9 +152,14 @@ class XgTuiApp(App[None]):
     def action_plan_details(self) -> None:
         if self._has_pending_plan() and not self._replan_mode:
             self.controller.toggle_plan_details()
+        elif not self._replan_mode:
+            self.controller.toggle_diagram_source()
 
     def action_plan_replan(self) -> None:
-        if not self._has_pending_plan() or self._replan_mode:
+        if self._replan_mode:
+            return
+        if not self._has_pending_plan():
+            self.controller.refresh_diagrams()
             return
         self._replan_mode = True
         composer = self.query_one("#composer", Composer)
@@ -199,6 +204,9 @@ class XgTuiApp(App[None]):
         # Sidebar is useful on wide terminals and should never squeeze the
         # conversation below a usable width.
         self.query_one("#inspector", InspectorPanel).display = event.size.width >= 100
+        # DiagramCard is a width-aware Rich renderable. Rewriting the log is
+        # enough to relayout it; no model or LLM request is involved.
+        self.query_one("#transcript", TranscriptView).update_state(self._state)
 
 
 def run_tui(agent, settings: Settings, manager: ConfigManager) -> None:
