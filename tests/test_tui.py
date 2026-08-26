@@ -27,6 +27,18 @@ class DummyClient(LlmClient):
         yield StreamEvent(kind="done")
 
 
+class PlanClient(LlmClient):
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+        if messages and "任务规划器" in messages[0].content:
+            yield StreamEvent(
+                kind="content",
+                text='{"tasks":[{"id":"t1","title":"测试任务","description":"只观察","deps":[]}]}'
+            )
+        else:
+            yield StreamEvent(kind="content", text="完成")
+        yield StreamEvent(kind="done")
+
+
 def make_context(tmp_path: Path):
     project = tmp_path / "project"
     project.mkdir()
@@ -81,3 +93,24 @@ async def test_tui_modals_open_and_close(tmp_path):
         app.push_screen(ApprovalModal(ApprovalRequest("execute_command", "always", {"command": "echo hi"})))
         await pilot.pause()
         await pilot.press("r")
+
+
+@pytest.mark.asyncio
+async def test_tui_plan_opens_review_modal_without_blocking_input(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    agent = ReActAgent(PlanClient(), build_registry(base_dir=project), settings)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.query_one("#composer").value = "/plan 测试计划"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        assert app.controller.state.phase == "awaiting_plan_review"
+        assert app.controller.state.pending_plan is not None
+        assert app._modal_kind == "plan"
+        assert len(app.screen_stack) == 2
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.controller.state.phase == "idle"

@@ -118,11 +118,20 @@ class XgTuiApp(App[None]):
         self._modal_kind = ""
         asyncio.create_task(self.controller.confirm_command(value == "confirm"))
 
-    async def on_input_submitted(self, event: Composer.Submitted) -> None:
+    def on_input_submitted(self, event: Composer.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
         if text:
+            asyncio.create_task(self._submit_text(text))
+
+    async def _submit_text(self, text: str) -> None:
+        try:
             await self.controller.submit(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.notify(f"任务失败：{exc}", severity="error")
+        finally:
             if text.lower() in ("/exit", "/quit"):
                 self.exit()
 
