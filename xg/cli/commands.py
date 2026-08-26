@@ -28,6 +28,74 @@ class CommandResult:
     data: object | None = None
 
 
+@dataclass(frozen=True)
+class SlashCommandSpec:
+    """Read-only metadata shared by command help and TUI suggestions."""
+
+    name: str
+    aliases: tuple[str, ...] = ()
+    usage: str = ""
+    description: str = ""
+    category: str = "general"
+
+
+# Keep this tuple in presentation order.  It is intentionally metadata only;
+# command execution remains in CommandService and the legacy compatibility
+# helpers in xg.cli.app.
+SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
+    SlashCommandSpec("/plan", usage="/plan <任务>", description="生成、审阅并执行计划", category="workflow"),
+    SlashCommandSpec("/model", usage="/model [provider] [model]", description="查看或切换 provider / 模型", category="config"),
+    SlashCommandSpec("/config", usage="/config get|set ...", description="查看或修改配置", category="config"),
+    SlashCommandSpec("/memory", usage="/memory list|search|delete|clear", description="管理长期记忆", category="memory"),
+    SlashCommandSpec("/help", aliases=("/?",), usage="/help", description="查看命令帮助", category="general"),
+    SlashCommandSpec("/init", usage="/init", description="初始化项目记忆", category="memory"),
+    SlashCommandSpec("/save", usage="/save <内容>", description="保存长期记忆", category="memory"),
+    SlashCommandSpec("/hitl", usage="/hitl on|off|reset", description="管理人工审批开关", category="safety"),
+    SlashCommandSpec("/clear", usage="/clear", description="清空当前上下文", category="session"),
+    SlashCommandSpec("/cancel", aliases=("/c",), usage="/cancel", description="取消当前任务", category="control"),
+    SlashCommandSpec("/exit", aliases=("/quit",), usage="/exit", description="退出程序", category="control"),
+)
+
+
+def filter_slash_commands(query: str) -> tuple[SlashCommandSpec, ...]:
+    """Return stable, prefix-matched command specs for a top-level token."""
+
+    normalized = query.strip().lower()
+    if not normalized.startswith("/") or any(char.isspace() for char in normalized):
+        return ()
+
+    # An exact alias is an unambiguous command selection. For example, `/c`
+    # is the cancel alias even though it is also a prefix of `/config` and
+    # `/clear`.
+    exact_alias = next(
+        (
+            spec
+            for spec in SLASH_COMMANDS
+            if any(alias.lower() == normalized for alias in spec.aliases)
+        ),
+        None,
+    )
+    if exact_alias is not None:
+        return (exact_alias,)
+
+    matches = [
+        (index, spec)
+        for index, spec in enumerate(SLASH_COMMANDS)
+        if spec.name.lower().startswith(normalized)
+        or any(alias.lower().startswith(normalized) for alias in spec.aliases)
+    ]
+    matches.sort(
+        key=lambda pair: (
+            0
+            if pair[1].name.lower() == normalized
+            or any(alias.lower() == normalized for alias in pair[1].aliases)
+            else 1,
+            pair[0],
+        )
+    )
+    return tuple(spec for _, spec in matches)
+
+
 class CommandService:
     """Execute slash commands without knowing anything about Textual."""
 

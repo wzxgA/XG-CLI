@@ -255,6 +255,75 @@ async def test_tui_keeps_composer_available_and_shows_queue(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_command_suggestions_filter_complete_and_escape(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        suggestions = app.query_one("#command-suggestions")
+        composer = app.query_one("#composer")
+        assert suggestions.display is False
+
+        composer.value = "/m"
+        await pilot.pause()
+        assert suggestions.display is True
+        assert [spec.name for spec in suggestions.visible_specs] == ["/model", "/memory"]
+        assert suggestions.highlighted == 0
+
+        await pilot.press("down")
+        assert suggestions.highlighted == 1
+        await pilot.press("tab")
+        await pilot.pause()
+        assert composer.value == "/memory"
+        assert app.controller.state.transcript == []
+
+        await pilot.press("escape")
+        assert composer.value == "/memory"
+        assert suggestions.display is False
+
+
+@pytest.mark.asyncio
+async def test_tui_command_suggestion_mouse_selection_keeps_composer_focus(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer")
+        suggestions = app.query_one("#command-suggestions")
+        composer.value = "/m"
+        await pilot.pause()
+
+        assert await pilot.click(suggestions, offset=(4, 2))
+        await pilot.pause()
+        assert composer.value == "/memory"
+        assert composer.has_focus
+        assert app.controller.state.transcript == []
+
+
+@pytest.mark.asyncio
+async def test_tui_command_suggestions_hidden_for_plan_review_and_replan(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    agent = ReActAgent(PlanClient(), build_registry(base_dir=project), settings)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer")
+        suggestions = app.query_one("#command-suggestions")
+        composer.value = "/plan 测试计划"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        assert app.controller.state.phase == "awaiting_plan_review"
+        assert suggestions.display is False
+
+        await pilot.press("r")
+        await pilot.pause()
+        assert app._replan_mode is True
+        composer.value = "/"
+        await pilot.pause()
+        assert suggestions.display is False
+
+
+@pytest.mark.asyncio
 async def test_tui_modals_open_and_close(tmp_path):
     agent, settings, manager = make_context(tmp_path)
     app = XgTuiApp(agent, settings, manager)

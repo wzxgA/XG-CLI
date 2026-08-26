@@ -10,6 +10,7 @@ import pytest
 
 from xg.agent.react import ReActAgent
 from xg.cli.app import _handle_command
+from xg.cli.commands import SLASH_COMMANDS, filter_slash_commands
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient
@@ -195,3 +196,16 @@ class TestOtherCommands:
         message, should_exit = _handle_command(agent, settings, manager, "/clear")
         assert "已清空" in message
         assert len(agent.messages) == 1
+
+
+def test_slash_command_catalog_is_stable_and_prefix_filtered():
+    assert [spec.name for spec in filter_slash_commands("/")][:4] == [
+        "/plan", "/model", "/config", "/memory"
+    ]
+    assert [spec.name for spec in filter_slash_commands("/m")] == ["/model", "/memory"]
+    assert [spec.name for spec in filter_slash_commands("/PL")] == ["/plan"]
+    assert [spec.name for spec in filter_slash_commands("/c")] == ["/cancel"]
+    assert filter_slash_commands("查看 /model") == ()
+    assert filter_slash_commands("/memory list") == ()
+    assert len({spec.name for spec in SLASH_COMMANDS}) == len(SLASH_COMMANDS)
+    assert all(spec.name.startswith("/") for spec in SLASH_COMMANDS)

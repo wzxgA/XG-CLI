@@ -19,3 +19,11 @@ class TraceCardToggled(Message):
     def __init__(self, item_id: str) -> None:
         super().__init__()
         self.item_id = item_id
+
+
+class CommandSuggestionSelected(Message):
+    """A local command suggestion was selected without being submitted."""
+
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.command = command

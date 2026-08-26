@@ -49,6 +49,22 @@ Screen {
     background: $panel;
 }
 
+#command-suggestions {
+    width: 1fr;
+    height: auto;
+    max-height: 8;
+    padding: 0 1;
+    color: $text-muted;
+    background: $panel;
+    border: round $primary;
+    scrollbar-size: 1 1;
+}
+
+#command-suggestions > .option-list--option-highlighted {
+    color: $text;
+    background: $accent;
+}
+
 #composer-label {
     height: 1;
     padding: 0 1;

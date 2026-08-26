@@ -15,9 +15,10 @@ from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.safety.hitl import ApprovalDecision
 from xg.tui.controller import SessionController
-from xg.tui.messages import StateChanged, TraceCardToggled
+from xg.tui.messages import CommandSuggestionSelected, StateChanged, TraceCardToggled
 from xg.tui.state import TuiState
 from xg.tui.widgets.approval_modal import ApprovalModal
+from xg.tui.widgets.command_suggestions import CommandSuggestions
 from xg.tui.widgets.composer import Composer
 from xg.tui.widgets.confirm_modal import ConfirmModal
 from xg.tui.widgets.footer import FooterBar
@@ -59,6 +60,7 @@ class XgTuiApp(App[None]):
         yield Static("", id="notification")
         with Vertical(id="composer-area"):
             yield QueueStatus(id="queue-status")
+            yield CommandSuggestions()
             yield Static("输入", id="composer-label")
             yield Composer()
         yield FooterBar()
@@ -78,6 +80,22 @@ class XgTuiApp(App[None]):
     def on_trace_card_toggled(self, message: TraceCardToggled) -> None:
         self.controller.toggle_trace_item(message.item_id)
 
+    def on_command_suggestion_selected(self, message: CommandSuggestionSelected) -> None:
+        self.complete_command_suggestion(message.command)
+
+    def complete_command_suggestion(self, command: str) -> None:
+        """Replace only the leading command token and keep Composer focused."""
+        composer = self.query_one("#composer", Composer)
+        raw = composer.value
+        leading = raw.lstrip()
+        if not leading.startswith("/"):
+            return
+        token = leading.split(maxsplit=1)[0]
+        prefix_length = len(raw) - len(leading)
+        composer.value = raw[:prefix_length] + command + raw[prefix_length + len(token):]
+        composer.cursor_position = len(composer.value)
+        composer.focus()
+
     def _render_state(self, state: TuiState) -> None:
         self.query_one("#header", HeaderBar).update_state(state)
         self.query_one("#transcript", TranscriptView).update_state(state)
@@ -87,6 +105,17 @@ class XgTuiApp(App[None]):
         note.display = bool(state.notification)
         self.query_one("#queue-status", QueueStatus).update_state(state)
         composer = self.query_one("#composer", Composer)
+        suggestions = self.query_one("#command-suggestions", CommandSuggestions)
+        suggestions_allowed = (
+            not self._replan_mode
+            and state.phase != "awaiting_plan_review"
+            and state.pending_approval is None
+            and state.pending_confirmation is None
+            and self._modal_kind == ""
+        )
+        composer.set_suggestions_enabled(suggestions_allowed)
+        if not suggestions_allowed:
+            suggestions.close()
         if self._replan_mode:
             composer.placeholder = "输入重新规划要求，Enter 提交"
         elif state.phase == "awaiting_plan_review" and state.pending_plan is not None:
