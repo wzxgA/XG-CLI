@@ -72,6 +72,22 @@ class SlowClient(LlmClient):
         yield StreamEvent(kind="done")
 
 
+class QueueClient(LlmClient):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+        prompt = next(message.content for message in reversed(messages) if message.role == "user")
+        self.calls.append(prompt)
+        if len(self.calls) == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+        yield StreamEvent(kind="content", text=f"done: {prompt}")
+        yield StreamEvent(kind="done")
+
+
 def make_context(tmp_path: Path):
     project = tmp_path / "project"
     project.mkdir()
@@ -133,6 +149,61 @@ async def test_controller_submit_returns_to_idle(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_controller_queues_submissions_fifo(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    client = QueueClient()
+    agent = ReActAgent(client, build_registry(base_dir=project), settings)
+    controller = SessionController(agent, settings, manager)
+
+    first = asyncio.create_task(controller.submit("first task"))
+    await asyncio.wait_for(client.first_started.wait(), 1)
+    second = asyncio.create_task(controller.submit("second task"))
+    assert await second is True
+    assert [item.text for item in controller.state.queue] == ["second task"]
+
+    client.release_first.set()
+    await asyncio.wait_for(first, 1)
+    for _ in range(100):
+        if client.calls == ["first task", "second task"] and not controller.busy:
+            break
+        await asyncio.sleep(0.01)
+
+    assert client.calls == ["first task", "second task"]
+    assert controller.state.queue == []
+    assert [item.text for item in controller.state.transcript if item.kind == "user"] == [
+        "first task", "second task"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_controller_cancel_current_turn_continues_queue(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    client = QueueClient()
+    agent = ReActAgent(client, build_registry(base_dir=project), settings)
+    controller = SessionController(agent, settings, manager)
+
+    asyncio.create_task(controller.submit("first task"))
+    await asyncio.wait_for(client.first_started.wait(), 1)
+    assert await controller.submit("second task") is True
+    assert len(controller.state.queue) == 1
+
+    assert await controller.cancel() is True
+    for _ in range(100):
+        if client.calls == ["first task", "second task"] and not controller.busy:
+            break
+        await asyncio.sleep(0.01)
+
+    assert client.calls == ["first task", "second task"]
+    assert controller.state.queue == []
+
+
+@pytest.mark.asyncio
 async def test_tui_pilot_layout_and_input(tmp_path):
     agent, settings, manager = make_context(tmp_path)
     app = XgTuiApp(agent, settings, manager)
@@ -148,6 +219,39 @@ async def test_tui_pilot_layout_and_input(tmp_path):
         await pilot.press("enter")
         await pilot.pause()
         assert app.controller.state.phase == "idle"
+
+
+@pytest.mark.asyncio
+async def test_tui_keeps_composer_available_and_shows_queue(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    client = QueueClient()
+    agent = ReActAgent(client, build_registry(base_dir=project), settings)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.query_one("#composer").value = "first task"
+        await pilot.press("enter")
+        await asyncio.wait_for(client.first_started.wait(), 1)
+
+        app.query_one("#composer").value = "second task"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.query_one("#composer").disabled is False
+        queue_status = app.query_one("#queue-status")
+        assert queue_status.display is True
+        assert "second task" in str(queue_status.render())
+
+        client.release_first.set()
+        for _ in range(100):
+            if client.calls == ["first task", "second task"] and not app.controller.busy:
+                break
+            await pilot.pause(0.01)
+        await pilot.pause()
+        assert client.calls == ["first task", "second task"]
+        assert queue_status.display is False
 
 
 @pytest.mark.asyncio
@@ -174,6 +278,7 @@ async def test_tui_plan_renders_inline_without_opening_screen(tmp_path):
         await pilot.pause(0.5)
         assert app.controller.state.phase == "awaiting_plan_review"
         assert app.controller.state.pending_plan is not None
+        assert app.query_one("#composer").disabled is False
         assert app._modal_kind == ""
         assert len(app.screen_stack) == 1
         assert any(item.kind == "plan" for item in app.controller.state.transcript)
@@ -226,6 +331,9 @@ async def test_tui_escape_cancels_running_task(tmp_path):
         await pilot.press("enter")
         await asyncio.wait_for(client.started.wait(), 1)
         assert app.controller.busy is True
+        assert app.query_one("#composer").disabled is False
+        await pilot.press("x")
+        assert app.query_one("#composer").value == "x"
         await pilot.press("escape")
         await pilot.pause(0.2)
         assert app.controller.busy is False

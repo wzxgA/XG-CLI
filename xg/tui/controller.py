@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from dataclasses import replace
+from collections import deque
+from dataclasses import dataclass, replace
 from typing import Awaitable, Callable
 
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, ReviewDecision
@@ -14,10 +15,25 @@ from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.safety.hitl import ApprovalDecision
 from xg.tui.reducer import finalize_trace, reduce_agent_event, reduce_plan_event
-from xg.tui.state import ApprovalRequest, ConfirmationRequest, TuiState, TranscriptItem
+from xg.tui.state import (
+    ApprovalRequest,
+    ConfirmationRequest,
+    QueueItem,
+    QueueItemKind,
+    TuiState,
+    TranscriptItem,
+)
 
 
 StateListener = Callable[[TuiState], None]
+MAX_QUEUE_SIZE = 20
+
+
+@dataclass(frozen=True)
+class QueuedSubmission:
+    id: str
+    text: str
+    kind: QueueItemKind
 
 
 class SessionController:
@@ -50,11 +66,16 @@ class SessionController:
         )
         self.command_service = CommandService(CommandContext(agent, settings, manager))
         self._counter = itertools.count(1)
+        self._queue_counter = itertools.count(1)
+        self._queue: deque[QueuedSubmission] = deque()
+        self._queue_worker: asyncio.Task | None = None
+        self._shutting_down = False
         self._active_task: asyncio.Task | None = None
         self._active_turn_id = ""
         self._approval_future: asyncio.Future[ApprovalDecision] | None = None
         self._review_future: asyncio.Future[ReviewDecision] | None = None
         self._confirmation: ConfirmationRequest | None = None
+        self._confirmation_future: asyncio.Future[bool] | None = None
         if agent.approval_policy is not None:
             agent.approval_policy.requester = self._request_approval
 
@@ -63,7 +84,9 @@ class SessionController:
 
     @property
     def busy(self) -> bool:
-        return self._active_task is not None and not self._active_task.done()
+        active = self._active_task is not None and not self._active_task.done()
+        worker = self._queue_worker is not None and not self._queue_worker.done()
+        return active or worker or self._confirmation is not None
 
     def _publish(self) -> None:
         if self.on_state_change is not None:
@@ -74,7 +97,9 @@ class SessionController:
         self._publish()
 
     def _begin_turn(self) -> str | None:
-        if self.busy:
+        # The queue worker may be alive while it is starting the next turn;
+        # only an active turn itself prevents a new turn from beginning.
+        if self._active_task is not None and not self._active_task.done():
             self._set_state(replace(self.state, notification="当前任务仍在运行，请先取消", notification_level="warning"))
             return None
         turn_id = f"turn-{next(self._counter)}"
@@ -82,24 +107,120 @@ class SessionController:
         self._set_state(replace(self.state, phase="running", active_turn_id=turn_id, notification=""))
         return turn_id
 
-    async def submit(self, text: str) -> None:
+    @staticmethod
+    def _submission_kind(text: str) -> QueueItemKind:
+        lowered = text.lower()
+        if lowered.startswith("/plan"):
+            return "plan"
+        if lowered.startswith("/"):
+            return "command"
+        return "task"
+
+    def _publish_queue(self, *, notification: str | None = None, level: str = "info") -> None:
+        queue_items = [
+            QueueItem(id=item.id, text=item.text, kind=item.kind)
+            for item in self._queue
+        ]
+        updates = {"queue": queue_items}
+        if notification is not None:
+            updates.update(notification=notification, notification_level=level)
+        self._set_state(replace(self.state, **updates))
+
+    def _enqueue(self, text: str) -> bool:
+        if len(self._queue) >= MAX_QUEUE_SIZE:
+            self._set_state(replace(
+                self.state,
+                notification=f"任务队列已满（最多 {MAX_QUEUE_SIZE} 项），请稍后再试",
+                notification_level="warning",
+            ))
+            return False
+        item = QueuedSubmission(
+            id=f"queue-{next(self._queue_counter)}",
+            text=text,
+            kind=self._submission_kind(text),
+        )
+        self._queue.append(item)
+        self._publish_queue(notification=f"已加入队列 #{item.id.removeprefix('queue-')}")
+        return True
+
+    def _ensure_queue_worker(self) -> None:
+        if self._shutting_down or not self._queue:
+            return
+        if self._queue_worker is None or self._queue_worker.done():
+            self._queue_worker = asyncio.create_task(self._drain_queue())
+
+    async def _drain_queue(self) -> None:
+        current = asyncio.current_task()
+        try:
+            while self._queue and not self._shutting_down:
+                submission = self._queue.popleft()
+                self._publish_queue(notification=f"开始执行队列 #{submission.id.removeprefix('queue-')}")
+                turn_task = asyncio.create_task(self._execute_one(submission.text))
+                try:
+                    await turn_task
+                    if self._confirmation_future is not None:
+                        await self._confirmation_future
+                except asyncio.CancelledError:
+                    if self._shutting_down:
+                        break
+                except Exception as exc:
+                    self._set_state(replace(
+                        self.state,
+                        notification=f"队列任务失败：{exc}",
+                        notification_level="error",
+                    ))
+        finally:
+            if self._queue_worker is current:
+                self._queue_worker = None
+            if self._shutting_down:
+                self._queue.clear()
+                self._publish_queue()
+
+    async def submit(self, text: str) -> bool:
         text = text.strip()
         if not text:
-            return
-        if text.startswith("/") and not text.lower().startswith("/plan"):
-            if text.lower() in ("/cancel", "/c"):
-                await self.cancel()
-                return
-            result = await self.execute_command(text)
-            if result.message and not result.open_modal:
-                self._append_system(result.message)
-            if result.should_exit:
-                return
-            return
+            return False
+        lowered = text.lower()
+        if lowered in ("/cancel", "/c"):
+            await self.cancel()
+            return True
+        if lowered in ("/exit", "/quit"):
+            self._shutting_down = True
+            await self.cancel()
+            self._queue.clear()
+            self._publish_queue(notification="正在退出，已清理等待队列")
+            return True
+        if self.state.phase == "awaiting_plan_review":
+            self._set_state(replace(
+                self.state,
+                notification="当前处于计划审阅，请按 Enter 执行、r 重规划或 Esc 取消",
+                notification_level="info",
+            ))
+            return False
+        if self.busy or self._queue:
+            return self._enqueue(text)
+        try:
+            return await self._execute_one(text)
+        finally:
+            self._ensure_queue_worker()
+
+    async def _execute_one(self, text: str) -> bool:
+        lowered = text.lower()
+        if text.startswith("/") and not lowered.startswith("/plan"):
+            current = asyncio.current_task()
+            self._active_task = current
+            try:
+                result = await self.execute_command(text)
+                if result.message and not result.open_modal:
+                    self._append_system(result.message)
+                return True
+            finally:
+                if self._active_task is current:
+                    self._active_task = None
 
         turn_id = self._begin_turn()
         if turn_id is None:
-            return
+            return False
         self._append_item(TranscriptItem(id=f"user-{len(self.state.transcript)}", kind="user", text=text, turn_id=turn_id))
         current = asyncio.current_task()
         self._active_task = current
@@ -108,7 +229,7 @@ class SessionController:
                 goal = text[5:].strip()
                 if not goal:
                     self._append_system("用法: /plan <任务描述>")
-                    return
+                    return True
                 await self._run_plan(goal, turn_id)
             else:
                 await self._run_agent(text, turn_id)
@@ -123,6 +244,7 @@ class SessionController:
             self._review_future = None
             if self.state.active_turn_id == turn_id and self.state.phase == "running":
                 self._set_state(replace(self.state, phase="idle", pending_approval=None, pending_plan=None))
+        return True
 
     async def _run_agent(self, text: str, turn_id: str) -> None:
         async for event in self.agent.run(text):
@@ -142,6 +264,9 @@ class SessionController:
             self._set_state(reduce_plan_event(self.state, event, turn_id))
 
     async def cancel(self) -> bool:
+        if self._confirmation is not None:
+            await self.confirm_command(False)
+            return True
         task = self._active_task
         if task is None or task.done():
             self._set_state(replace(self.state, notification="当前没有运行中的任务", notification_level="info"))
@@ -252,6 +377,9 @@ class SessionController:
         self._publish()
 
     async def execute_command(self, raw: str) -> CommandResult:
+        current = asyncio.current_task()
+        if self.busy and self._active_task is not current:
+            return CommandResult(ok=False, message="当前任务正在运行，请通过输入提交命令以加入队列")
         if raw.strip().lower() in ("/cancel", "/c"):
             await self.cancel()
             return CommandResult(ok=True, message="已取消当前任务")
@@ -267,6 +395,7 @@ class SessionController:
                 return CommandResult(ok=False, message=f"生成 XG.md 失败：{exc}")
             request = ConfirmationRequest("init", "写入项目记忆？", draft, draft)
             self._confirmation = request
+            self._confirmation_future = asyncio.get_running_loop().create_future()
             self._set_state(replace(self.state, pending_confirmation=request, notification="请确认写入 XG.md"))
             return CommandResult(ok=True, open_modal="init")
         if lowered == "/memory clear" and memory is not None:
@@ -278,6 +407,7 @@ class SessionController:
                 return CommandResult(ok=True, message="当前项目没有长期记忆")
             request = ConfirmationRequest("memory_clear", "清空长期记忆？", f"将删除当前项目的 {count} 条长期记忆。")
             self._confirmation = request
+            self._confirmation_future = asyncio.get_running_loop().create_future()
             self._set_state(replace(self.state, pending_confirmation=request, notification="请确认清空长期记忆"))
             return CommandResult(ok=True, open_modal="memory_clear")
         result = await self.command_service.execute(raw)
@@ -312,10 +442,27 @@ class SessionController:
                 message = f"操作失败：{exc}"
         self._set_state(replace(self.state, pending_confirmation=None, notification=message, notification_level="info"))
         self._append_system(message)
+        future = self._confirmation_future
+        self._confirmation_future = None
+        if future is not None and not future.done():
+            future.set_result(confirmed)
+        self._ensure_queue_worker()
 
     async def shutdown(self) -> None:
-        if self.busy:
+        self._shutting_down = True
+        if self._confirmation is not None:
+            await self.confirm_command(False)
+        if self._active_task is not None and not self._active_task.done():
             await self.cancel()
+        worker = self._queue_worker
+        if worker is not None and not worker.done() and worker is not asyncio.current_task():
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        self._queue.clear()
+        self._publish_queue()
 
     def _append_item(self, item: TranscriptItem) -> None:
         state = replace(self.state, transcript=[*self.state.transcript, item])

@@ -13,6 +13,7 @@ TranscriptKind = Literal[
 TranscriptStatus = Literal[
     "streaming", "running", "success", "failed", "cancelled", "done",
 ]
+QueueItemKind = Literal["task", "plan", "command"]
 TuiPhase = Literal[
     "idle", "running", "awaiting_approval", "awaiting_plan_review", "error",
 ]
@@ -41,6 +42,14 @@ class TranscriptItem:
     elapsed_ms: int | None = None
 
 
+@dataclass(frozen=True)
+class QueueItem:
+    id: str
+    text: str
+    kind: QueueItemKind
+    status: Literal["queued"] = "queued"
+
+
 @dataclass
 class InspectorState:
     provider: str = ""
@@ -66,6 +75,7 @@ class TuiState:
     notification: str = ""
     notification_level: Literal["info", "warning", "error"] = "info"
     plan_tasks: dict[str, str] = field(default_factory=dict)
+    queue: list[QueueItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

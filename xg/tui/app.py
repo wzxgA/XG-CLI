@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -22,6 +23,7 @@ from xg.tui.widgets.confirm_modal import ConfirmModal
 from xg.tui.widgets.footer import FooterBar
 from xg.tui.widgets.header import HeaderBar
 from xg.tui.widgets.inspector import InspectorPanel
+from xg.tui.widgets.queue_status import QueueStatus
 from xg.tui.widgets.transcript import TranscriptView
 
 
@@ -56,6 +58,7 @@ class XgTuiApp(App[None]):
             yield InspectorPanel(id="inspector")
         yield Static("", id="notification")
         with Vertical(id="composer-area"):
+            yield QueueStatus(id="queue-status")
             yield Static("输入", id="composer-label")
             yield Composer()
         yield FooterBar()
@@ -82,8 +85,14 @@ class XgTuiApp(App[None]):
         note = self.query_one("#notification", Static)
         note.update(state.notification)
         note.display = bool(state.notification)
+        self.query_one("#queue-status", QueueStatus).update_state(state)
         composer = self.query_one("#composer", Composer)
-        composer.disabled = state.phase in ("running", "awaiting_approval", "awaiting_plan_review") or state.pending_confirmation is not None
+        if self._replan_mode:
+            composer.placeholder = "输入重新规划要求，Enter 提交"
+        elif state.phase == "awaiting_plan_review" and state.pending_plan is not None:
+            composer.placeholder = "按 Enter 执行 · r 重规划 · Esc 取消"
+        else:
+            composer.placeholder = "输入任务或 /help …"
 
     def _show_pending_modal(self, state: TuiState) -> None:
         if state.pending_approval is not None and self._modal_kind != "approval":
@@ -110,18 +119,27 @@ class XgTuiApp(App[None]):
         else:
             decision = decisions.get(value or "reject", ApprovalDecision(allow=False, reason="user_rejected"))
         asyncio.create_task(self.controller.approve_tool(decision))
+        self.query_one("#composer", Composer).focus()
 
     def _confirm_closed(self, value: str | None) -> None:
         self._modal_kind = ""
         asyncio.create_task(self.controller.confirm_command(value == "confirm"))
+        self.query_one("#composer", Composer).focus()
 
     def on_input_submitted(self, event: Composer.Submitted) -> None:
         text = event.value.strip()
+        if self._has_pending_plan() and not self._replan_mode:
+            self._state = replace(
+                self.controller.snapshot(),
+                notification="当前处于计划审阅，请按 Enter 执行、r 重规划或 Esc 取消",
+                notification_level="info",
+            )
+            self._render_state(self._state)
+            return
         event.input.value = ""
         if text:
             if self._replan_mode:
                 self._replan_mode = False
-                event.input.disabled = True
                 event.input.placeholder = "输入任务或 /help …"
                 asyncio.create_task(
                     self.controller.review_plan(ReviewDecision(action="replan", feedback=text))
@@ -131,7 +149,11 @@ class XgTuiApp(App[None]):
 
     async def _submit_text(self, text: str) -> None:
         try:
-            await self.controller.submit(text)
+            accepted = await self.controller.submit(text)
+            if not accepted:
+                composer = self.query_one("#composer", Composer)
+                if not composer.value:
+                    composer.value = text
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -144,15 +166,23 @@ class XgTuiApp(App[None]):
         await self.controller.cancel()
 
     async def action_clear_transcript(self) -> None:
-        await self.controller.execute_command("/clear")
+        await self.controller.submit("/clear")
         self._state = self.controller.snapshot()
         self._render_state(self._state)
 
     def _has_pending_plan(self) -> bool:
         return self.controller.state.phase == "awaiting_plan_review" and self.controller.state.pending_plan is not None
 
+    def _has_detail_toggle_target(self) -> bool:
+        return any(
+            item.collapsible
+            or (item.kind == "assistant" and "```mermaid" in item.text.lower())
+            for item in self.controller.state.transcript
+        )
+
     def action_plan_execute(self) -> None:
         if self._has_pending_plan() and not self._replan_mode:
+            self.query_one("#composer", Composer).value = ""
             asyncio.create_task(self.controller.review_plan(ReviewDecision(action="execute")))
 
     def action_plan_details(self) -> None:
@@ -174,7 +204,6 @@ class XgTuiApp(App[None]):
             return
         self._replan_mode = True
         composer = self.query_one("#composer", Composer)
-        composer.disabled = False
         composer.placeholder = "输入重新规划要求，Enter 提交"
         composer.focus()
         note = self.query_one("#notification", Static)
@@ -188,15 +217,13 @@ class XgTuiApp(App[None]):
             composer = self.query_one("#composer", Composer)
             composer.value = ""
             composer.placeholder = "输入任务或 /help …"
-            composer.disabled = True
             await self.controller.review_plan(ReviewDecision(action="cancel"))
             return
         if self.controller.busy:
             await self.controller.cancel()
             return
         composer = self.query_one("#composer", Composer)
-        if not composer.disabled:
-            composer.value = ""
+        composer.value = ""
 
     def action_toggle_inspector(self) -> None:
         inspector = self.query_one("#inspector", InspectorPanel)
