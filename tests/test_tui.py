@@ -222,6 +222,33 @@ async def test_tui_pilot_layout_and_input(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_inspector_views_switch_with_bindings_and_tabs(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        assert app.controller.state.inspector.active_view == "session"
+        assert app.query_one("#inspector-tab-session")
+        assert app.query_one("#inspector-tab-plan")
+        assert app.query_one("#inspector-tab-memory")
+        assert app.query_one("#inspector-tab-safety")
+        assert app.query_one("#inspector-tab-session").render() == "Session"
+        assert app.query_one("#inspector-tab-plan").render() == "Plan"
+
+        await pilot.press("ctrl+2")
+        await pilot.pause()
+        assert app.controller.state.inspector.active_view == "plan"
+        assert app.query_one("#inspector-content").current == "inspector-plan"
+
+        await pilot.press("ctrl+tab")
+        await pilot.pause()
+        assert app.controller.state.inspector.active_view == "memory"
+
+        await pilot.click(app.query_one("#inspector-tab-safety"))
+        await pilot.pause()
+        assert app.controller.state.inspector.active_view == "safety"
+
+
+@pytest.mark.asyncio
 async def test_tui_keeps_composer_available_and_shows_queue(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

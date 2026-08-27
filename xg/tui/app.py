@@ -15,7 +15,12 @@ from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.safety.hitl import ApprovalDecision
 from xg.tui.controller import SessionController
-from xg.tui.messages import CommandSuggestionSelected, StateChanged, TraceCardToggled
+from xg.tui.messages import (
+    CommandSuggestionSelected,
+    InspectorViewSelected,
+    StateChanged,
+    TraceCardToggled,
+)
 from xg.tui.state import TuiState
 from xg.tui.widgets.approval_modal import ApprovalModal
 from xg.tui.widgets.command_suggestions import CommandSuggestions
@@ -42,6 +47,12 @@ class XgTuiApp(App[None]):
         ("ctrl+c", "cancel_turn", "取消当前任务"),
         ("ctrl+l", "clear_transcript", "清屏"),
         ("ctrl+r", "toggle_inspector", "侧栏"),
+        ("ctrl+1", "inspector_session", "Inspector Session"),
+        ("ctrl+2", "inspector_plan", "Inspector Plan"),
+        ("ctrl+3", "inspector_memory", "Inspector Memory"),
+        ("ctrl+4", "inspector_safety", "Inspector Safety"),
+        ("ctrl+tab", "inspector_next", "下一个 Inspector 视图"),
+        ("ctrl+shift+tab", "inspector_previous", "上一个 Inspector 视图"),
         ("f1", "show_help", "帮助"),
     ]
 
@@ -79,6 +90,9 @@ class XgTuiApp(App[None]):
 
     def on_trace_card_toggled(self, message: TraceCardToggled) -> None:
         self.controller.toggle_trace_item(message.item_id)
+
+    def on_inspector_view_selected(self, message: InspectorViewSelected) -> None:
+        self.controller.set_inspector_view(message.view)
 
     def on_command_suggestion_selected(self, message: CommandSuggestionSelected) -> None:
         self.complete_command_suggestion(message.command)
@@ -257,6 +271,24 @@ class XgTuiApp(App[None]):
     def action_toggle_inspector(self) -> None:
         inspector = self.query_one("#inspector", InspectorPanel)
         inspector.display = not inspector.display
+
+    def action_inspector_session(self) -> None:
+        self.controller.set_inspector_view("session")
+
+    def action_inspector_plan(self) -> None:
+        self.controller.set_inspector_view("plan")
+
+    def action_inspector_memory(self) -> None:
+        self.controller.set_inspector_view("memory")
+
+    def action_inspector_safety(self) -> None:
+        self.controller.set_inspector_view("safety")
+
+    def action_inspector_next(self) -> None:
+        self.controller.cycle_inspector_view(1)
+
+    def action_inspector_previous(self) -> None:
+        self.controller.cycle_inspector_view(-1)
 
     def action_show_help(self) -> None:
         self._state = TuiState(

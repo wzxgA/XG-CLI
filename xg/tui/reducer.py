@@ -12,7 +12,14 @@ from typing import Any
 from xg.agent.plan import PlanEvent
 from xg.agent.react import AgentEvent
 from xg.llm.types import Usage
-from xg.tui.state import TuiState, TranscriptItem
+from xg.tui.state import (
+    PlanInspectorSnapshot,
+    PlanTaskSnapshot,
+    SafetyInspectorSnapshot,
+    SessionInspectorSnapshot,
+    TuiState,
+    TranscriptItem,
+)
 
 
 def _copy(state: TuiState) -> TuiState:
@@ -20,7 +27,13 @@ def _copy(state: TuiState) -> TuiState:
         state,
         transcript=[replace(item) for item in state.transcript],
         plan_tasks=dict(state.plan_tasks),
-        inspector=replace(state.inspector),
+        inspector=replace(
+            state.inspector,
+            session=replace(state.inspector.session),
+            plan=replace(state.inspector.plan),
+            memory=replace(state.inspector.memory),
+            safety=replace(state.inspector.safety),
+        ),
     )
 
 
@@ -54,7 +67,7 @@ def _update_context_usage(out: TuiState, event: AgentEvent) -> None:
     window = event.context_window if event.context_window is not None else old.context_window
     limit = event.request_token_limit if event.request_token_limit is not None else old.request_token_limit
     compacted = event.compaction_before is not None and event.compaction_after is not None
-    out.inspector.usage = replace(
+    usage = replace(
         old,
         estimated_prompt_tokens=estimated,
         context_window=max(0, window or 0),
@@ -66,8 +79,13 @@ def _update_context_usage(out: TuiState, event: AgentEvent) -> None:
         last_compaction_before=(event.compaction_before or 0) if compacted else old.last_compaction_before,
         last_compaction_after=(event.compaction_after or 0) if compacted else old.last_compaction_after,
     )
-    out.inspector.context_tokens = estimated
-    out.inspector.context_window = max(0, window or 0)
+    out.inspector = replace(
+        out.inspector,
+        usage=usage,
+        context_tokens=estimated,
+        context_window=max(0, window or 0),
+        session=replace(out.inspector.session, status=_phase_status(out.phase)),
+    )
 
 
 def _update_provider_usage(out: TuiState, usage_value: Usage | None) -> None:
@@ -75,7 +93,7 @@ def _update_provider_usage(out: TuiState, usage_value: Usage | None) -> None:
         return
     assert usage_value is not None
     old = out.inspector.usage
-    out.inspector.usage = replace(
+    usage = replace(
         old,
         last_prompt_tokens=usage_value.prompt_tokens,
         last_completion_tokens=usage_value.completion_tokens,
@@ -84,6 +102,67 @@ def _update_provider_usage(out: TuiState, usage_value: Usage | None) -> None:
         session_completion_tokens=old.session_completion_tokens + usage_value.completion_tokens,
         session_total_tokens=old.session_total_tokens + usage_value.total_tokens,
         usage_source="provider",
+    )
+    out.inspector = replace(
+        out.inspector,
+        usage=usage,
+        session=replace(out.inspector.session, status=_phase_status(out.phase)),
+    )
+
+
+def _phase_status(phase: str) -> str:
+    return {
+        "idle": "Idle",
+        "running": "Working",
+        "awaiting_approval": "Waiting approval",
+        "awaiting_plan_review": "Plan review",
+        "error": "Error",
+    }.get(phase, phase)
+
+
+def _plan_snapshot(
+    plan,
+    *,
+    status: str | None = None,
+    current_round: int | None = None,
+    total_rounds: int | None = None,
+    previous: PlanInspectorSnapshot | None = None,
+) -> PlanInspectorSnapshot:
+    tasks = tuple(
+        PlanTaskSnapshot(id=task.id, title=task.title, status=task.status)
+        for task in (plan.tasks if plan is not None else ())
+    )
+    done = sum(task.status == "done" for task in tasks)
+    failures = sum(task.status == "failed" for task in tasks)
+    old = previous or PlanInspectorSnapshot()
+    return PlanInspectorSnapshot(
+        goal=plan.goal if plan is not None else old.goal,
+        status=status if status is not None else old.status,
+        current_round=current_round if current_round is not None else old.current_round,
+        total_rounds=total_rounds if total_rounds is not None else old.total_rounds,
+        completed_tasks=done,
+        total_tasks=len(tasks),
+        failure_count=failures,
+        tasks=tasks or old.tasks,
+    )
+
+
+def _set_safety_decision(out: TuiState, event: AgentEvent) -> None:
+    decision = event.decision
+    if decision is None:
+        return
+    status = event.text or ("approved" if decision.allow else "rejected")
+    out.inspector = replace(
+        out.inspector,
+        safety=replace(
+            out.inspector.safety,
+            approval_status=status,
+            current_tool="",
+            current_level="",
+            last_decision=status,
+            last_reason=decision.reason,
+            last_rejection=(decision.reason if not decision.allow else out.inspector.safety.last_rejection),
+        ),
     )
 
 
@@ -227,6 +306,14 @@ def reduce_agent_event(
             trace_id=trace_id, collapsible=True, collapsed=True,
             status="success" if result.ok else "failed", parent_call_id=result.tool_call_id,
         ))
+        if not result.ok:
+            out.inspector = replace(
+                out.inspector,
+                safety=replace(
+                    out.inspector.safety,
+                    last_rejection=result.error or result.output or "tool_failed",
+                ),
+            )
         return out
     if kind == "approval":
         if event.tool_call:
@@ -238,6 +325,7 @@ def reduce_agent_event(
             ))
         out.pending_approval = None
         out.phase = "running"
+        _set_safety_decision(out, event)
         return out
     if kind in ("context_compacted", "context_warning"):
         _append(out, TranscriptItem(id=f"context-{len(out.transcript)}", kind="context", text=event.text, turn_id=turn_id))
@@ -290,7 +378,18 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
         _update_provider_usage(out, event.usage)
         out.pending_plan = event.plan
         out.phase = "awaiting_plan_review"
-        out.inspector.plan_status = "review"
+        out.inspector = replace(
+            out.inspector,
+            plan_status="review",
+            plan=_plan_snapshot(
+                event.plan,
+                status="review",
+                current_round=0,
+                total_rounds=len(event.plan.batches),
+                previous=out.inspector.plan,
+            ),
+            session=replace(out.inspector.session, status="Plan review"),
+        )
         out.plan_tasks = {task.id: task.status for task in event.plan.tasks}
         _append(out, TranscriptItem(
             id=f"plan-{len(out.transcript)}", kind="plan", text=event.plan.goal,
@@ -307,14 +406,49 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
                 break
         out.phase = "running"
         out.pending_plan = None
-        out.inspector.plan_status = "running"
+        out.inspector = replace(
+            out.inspector,
+            plan_status="running",
+            plan=replace(out.inspector.plan, status="running"),
+            session=replace(out.inspector.session, status="Working"),
+        )
         return out
     if kind == "batch_started":
-        out.inspector.batch = event.message
+        out.inspector = replace(
+            out.inspector,
+            batch=event.message,
+            plan=_plan_snapshot(
+                event.plan,
+                status="running",
+                current_round=(
+                    event.plan.batches.index(event.batch) + 1
+                    if event.plan is not None and event.batch in event.plan.batches else out.inspector.plan.current_round
+                ),
+                total_rounds=len(event.plan.batches) if event.plan is not None else out.inspector.plan.total_rounds,
+                previous=out.inspector.plan,
+            ),
+        )
         out.phase = "running"
         return out
     if kind == "subtask_started" and event.task:
         out.plan_tasks[event.task.id] = event.task.status
+        plan = event.plan
+        tasks = list(out.inspector.plan.tasks)
+        for index, task in enumerate(tasks):
+            if task.id == event.task.id:
+                tasks[index] = PlanTaskSnapshot(task.id, task.title, event.task.status)
+                break
+        out.inspector = replace(
+            out.inspector,
+            plan=replace(
+                out.inspector.plan,
+                goal=plan.goal if plan is not None else out.inspector.plan.goal,
+                tasks=tuple(tasks),
+                total_tasks=len(tasks),
+                completed_tasks=sum(task.status == "done" for task in tasks),
+                failure_count=sum(task.status == "failed" for task in tasks),
+            ),
+        )
         return out
     if kind == "subtask_event" and event.agent_event:
         task_trace = f"{turn_id}:{event.task.id}" if event.task else turn_id
@@ -322,6 +456,7 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
     if kind == "planner_usage" and event.agent_event:
         return reduce_agent_event(out, event.agent_event, turn_id, f"{turn_id}:planner")
     if kind in ("subtask_done", "subtask_failed") and event.task:
+        out.plan_tasks[event.task.id] = event.task.status
         task_trace = f"{turn_id}:{event.task.id}"
         _collapse_trace(out, task_trace, status="failed" if kind == "subtask_failed" else "done")
         for item in out.transcript:
@@ -329,12 +464,37 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
                 item.collapsible = True
                 if item.user_collapsed is None:
                     item.collapsed = True
+        tasks = [
+            PlanTaskSnapshot(task.id, task.title, event.task.status)
+            if task.id == event.task.id else task
+            for task in out.inspector.plan.tasks
+        ]
+        out.inspector = replace(
+            out.inspector,
+            plan=replace(
+                out.inspector.plan,
+                tasks=tuple(tasks),
+                completed_tasks=sum(task.status == "done" for task in tasks),
+                failure_count=sum(task.status == "failed" for task in tasks),
+            ),
+        )
         return out
     if kind in ("cancelled", "plan_done"):
         _collapse_turn(out, turn_id, status="cancelled" if kind == "cancelled" else "done")
         out.phase = "idle"
         out.pending_plan = None
-        out.inspector.plan_status = "done" if kind == "plan_done" else "cancelled"
+        final_status = "done" if kind == "plan_done" else "cancelled"
+        plan = _plan_snapshot(
+            event.plan,
+            status=final_status,
+            previous=out.inspector.plan,
+        )
+        out.inspector = replace(
+            out.inspector,
+            plan_status=final_status,
+            plan=plan,
+            session=replace(out.inspector.session, status="Idle"),
+        )
         out.notification = event.message
         out.notification_level = "info"
         return out
@@ -342,7 +502,12 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
         _collapse_turn(out, turn_id, status="failed")
         out.phase = "error"
         out.pending_plan = None
-        out.inspector.plan_status = "failed"
+        out.inspector = replace(
+            out.inspector,
+            plan_status="failed",
+            plan=_plan_snapshot(event.plan, status="failed", previous=out.inspector.plan),
+            session=replace(out.inspector.session, status="Error"),
+        )
         out.notification = event.message
         out.notification_level = "error"
         _append(out, TranscriptItem(id=f"plan-error-{len(out.transcript)}", kind="error", text=event.message, turn_id=turn_id))

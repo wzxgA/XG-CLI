@@ -18,8 +18,12 @@ from xg.tui.reducer import finalize_trace, reduce_agent_event, reduce_plan_event
 from xg.tui.state import (
     ApprovalRequest,
     ConfirmationRequest,
+    InspectorView,
     QueueItem,
     QueueItemKind,
+    MemoryInspectorSnapshot,
+    SafetyInspectorSnapshot,
+    SessionInspectorSnapshot,
     TuiState,
     TranscriptItem,
     UsageSnapshot,
@@ -56,9 +60,21 @@ class SessionController:
         self.settings = settings
         self.manager = manager
         self.on_state_change = on_state_change
+        policy = agent.approval_policy
+        memory_snapshot = self._read_memory_snapshot(agent.memory_manager)
         self.state = TuiState(
             inspector=replace(
                 TuiState().inspector,
+                session=SessionInspectorSnapshot(
+                    provider=settings.provider,
+                    model=settings.model,
+                    status="Idle",
+                ),
+                memory=memory_snapshot,
+                safety=SafetyInspectorSnapshot(
+                    hitl_enabled=bool(policy and policy.enabled),
+                    session_allow_all=bool(policy and policy.session_allow_all),
+                ),
                 provider=settings.provider,
                 model=settings.model,
                 usage=UsageSnapshot(context_window=settings.context_window),
@@ -80,6 +96,57 @@ class SessionController:
         self._confirmation_future: asyncio.Future[bool] | None = None
         if agent.approval_policy is not None:
             agent.approval_policy.requester = self._request_approval
+
+    @staticmethod
+    def _read_memory_snapshot(memory, *, last_operation: str = "") -> MemoryInspectorSnapshot:
+        if memory is None:
+            return MemoryInspectorSnapshot(
+                store_available=False,
+                last_operation=last_operation or "unavailable",
+            )
+        try:
+            project = memory.project_loader.load()
+            sources = {section.source for section in project.sections}
+            warnings = len(memory.warnings())
+            try:
+                count = memory.count()
+            except Exception:
+                count = 0
+            return MemoryInspectorSnapshot(
+                project_root=str(memory.project_root),
+                xg_loaded="XG.md" in sources,
+                xg_local_loaded="XG.local.md" in sources,
+                warning_count=warnings,
+                memory_count=count,
+                store_available=memory.store is not None,
+                last_operation=last_operation or "ready",
+            )
+        except Exception:
+            return MemoryInspectorSnapshot(
+                project_root=str(getattr(memory, "project_root", "")),
+                store_available=False,
+                last_operation=last_operation or "unavailable",
+            )
+
+    def set_inspector_view(self, view: InspectorView) -> bool:
+        """Select an Inspector view without creating a transcript event."""
+        if view not in ("session", "plan", "memory", "safety"):
+            return False
+        if self.state.inspector.active_view == view:
+            return True
+        self._set_state(replace(
+            self.state,
+            inspector=replace(self.state.inspector, active_view=view),
+        ))
+        return True
+
+    def cycle_inspector_view(self, step: int = 1) -> None:
+        views: tuple[InspectorView, ...] = ("session", "plan", "memory", "safety")
+        try:
+            index = views.index(self.state.inspector.active_view)
+        except ValueError:
+            index = 0
+        self.set_inspector_view(views[(index + step) % len(views)])
 
     def snapshot(self) -> TuiState:
         return self.state
@@ -288,7 +355,23 @@ class SessionController:
         loop = asyncio.get_running_loop()
         self._approval_future = loop.create_future()
         request = ApprovalRequest(tool_name=tool_name, level=level, args=args, turn_id=self._active_turn_id)
-        self._set_state(replace(self.state, phase="awaiting_approval", pending_approval=request))
+        policy = self.agent.approval_policy
+        self._set_state(replace(
+            self.state,
+            phase="awaiting_approval",
+            pending_approval=request,
+            inspector=replace(
+                self.state.inspector,
+                safety=replace(
+                    self.state.inspector.safety,
+                    hitl_enabled=bool(policy and policy.enabled),
+                    session_allow_all=bool(policy and policy.session_allow_all),
+                    approval_status="waiting",
+                    current_tool=tool_name,
+                    current_level=level,
+                ),
+            ),
+        ))
         try:
             return await self._approval_future
         finally:
@@ -297,6 +380,18 @@ class SessionController:
     async def approve_tool(self, decision: ApprovalDecision) -> None:
         if decision.reason == "user_approved_allow_all" and self.agent.approval_policy:
             self.agent.approval_policy.allow_all()
+        policy = self.agent.approval_policy
+        self._set_state(replace(
+            self.state,
+            inspector=replace(
+                self.state.inspector,
+                safety=replace(
+                    self.state.inspector.safety,
+                    hitl_enabled=bool(policy and policy.enabled),
+                    session_allow_all=bool(policy and policy.session_allow_all),
+                ),
+            ),
+        ))
         future = self._approval_future
         if future is not None and not future.done():
             future.set_result(decision)
@@ -429,11 +524,26 @@ class SessionController:
                     if self.settings.token_budget > 0 else 0.0
                 ),
             )
+        memory_snapshot = self.state.inspector.memory
+        if lowered == "/init" or lowered == "/save" or lowered.startswith("/memory"):
+            memory_snapshot = self._read_memory_snapshot(memory, last_operation=lowered)
+        policy = self.agent.approval_policy
         self._set_state(replace(
             self.state,
             transcript=[] if cleared else self.state.transcript,
             inspector=replace(
                 self.state.inspector,
+                session=replace(
+                    self.state.inspector.session,
+                    provider=self.settings.provider,
+                    model=self.settings.model,
+                ),
+                memory=memory_snapshot,
+                safety=replace(
+                    self.state.inspector.safety,
+                    hitl_enabled=bool(policy and policy.enabled),
+                    session_allow_all=bool(policy and policy.session_allow_all),
+                ),
                 provider=self.settings.provider,
                 model=self.settings.model,
                 usage=current_usage,
@@ -461,7 +571,21 @@ class SessionController:
                     message = f"已清空 {removed} 条长期记忆"
             except Exception as exc:
                 message = f"操作失败：{exc}"
-        self._set_state(replace(self.state, pending_confirmation=None, notification=message, notification_level="info"))
+        memory = getattr(self.agent, "memory_manager", None)
+        operation = "init" if request.kind == "init" else "clear"
+        self._set_state(replace(
+            self.state,
+            pending_confirmation=None,
+            notification=message,
+            notification_level="info",
+            inspector=replace(
+                self.state.inspector,
+                memory=self._read_memory_snapshot(
+                    memory,
+                    last_operation=operation if confirmed else f"{operation}_cancelled",
+                ),
+            ),
+        ))
         self._append_system(message)
         future = self._confirmation_future
         self._confirmation_future = None

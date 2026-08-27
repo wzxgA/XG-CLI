@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from textual.message import Message
 
-from xg.tui.state import TuiState
+from xg.tui.state import InspectorView, TuiState
 
 
 class StateChanged(Message):
@@ -27,3 +27,11 @@ class CommandSuggestionSelected(Message):
     def __init__(self, command: str) -> None:
         super().__init__()
         self.command = command
+
+
+class InspectorViewSelected(Message):
+    """A user selected one of the Inspector's stable view tabs."""
+
+    def __init__(self, view: InspectorView) -> None:
+        super().__init__()
+        self.view = view

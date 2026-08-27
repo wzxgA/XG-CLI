@@ -29,10 +29,47 @@ Screen {
 }
 
 #inspector {
-    width: 28;
-    min-width: 24;
+    width: 36;
+    min-width: 32;
     border-left: solid $primary;
     padding: 1;
+    color: $text-muted;
+}
+
+#inspector-tabs {
+    height: 2;
+    width: 1fr;
+    color: $text-muted;
+}
+
+InspectorTab {
+    width: 1fr;
+    height: 2;
+    content-align: center middle;
+    padding: 0;
+    text-wrap: nowrap;
+    overflow: hidden;
+}
+
+InspectorTab:hover {
+    color: $text;
+    background: $panel;
+}
+
+InspectorTab.active {
+    color: $accent;
+    text-style: bold;
+    border-bottom: heavy $accent;
+}
+
+#inspector-content {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+#inspector-content > Static {
+    width: 1fr;
+    height: auto;
     color: $text-muted;
 }
 

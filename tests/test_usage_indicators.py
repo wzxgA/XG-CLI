@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from xg.agent.react import AgentEvent
 from xg.llm.types import Usage
-from xg.tui.reducer import reduce_agent_event
-from xg.tui.state import TuiState
+from xg.agent.plan import Plan, PlanEvent, PlanTask
+from xg.tui.reducer import reduce_agent_event, reduce_plan_event
+from xg.tui.state import InspectorState, PlanTaskSnapshot, TuiState
 from xg.tui.widgets.header import HeaderBar
 from xg.tui.widgets.inspector import InspectorPanel
 
@@ -88,3 +89,44 @@ def test_usage_widgets_show_unavailable_until_data_arrives() -> None:
     inspector.update_state(state)
     assert "Context -/-" in str(header.render())
     assert "source           unavailable" in str(inspector.render())
+
+
+def test_plan_reducer_populates_inspector_task_snapshot() -> None:
+    plan = Plan(
+        goal="检查项目",
+        tasks=[
+            PlanTask("t1", "读取配置", "读取配置文件", []),
+            PlanTask("t2", "汇总结果", "整理结果", ["t1"]),
+        ],
+        batches=[["t1"], ["t2"]],
+    )
+    state = reduce_plan_event(
+        TuiState(active_turn_id="turn-1", phase="running"),
+        PlanEvent(kind="plan_generated", plan=plan),
+        "turn-1",
+    )
+    assert state.inspector.plan.goal == "检查项目"
+    assert state.inspector.plan.total_rounds == 2
+    assert state.inspector.plan.tasks == (
+        PlanTaskSnapshot("t1", "读取配置", "pending"),
+        PlanTaskSnapshot("t2", "汇总结果", "pending"),
+    )
+
+
+def test_inspector_views_render_separately() -> None:
+    state = TuiState(
+        inspector=InspectorState(
+            provider="test",
+            model="model",
+            active_view="safety",
+        )
+    )
+    inspector = InspectorPanel()
+    inspector.update_state(state)
+    assert "Safety" in str(inspector.render())
+    assert "HITL" in str(inspector.render())
+
+    state.inspector.active_view = "memory"
+    inspector.update_state(state)
+    assert "Memory" in str(inspector.render())
+    assert "Long-term memory" in str(inspector.render())

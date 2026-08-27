@@ -14,6 +14,7 @@ TranscriptStatus = Literal[
     "streaming", "running", "success", "failed", "cancelled", "done",
 ]
 QueueItemKind = Literal["task", "plan", "command"]
+InspectorView = Literal["session", "plan", "memory", "safety"]
 TuiPhase = Literal[
     "idle", "running", "awaiting_approval", "awaiting_plan_review", "error",
 ]
@@ -71,8 +72,64 @@ class UsageSnapshot:
     last_compaction_after: int = 0
 
 
+@dataclass(frozen=True)
+class SessionInspectorSnapshot:
+    provider: str = ""
+    model: str = ""
+    status: str = "idle"
+
+
+@dataclass(frozen=True)
+class PlanTaskSnapshot:
+    id: str
+    title: str
+    status: str = "pending"
+
+
+@dataclass(frozen=True)
+class PlanInspectorSnapshot:
+    goal: str = ""
+    status: str = "idle"
+    current_round: int = 0
+    total_rounds: int = 0
+    completed_tasks: int = 0
+    total_tasks: int = 0
+    failure_count: int = 0
+    tasks: tuple[PlanTaskSnapshot, ...] = ()
+
+
+@dataclass(frozen=True)
+class MemoryInspectorSnapshot:
+    project_root: str = ""
+    xg_loaded: bool = False
+    xg_local_loaded: bool = False
+    warning_count: int = 0
+    memory_count: int = 0
+    store_available: bool = True
+    last_operation: str = ""
+
+
+@dataclass(frozen=True)
+class SafetyInspectorSnapshot:
+    hitl_enabled: bool = True
+    session_allow_all: bool = False
+    approval_status: str = "idle"
+    current_tool: str = ""
+    current_level: str = ""
+    last_decision: str = ""
+    last_reason: str = ""
+    path_guard_active: bool = True
+    command_guard_active: bool = True
+    last_rejection: str = ""
+
+
 @dataclass
 class InspectorState:
+    active_view: InspectorView = "session"
+    session: SessionInspectorSnapshot = field(default_factory=SessionInspectorSnapshot)
+    plan: PlanInspectorSnapshot = field(default_factory=PlanInspectorSnapshot)
+    memory: MemoryInspectorSnapshot = field(default_factory=MemoryInspectorSnapshot)
+    safety: SafetyInspectorSnapshot = field(default_factory=SafetyInspectorSnapshot)
     provider: str = ""
     model: str = ""
     usage: UsageSnapshot = field(default_factory=UsageSnapshot)

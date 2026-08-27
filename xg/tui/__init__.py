@@ -5,6 +5,28 @@ Core execution code is intentionally kept outside this package.  Importing
 dependency has not been installed yet.
 """
 
-from xg.tui.state import InspectorState, TranscriptItem, TuiState, UsageSnapshot
+from xg.tui.state import (
+    InspectorState,
+    InspectorView,
+    MemoryInspectorSnapshot,
+    PlanInspectorSnapshot,
+    PlanTaskSnapshot,
+    SafetyInspectorSnapshot,
+    SessionInspectorSnapshot,
+    TranscriptItem,
+    TuiState,
+    UsageSnapshot,
+)
 
-__all__ = ["InspectorState", "TranscriptItem", "TuiState", "UsageSnapshot"]
+__all__ = [
+    "InspectorState",
+    "InspectorView",
+    "MemoryInspectorSnapshot",
+    "PlanInspectorSnapshot",
+    "PlanTaskSnapshot",
+    "SafetyInspectorSnapshot",
+    "SessionInspectorSnapshot",
+    "TranscriptItem",
+    "TuiState",
+    "UsageSnapshot",
+]
