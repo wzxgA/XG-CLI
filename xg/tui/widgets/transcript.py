@@ -11,6 +11,11 @@ from xg.tui.widgets.action_card import InlineApprovalCard, InlineConfirmationCar
 
 class TranscriptView(VerticalScroll):
     def update_state(self, state: TuiState) -> None:
+        # StateChanged can arrive while the App is still composing its
+        # children. Defer the first render until this scroll view is attached.
+        if not self.is_attached:
+            self.call_after_refresh(lambda: self.update_state(state))
+            return
         self.remove_children()
         widgets = []
         if not state.transcript:
