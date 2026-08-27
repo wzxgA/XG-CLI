@@ -6,6 +6,7 @@ XG-docs/
 
 # 运行时产物（审计日志等）
 .xg/
+XG.md
 
 # Python
 __pycache__/
@@ -23,3 +24,4 @@ htmlcov/
 # 编辑器
 .idea/
 .vscode/
+

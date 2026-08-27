@@ -222,6 +222,48 @@ async def test_tui_pilot_layout_and_input(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_uses_full_width_footer_composer_and_top_inspector(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)):
+        shell = app.query_one("#shell")
+        main = app.query_one("#main-column")
+        inspector = app.query_one("#inspector")
+        header = app.query_one("#header")
+        transcript = app.query_one("#transcript")
+        footer = app.query_one("#footer")
+        composer_area = app.query_one("#composer-area")
+
+        assert inspector.parent is shell
+        assert header.parent is main
+        assert transcript.parent is main
+        # App-level children are mounted under Textual's default Screen.
+        assert footer.parent is app.screen
+        assert composer_area.parent is app.screen
+        assert footer.region.y < composer_area.region.y
+        assert inspector.region.y == shell.region.y
+        assert inspector.region.height == shell.region.height
+        assert header.region.height > transcript.region.height * 0.15
+
+
+@pytest.mark.asyncio
+async def test_tui_empty_transcript_shows_brand_welcome_state(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        empty = app.query_one(".transcript-empty-state")
+        assert "输入任务开始" in str(empty.render())
+        assert "🍉" not in str(empty.render())
+        assert "XG" not in str(empty.render())
+        assert app.query_one("#composer").has_focus
+
+        app.query_one("#composer").value = "hi"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert len(app.query(".transcript-empty-state")) == 0
+
+
+@pytest.mark.asyncio
 async def test_tui_inspector_views_switch_with_bindings_and_tabs(tmp_path):
     agent, settings, manager = make_context(tmp_path)
     app = XgTuiApp(agent, settings, manager)

@@ -91,6 +91,23 @@ def test_usage_widgets_show_unavailable_until_data_arrives() -> None:
     assert "source           unavailable" in str(inspector.render())
 
 
+def test_header_contains_watermelon_brand_and_runtime_summary() -> None:
+    state = TuiState(
+        phase="running",
+        inspector=InspectorState(
+            provider="deepseek",
+            model="deepseek-chat",
+        ),
+    )
+    header = HeaderBar()
+    header.update_state(state)
+    rendered = str(header.render())
+    assert "XG" in rendered
+    assert "deepseek/deepseek-chat" in rendered
+    assert "Working" in rendered
+    assert "HITL ON" in rendered
+
+
 def test_plan_reducer_populates_inspector_task_snapshot() -> None:
     plan = Plan(
         goal="检查项目",

@@ -64,17 +64,22 @@ class XgTuiApp(App[None]):
         self._replan_mode = False
 
     def compose(self) -> ComposeResult:
-        yield HeaderBar(id="header")
-        with Horizontal(id="body"):
-            yield TranscriptView(id="transcript")
+        # The work area owns the left brand/transcript column and the right
+        # inspector.  Footer and composer deliberately remain outside it so
+        # they span the full terminal width.
+        with Horizontal(id="shell"):
+            with Vertical(id="main-column"):
+                yield HeaderBar(id="header")
+                yield TranscriptView(id="transcript")
             yield InspectorPanel(id="inspector")
-        yield Static("", id="notification")
+
+        yield FooterBar()
         with Vertical(id="composer-area"):
+            yield Static("", id="notification")
             yield QueueStatus(id="queue-status")
             yield CommandSuggestions()
             yield Static("输入", id="composer-label")
             yield Composer()
-        yield FooterBar()
 
     def on_mount(self) -> None:
         self._render_state(self._state)

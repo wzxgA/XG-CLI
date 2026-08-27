@@ -2,11 +2,26 @@ Screen {
     background: $surface;
 }
 
+#shell {
+    width: 1fr;
+    height: 1fr;
+}
+
+#main-column {
+    width: 1fr;
+    height: 1fr;
+}
+
 #header {
-    height: 1;
+    height: 2fr;
+    min-height: 5;
+    max-height: 20;
     color: $text;
     background: $panel;
-    padding: 0 1;
+    padding: 0 2;
+    content-align: center middle;
+    text-align: center;
+    text-style: none;
 }
 
 #header.usage-warning {
@@ -17,20 +32,28 @@ Screen {
     color: $error;
 }
 
-#body {
-    height: 1fr;
-}
-
 #transcript {
     width: 1fr;
-    height: 1fr;
-    padding: 0 1;
+    height: 8fr;
+    min-height: 8;
+    padding: 1 2;
+    background: $surface;
     scrollbar-size: 1 1;
+}
+
+.transcript-empty-state {
+    width: 1fr;
+    height: auto;
+    margin-top: 6;
+    padding: 1 2;
+    color: $text-muted;
+    text-align: center;
 }
 
 #inspector {
     width: 36;
     min-width: 32;
+    height: 1fr;
     border-left: solid $primary;
     padding: 1;
     color: $text-muted;
@@ -81,9 +104,9 @@ InspectorTab.active {
 }
 
 #composer-area {
-    dock: bottom;
+    width: 1fr;
     height: auto;
-    margin: 0 1;
+    margin: 0;
 }
 
 #queue-status {
@@ -130,6 +153,7 @@ InspectorTab.active {
 }
 
 #footer {
+    width: 1fr;
     height: 1;
     color: $text-muted;
     background: $panel;
