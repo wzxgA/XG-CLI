@@ -19,7 +19,7 @@ from typing import AsyncIterator, Awaitable, Callable, Literal
 from xg.agent.react import AgentEvent, DEFAULT_SYSTEM_PROMPT, ReActAgent
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient, LlmError
-from xg.llm.types import Message
+from xg.llm.types import Message, Usage
 from xg.memory.context import ConversationContext
 from xg.memory.manager import MemoryManager
 from xg.safety.hitl import HITLPolicy
@@ -95,13 +95,19 @@ class PlanEvent:
     kind: Literal[
         "plan_generated", "review", "approved", "cancelled", "replanned",
         "batch_started", "subtask_started", "subtask_done", "subtask_failed",
-        "subtask_event", "plan_done", "plan_failed",
+        "subtask_event", "planner_usage", "plan_done", "plan_failed",
     ]
     plan: Plan | None = None
     batch: list[str] = field(default_factory=list)
     task: PlanTask | None = None
     message: str = ""
     agent_event: AgentEvent | None = None
+    usage: Usage | None = None
+    estimated_prompt_tokens: int | None = None
+    request_token_limit: int | None = None
+    context_window: int | None = None
+    compaction_before: int | None = None
+    compaction_after: int | None = None
 
 
 @dataclass
@@ -248,6 +254,8 @@ class PlanExecutor:
         self.approval_policy = approval_policy
         self.audit = audit
         self.memory_manager = memory_manager
+        self._planner_context_event: AgentEvent | None = None
+        self._planner_usage: Usage | None = None
 
     async def run(self, goal: str) -> AsyncIterator[PlanEvent]:
         """执行完整流程：拆解 → 审阅（可循环重规划）→ 按批次执行 → 汇总。"""
@@ -267,7 +275,31 @@ class PlanExecutor:
                     message="计划生成失败（JSON 解析重试已用尽），建议改用 ReAct 模式直接执行任务。",
                 )
                 return
-            yield PlanEvent(kind="plan_generated", plan=plan, message="；".join(warnings))
+            planner_context = self._planner_context_event
+            yield PlanEvent(
+                kind="plan_generated", plan=plan, message="；".join(warnings),
+                usage=self._planner_usage,
+                estimated_prompt_tokens=(
+                    planner_context.estimated_prompt_tokens
+                    if planner_context is not None else None
+                ),
+                request_token_limit=(
+                    planner_context.request_token_limit
+                    if planner_context is not None else None
+                ),
+                context_window=(
+                    planner_context.context_window
+                    if planner_context is not None else None
+                ),
+                compaction_before=(
+                    planner_context.compaction_before
+                    if planner_context is not None else None
+                ),
+                compaction_after=(
+                    planner_context.compaction_after
+                    if planner_context is not None else None
+                ),
+            )
 
             if self.reviewer is None:
                 # fail closed：无审阅回调，自动取消，不执行任何工具
@@ -325,6 +357,8 @@ class PlanExecutor:
 
         返回 (plan, warnings)；重试用尽返回 (None, warnings)。
         """
+        self._planner_context_event = None
+        self._planner_usage = None
         planner_context = ConversationContext(
             PLANNER_SYSTEM_PROMPT,
             self.settings,
@@ -334,12 +368,25 @@ class PlanExecutor:
             Message(role="user", content=self._planner_prompt(goal, feedback, previous))
         )
         budget = await planner_context.ensure_budget(self.llm)
+        self._planner_context_event = AgentEvent(
+            kind="context_usage",
+            estimated_prompt_tokens=budget.after_tokens,
+            request_token_limit=budget.request_token_limit,
+            context_window=self.settings.context_window,
+            compaction_before=(
+                budget.before_tokens if budget.status == "compacted" else None
+            ),
+            compaction_after=(
+                budget.after_tokens if budget.status == "compacted" else None
+            ),
+        )
         if not budget.proceed:
             raise LlmError(budget.message or "规划上下文超出模型窗口")
         messages = planner_context.build_messages()
         warnings: list[str] = []
         for _attempt in range(1 + PLAN_MAX_RETRIES):
-            raw = await self._llm_text(messages)
+            raw, usage = await self._llm_text(messages)
+            self._planner_usage = usage
             try:
                 tasks, warns = parse_tasks(raw, self.settings.plan_max_subtasks)
             except PlanError as e:
@@ -363,13 +410,16 @@ class PlanExecutor:
         parts.append(f"请拆解为不超过 {self.settings.plan_max_subtasks} 个子任务，输出严格 JSON。")
         return "\n\n".join(parts)
 
-    async def _llm_text(self, messages: list[Message]) -> str:
+    async def _llm_text(self, messages: list[Message]) -> tuple[str, Usage | None]:
         """非流式语义：聚合一次 LLM 调用的全部文本。"""
         parts: list[str] = []
+        usage: Usage | None = None
         async for event in self.llm.stream_chat(messages, tools=None):
             if event.kind == "content" and event.text:
                 parts.append(event.text)
-        return "".join(parts)
+            elif event.kind == "done":
+                usage = event.usage
+        return "".join(parts), usage
 
     # ---- 批次执行（批内并行） ----
 
@@ -443,13 +493,26 @@ class PlanExecutor:
         async for event in agent.run(self._subtask_user_prompt(task)):
             if event.kind in (
                 "thinking", "content", "tool_call", "approval", "tool_result",
-                "context_compacted", "context_warning",
+                "context_compacted", "context_warning", "context_usage", "usage",
             ):
                 queue.put_nowait(PlanEvent(
                     kind="subtask_event", plan=plan, task=task, agent_event=event
                 ))
             elif event.kind == "error":
                 return "", f"LLM 请求失败: {event.text}"
+            elif event.kind == "done":
+                if event.usage is not None:
+                    queue.put_nowait(PlanEvent(
+                        kind="subtask_event", plan=plan, task=task,
+                        agent_event=AgentEvent(
+                            kind="usage", usage=event.usage,
+                            estimated_prompt_tokens=event.estimated_prompt_tokens,
+                            request_token_limit=event.request_token_limit,
+                            context_window=event.context_window,
+                            compaction_before=event.compaction_before,
+                            compaction_after=event.compaction_after,
+                        ),
+                    ))
             elif event.kind == "step_limit":
                 return "", f"达到子任务步数上限（{self.settings.plan_subtask_steps}）"
             elif event.kind in ("budget_exceeded", "context_overflow"):

@@ -50,10 +50,33 @@ class QueueItem:
     status: Literal["queued"] = "queued"
 
 
+@dataclass(frozen=True)
+class UsageSnapshot:
+    """Current context estimate plus provider request accounting."""
+
+    estimated_prompt_tokens: int = 0
+    context_window: int = 0
+    request_token_limit: int = 0
+    window_ratio: float = 0.0
+    budget_usage_ratio: float = 0.0
+    last_prompt_tokens: int = 0
+    last_completion_tokens: int = 0
+    last_total_tokens: int = 0
+    session_prompt_tokens: int = 0
+    session_completion_tokens: int = 0
+    session_total_tokens: int = 0
+    usage_source: Literal["provider", "estimated", "unavailable"] = "unavailable"
+    compaction_count: int = 0
+    last_compaction_before: int = 0
+    last_compaction_after: int = 0
+
+
 @dataclass
 class InspectorState:
     provider: str = ""
     model: str = ""
+    usage: UsageSnapshot = field(default_factory=UsageSnapshot)
+    # Compatibility fields retained for adapters written before UsageSnapshot.
     context_tokens: int = 0
     context_window: int = 0
     memory_count: int = 0

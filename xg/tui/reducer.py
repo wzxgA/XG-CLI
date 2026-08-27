@@ -11,6 +11,7 @@ from typing import Any
 
 from xg.agent.plan import PlanEvent
 from xg.agent.react import AgentEvent
+from xg.llm.types import Usage
 from xg.tui.state import TuiState, TranscriptItem
 
 
@@ -29,6 +30,61 @@ def _append(state: TuiState, item: TranscriptItem) -> None:
 
 def _trace_id(turn_id: str, trace_id: str | None) -> str:
     return trace_id or turn_id
+
+
+def _ratio(value: int, limit: int) -> float:
+    return value / limit if limit > 0 else 0.0
+
+
+def _valid_usage(usage: Usage | None) -> bool:
+    if usage is None:
+        return False
+    values = (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+    return all(
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 0
+        for value in values
+    )
+
+
+def _update_context_usage(out: TuiState, event: AgentEvent) -> None:
+    old = out.inspector.usage
+    estimated = max(0, event.estimated_prompt_tokens or 0)
+    window = event.context_window if event.context_window is not None else old.context_window
+    limit = event.request_token_limit if event.request_token_limit is not None else old.request_token_limit
+    compacted = event.compaction_before is not None and event.compaction_after is not None
+    out.inspector.usage = replace(
+        old,
+        estimated_prompt_tokens=estimated,
+        context_window=max(0, window or 0),
+        request_token_limit=max(0, limit or 0),
+        window_ratio=_ratio(estimated, window or 0),
+        budget_usage_ratio=_ratio(estimated, limit or 0),
+        usage_source="estimated",
+        compaction_count=old.compaction_count + (1 if compacted else 0),
+        last_compaction_before=(event.compaction_before or 0) if compacted else old.last_compaction_before,
+        last_compaction_after=(event.compaction_after or 0) if compacted else old.last_compaction_after,
+    )
+    out.inspector.context_tokens = estimated
+    out.inspector.context_window = max(0, window or 0)
+
+
+def _update_provider_usage(out: TuiState, usage_value: Usage | None) -> None:
+    if not _valid_usage(usage_value):
+        return
+    assert usage_value is not None
+    old = out.inspector.usage
+    out.inspector.usage = replace(
+        old,
+        last_prompt_tokens=usage_value.prompt_tokens,
+        last_completion_tokens=usage_value.completion_tokens,
+        last_total_tokens=usage_value.total_tokens,
+        session_prompt_tokens=old.session_prompt_tokens + usage_value.prompt_tokens,
+        session_completion_tokens=old.session_completion_tokens + usage_value.completion_tokens,
+        session_total_tokens=old.session_total_tokens + usage_value.total_tokens,
+        usage_source="provider",
+    )
 
 
 def _finish_streaming_text(state: TuiState, trace_id: str) -> None:
@@ -124,6 +180,13 @@ def reduce_agent_event(
     out = _copy(state)
     trace_id = _trace_id(turn_id, trace_id)
     kind = event.kind
+    if event.estimated_prompt_tokens is not None:
+        _update_context_usage(out, event)
+    if kind == "context_usage":
+        return out
+    if kind == "usage":
+        _update_provider_usage(out, event.usage)
+        return out
     if kind == "thinking":
         if not (out.transcript and out.transcript[-1].kind == "thinking" and out.transcript[-1].streaming and out.transcript[-1].trace_id == trace_id):
             _finish_streaming_text(out, trace_id)
@@ -191,6 +254,7 @@ def reduce_agent_event(
         _collapse_trace(out, trace_id, status="failed")
         return out
     if kind in ("step_limit", "done"):
+        _update_provider_usage(out, event.usage)
         for item in reversed(out.transcript):
             if item.kind == "assistant" and item.trace_id == trace_id:
                 item.streaming = False
@@ -214,6 +278,16 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
     out = _copy(state)
     kind = event.kind
     if kind == "plan_generated" and event.plan:
+        if event.estimated_prompt_tokens is not None:
+            _update_context_usage(out, AgentEvent(
+                kind="context_usage",
+                estimated_prompt_tokens=event.estimated_prompt_tokens,
+                request_token_limit=event.request_token_limit,
+                context_window=event.context_window,
+                compaction_before=event.compaction_before,
+                compaction_after=event.compaction_after,
+            ))
+        _update_provider_usage(out, event.usage)
         out.pending_plan = event.plan
         out.phase = "awaiting_plan_review"
         out.inspector.plan_status = "review"
@@ -245,6 +319,8 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
     if kind == "subtask_event" and event.agent_event:
         task_trace = f"{turn_id}:{event.task.id}" if event.task else turn_id
         return reduce_agent_event(out, event.agent_event, turn_id, task_trace)
+    if kind == "planner_usage" and event.agent_event:
+        return reduce_agent_event(out, event.agent_event, turn_id, f"{turn_id}:planner")
     if kind in ("subtask_done", "subtask_failed") and event.task:
         task_trace = f"{turn_id}:{event.task.id}"
         _collapse_trace(out, task_trace, status="failed" if kind == "subtask_failed" else "done")

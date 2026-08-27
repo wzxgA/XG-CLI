@@ -9,6 +9,14 @@ Screen {
     padding: 0 1;
 }
 
+#header.usage-warning {
+    color: $warning;
+}
+
+#header.usage-error {
+    color: $error;
+}
+
 #body {
     height: 1fr;
 }

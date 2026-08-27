@@ -75,7 +75,7 @@ class OpenAICompatClient(LlmClient):
         # 按 index 聚合中的 tool_call 分片
         pending: dict[int, dict[str, str]] = {}
         finish_reason = ""
-        usage = Usage()
+        usage: Usage | None = None
 
         async for line in resp.aiter_lines():
             line = line.strip()

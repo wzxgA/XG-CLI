@@ -5,6 +5,6 @@ Core execution code is intentionally kept outside this package.  Importing
 dependency has not been installed yet.
 """
 
-from xg.tui.state import InspectorState, TranscriptItem, TuiState
+from xg.tui.state import InspectorState, TranscriptItem, TuiState, UsageSnapshot
 
-__all__ = ["InspectorState", "TranscriptItem", "TuiState"]
+__all__ = ["InspectorState", "TranscriptItem", "TuiState", "UsageSnapshot"]

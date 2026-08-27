@@ -22,6 +22,7 @@ from xg.tui.state import (
     QueueItemKind,
     TuiState,
     TranscriptItem,
+    UsageSnapshot,
 )
 
 
@@ -60,6 +61,7 @@ class SessionController:
                 TuiState().inspector,
                 provider=settings.provider,
                 model=settings.model,
+                usage=UsageSnapshot(context_window=settings.context_window),
                 context_window=settings.context_window,
                 hitl_enabled=bool(agent.approval_policy and agent.approval_policy.enabled),
             )
@@ -411,6 +413,22 @@ class SessionController:
             self._set_state(replace(self.state, pending_confirmation=request, notification="请确认清空长期记忆"))
             return CommandResult(ok=True, open_modal="memory_clear")
         result = await self.command_service.execute(raw)
+        current_usage = self.state.inspector.usage
+        if cleared:
+            current_usage = UsageSnapshot(context_window=self.settings.context_window)
+        elif self.settings.context_window != current_usage.context_window:
+            current_usage = replace(
+                current_usage,
+                context_window=self.settings.context_window,
+                window_ratio=(
+                    current_usage.estimated_prompt_tokens / self.settings.context_window
+                    if self.settings.context_window > 0 else 0.0
+                ),
+                budget_usage_ratio=(
+                    current_usage.estimated_prompt_tokens / self.settings.token_budget
+                    if self.settings.token_budget > 0 else 0.0
+                ),
+            )
         self._set_state(replace(
             self.state,
             transcript=[] if cleared else self.state.transcript,
@@ -418,6 +436,9 @@ class SessionController:
                 self.state.inspector,
                 provider=self.settings.provider,
                 model=self.settings.model,
+                usage=current_usage,
+                context_tokens=0 if cleared else self.state.inspector.context_tokens,
+                context_window=self.settings.context_window,
                 hitl_enabled=bool(self.agent.approval_policy and self.agent.approval_policy.enabled),
             ),
         ))

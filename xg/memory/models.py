@@ -32,6 +32,7 @@ class CompressionResult:
     compressed_turns: int = 0
     message: str = ""
     warnings: tuple[str, ...] = ()
+    request_token_limit: int = 0
 
     @property
     def proceed(self) -> bool:

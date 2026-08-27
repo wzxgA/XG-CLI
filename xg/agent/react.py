@@ -13,7 +13,7 @@ from typing import AsyncIterator, Literal
 
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient, LlmError
-from xg.llm.types import Message, ToolCall, ToolResult
+from xg.llm.types import Message, ToolCall, ToolResult, Usage
 from xg.memory.context import ConversationContext
 from xg.memory.manager import MemoryManager
 from xg.safety.hitl import ApprovalDecision, HITLPolicy
@@ -46,12 +46,18 @@ class AgentEvent:
     kind: Literal[
         "content", "thinking", "tool_call", "approval", "tool_result", "step_limit",
         "budget_exceeded", "context_compacted", "context_warning",
-        "context_overflow", "error", "done"
+        "context_overflow", "context_usage", "usage", "error", "done"
     ]
     text: str = ""
     tool_call: ToolCall | None = None
     tool_result: ToolResult | None = None
     decision: ApprovalDecision | None = None
+    usage: Usage | None = None
+    estimated_prompt_tokens: int | None = None
+    request_token_limit: int | None = None
+    context_window: int | None = None
+    compaction_before: int | None = None
+    compaction_after: int | None = None
 
 
 class ReActAgent:
@@ -98,6 +104,17 @@ class ReActAgent:
                         self._reported_memory_warnings.add(warning)
                         yield AgentEvent(kind="context_warning", text=warning)
             budget = await self.context.ensure_budget(self.llm, self.tools.schemas())
+            context_fields = {
+                "estimated_prompt_tokens": budget.after_tokens,
+                "request_token_limit": budget.request_token_limit,
+                "context_window": self.settings.context_window,
+                "compaction_before": (
+                    budget.before_tokens if budget.status == "compacted" else None
+                ),
+                "compaction_after": (
+                    budget.after_tokens if budget.status == "compacted" else None
+                ),
+            }
             for warning in budget.warnings:
                 yield AgentEvent(kind="context_warning", text=warning)
             if budget.status == "compacted":
@@ -115,6 +132,7 @@ class ReActAgent:
 
             content_parts: list[str] = []
             tool_calls: list[ToolCall] = []
+            request_usage: Usage | None = None
             try:
                 async for event in self.llm.stream_chat(request_messages, self.tools.schemas()):
                     if event.kind == "thinking" and event.text:
@@ -124,6 +142,8 @@ class ReActAgent:
                         yield AgentEvent(kind="content", text=event.text)
                     elif event.kind == "tool_call" and event.tool_call:
                         tool_calls.append(event.tool_call)
+                    elif event.kind == "done":
+                        request_usage = event.usage
             except LlmError as e:
                 yield AgentEvent(kind="error", text=str(e))
                 return
@@ -131,15 +151,26 @@ class ReActAgent:
             if not tool_calls:
                 # 无工具调用：本轮结束
                 self.context.append(Message(role="assistant", content="".join(content_parts)))
-                yield AgentEvent(kind="done")
+                yield AgentEvent(kind="done", usage=request_usage, **context_fields)
                 return
+
+            # A tool round is not the final agent event, so preserve its
+            # provider usage separately. This is important when one turn
+            # contains several LLM requests.
+            if request_usage is not None:
+                yield AgentEvent(
+                    kind="usage", usage=request_usage, **context_fields
+                )
 
             # 记录 assistant 消息（含 tool_calls）
             self.context.append(
                 Message(role="assistant", content="".join(content_parts), tool_calls=tool_calls)
             )
+            context_attached = request_usage is not None
             for call in tool_calls:
-                yield AgentEvent(kind="tool_call", tool_call=call)
+                fields = {} if context_attached else context_fields
+                context_attached = True
+                yield AgentEvent(kind="tool_call", tool_call=call, **fields)
 
             # HITL 审批：逐调用决策，被拒的不执行（未启用策略时静默放行）
             to_execute: list[ToolCall] = []

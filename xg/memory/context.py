@@ -285,6 +285,7 @@ class ConversationContext:
                 status=status,
                 before_tokens=before,
                 after_tokens=before,
+                request_token_limit=request_limit,
                 message="；".join(warnings),
                 warnings=tuple(warnings),
             )
@@ -300,6 +301,7 @@ class ConversationContext:
                 status="compacted",
                 before_tokens=before,
                 after_tokens=after,
+                request_token_limit=request_limit,
                 compressed_turns=turns,
                 message=f"上下文已压缩：{before} → {after} token，合并 {turns} 轮",
                 warnings=tuple(warnings),
@@ -311,6 +313,7 @@ class ConversationContext:
                 status="error",
                 before_tokens=before,
                 after_tokens=before,
+                request_token_limit=request_limit,
                 message=detail,
                 warnings=tuple(warnings),
             )
@@ -318,6 +321,7 @@ class ConversationContext:
             status="overflow",
             before_tokens=before,
             after_tokens=after,
+            request_token_limit=request_limit,
             message=detail or f"上下文超出输入预算（{after}/{request_limit} token）",
             warnings=tuple(warnings),
         )
