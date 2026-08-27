@@ -6,11 +6,15 @@ from typing import AsyncIterator
 
 import pytest
 
+from textual.widgets import Button, Input, Static
+
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient
 from xg.llm.types import StreamEvent, ToolCall, ToolResult
+from xg.memory.manager import MemoryManager
+from xg.safety.hitl import HITLPolicy
 from xg.tool.builtin import build_registry
 from xg.tui.app import XgTuiApp
 from xg.tui.controller import SessionController
@@ -524,3 +528,300 @@ async def test_tui_trace_cards_auto_collapse_and_can_toggle(tmp_path):
         await pilot.press("shift+d")
         await pilot.pause()
         assert all(item.collapsed is True for item in app.controller.state.transcript if item.collapsible)
+
+
+class ApprovalClient(LlmClient):
+    """每次任务先请求 write_file 审批，决策落地后以正常回复收尾。"""
+
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+        if any(message.role == "tool" for message in messages):
+            yield StreamEvent(kind="content", text="写入完成")
+        else:
+            yield StreamEvent(
+                kind="tool_call",
+                tool_call=ToolCall(
+                    id="call-write", name="write_file",
+                    arguments='{"path": "note.txt", "content": "hi"}',
+                ),
+            )
+        yield StreamEvent(kind="done")
+
+
+def make_approval_context(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    agent = ReActAgent(
+        ApprovalClient(),
+        build_registry(base_dir=project),
+        settings,
+        approval_policy=HITLPolicy(enabled=True),
+    )
+    return agent, settings, manager, project
+
+
+async def wait_for_condition(pilot, predicate, attempts: int = 200) -> bool:
+    for _ in range(attempts):
+        if predicate():
+            return True
+        await pilot.pause(0.01)
+    return predicate()
+
+
+def approval_card_text(app) -> str:
+    # 新旧卡片在异步移除窗口内可能短暂共存，断言最新一张
+    cards = list(app.query(".inline-approval-card"))
+    return str(cards[-1]._text.render())
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_card_is_text_only_and_decides_via_composer(tmp_path):
+    agent, settings, manager, project = make_approval_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        task = asyncio.create_task(app.controller.submit("写个文件"))
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_approval is not None
+        )
+        await pilot.pause(0.1)
+
+        card = app.query_one(".inline-approval-card")
+        assert not list(card.query(Button))
+        assert not list(card.query(Input))
+        text = approval_card_text(app)
+        assert "write_file" in text
+        assert "confirm" in text
+        assert "y 批准" in text
+        composer = app.query_one("#composer")
+        assert app.focused is composer
+
+        # 无效输入：不执行工具，保留审批状态和输入内容
+        composer.value = "帮我直接写"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app.controller.state.pending_approval is not None
+        assert composer.value == "帮我直接写"
+        assert not (project / "note.txt").exists()
+
+        # y 批准后工具以原始参数执行
+        composer.value = "y"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: (project / "note.txt").exists()
+        )
+        await asyncio.wait_for(task, 2)
+        assert (project / "note.txt").read_text(encoding="utf-8") == "hi"
+        await pilot.pause(0.1)
+        assert app.controller.state.phase == "idle"
+        assert app.controller.state.pending_approval is None
+        assert app.query_one("#composer").placeholder == "输入任务或 /help …"
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_edit_args_requires_valid_json_and_double_confirmation(tmp_path):
+    agent, settings, manager, project = make_approval_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        task = asyncio.create_task(app.controller.submit("写个文件"))
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_approval is not None
+        )
+
+        composer = app.query_one("#composer")
+        composer.value = "e"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app._decision_mode == "approval_edit"
+        assert "完整 JSON" in approval_card_text(app)
+
+        # 非法 JSON：继续等待 JSON，不执行工具
+        composer.value = "not-json"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app._decision_mode == "approval_edit"
+        assert app.controller.state.pending_approval is not None
+        assert not (project / "note2.txt").exists()
+
+        # 合法 JSON：先展示新参数，进入二次确认
+        composer.value = '{"path": "note2.txt", "content": "new"}'
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app._decision_mode == "approval_confirm_modified"
+        assert "note2.txt" in approval_card_text(app)
+        assert not (project / "note2.txt").exists()
+
+        # y 才把修改后的参数提交给当前工具调用
+        composer.value = "y"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: (project / "note2.txt").exists()
+        )
+        await asyncio.wait_for(task, 2)
+        assert (project / "note2.txt").read_text(encoding="utf-8") == "new"
+        assert not (project / "note.txt").exists()
+        assert app.controller.state.phase == "idle"
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_escape_is_fail_closed(tmp_path):
+    agent, settings, manager, project = make_approval_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        task = asyncio.create_task(app.controller.submit("写个文件"))
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_approval is not None
+        )
+        await pilot.press("escape")
+        await asyncio.wait_for(task, 2)
+        assert not (project / "note.txt").exists()
+        assert app.controller.state.phase == "idle"
+        assert app.controller.state.pending_approval is None
+
+
+@pytest.mark.asyncio
+async def test_tui_approval_modified_args_can_be_rejected(tmp_path):
+    agent, settings, manager, project = make_approval_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        task = asyncio.create_task(app.controller.submit("写个文件"))
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_approval is not None
+        )
+        composer = app.query_one("#composer")
+        composer.value = "e"
+        await pilot.press("enter")
+        composer.value = '{"path": "note2.txt", "content": "new"}'
+        await pilot.press("enter")
+        assert app._decision_mode == "approval_confirm_modified"
+
+        # 二次确认拒绝：不执行修改后的调用
+        composer.value = "r"
+        await pilot.press("enter")
+        await asyncio.wait_for(task, 2)
+        assert not (project / "note2.txt").exists()
+        assert not (project / "note.txt").exists()
+        assert app.controller.state.phase == "idle"
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_c_during_approval_cancels_without_executing(tmp_path):
+    agent, settings, manager, project = make_approval_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        task = asyncio.create_task(app.controller.submit("写个文件"))
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_approval is not None
+        )
+        await pilot.press("ctrl+c")
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert not (project / "note.txt").exists()
+        assert app.controller.state.phase == "idle"
+
+
+def make_memory_context(tmp_path: Path, *, seed: str = ""):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    memory = MemoryManager(project)
+    if seed:
+        memory.save(seed)
+    agent = ReActAgent(
+        DummyClient(), build_registry(base_dir=project), settings, memory_manager=memory
+    )
+    return agent, settings, manager, memory, project
+
+
+@pytest.mark.asyncio
+async def test_tui_init_confirmation_via_composer(tmp_path):
+    agent, settings, manager, memory, project = make_memory_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer")
+        composer.value = "/init"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_confirmation is not None
+        )
+        await pilot.pause(0.1)
+
+        card = app.query_one(".inline-confirmation-card")
+        assert not list(card.query(Button))
+        assert not list(card.query(Input))
+        assert "写入项目记忆" in str(card._text.render())
+
+        # n 取消：不写入文件
+        composer.value = "n"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_confirmation is None
+        )
+        assert not (project / "XG.md").exists()
+
+        # 无效输入不写入，确认状态保留
+        composer.value = "/init"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_confirmation is not None
+        )
+        composer.value = "随便看看"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app.controller.state.pending_confirmation is not None
+        assert not (project / "XG.md").exists()
+
+        # y 确认写入
+        composer.value = "y"
+        await pilot.press("enter")
+        assert await wait_for_condition(pilot, lambda: (project / "XG.md").exists())
+        assert app.controller.state.pending_confirmation is None
+        await pilot.pause(0.1)
+        assert composer.placeholder == "输入任务或 /help …"
+
+
+@pytest.mark.asyncio
+async def test_tui_memory_clear_requires_exact_word(tmp_path):
+    agent, settings, manager, memory, project = make_memory_context(tmp_path, seed="记住用户偏好")
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer")
+        composer.value = "/memory clear"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_confirmation is not None
+        )
+        await pilot.pause(0.1)
+
+        card = app.query_one(".inline-confirmation-card")
+        assert not list(card.query(Button))
+        assert not list(card.query(Input))
+        assert "clear 确认清空" in str(card._text.render())
+        assert "confirmation-memory_clear" in str(card.classes)
+
+        # 单个 y 不是确认词，记忆保留
+        composer.value = "y"
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app.controller.state.pending_confirmation is not None
+        assert memory.count() == 1
+
+        # cancel 取消
+        composer.value = "cancel"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_confirmation is None
+        )
+        assert memory.count() == 1
+
+        # 精确输入 clear 才执行清空
+        composer.value = "/memory clear"
+        await pilot.press("enter")
+        assert await wait_for_condition(
+            pilot, lambda: app.controller.state.pending_confirmation is not None
+        )
+        composer.value = "clear"
+        await pilot.press("enter")
+        assert await wait_for_condition(pilot, lambda: memory.count() == 0)
+        assert "已清空 1 条长期记忆" in app.controller.state.notification

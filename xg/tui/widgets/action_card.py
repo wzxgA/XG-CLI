@@ -1,4 +1,9 @@
-"""Inline action cards used for all TUI confirmations."""
+"""Inline action cards used for all TUI confirmations.
+
+Cards are read-only text: context, risk and the input protocol.  Decisions
+are always typed into the main Composer, so no Button or inner Input lives
+here.
+"""
 
 from __future__ import annotations
 
@@ -6,84 +11,73 @@ import json
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Button, Input, Static
+from textual.widgets import Static
 
 from xg.tui.state import ApprovalRequest, ConfirmationRequest
 
+APPROVAL_HINT = "输入 y 批准 · a 全部放行 · r 拒绝 · s 跳过 · e 修改参数"
+CONFIRMATION_HINTS = {
+    "init": "输入 y 确认写入 · n 取消",
+    "memory_clear": "输入 clear 确认清空 · 其他输入取消",
+}
+
 
 class InlineConfirmationCard(Vertical):
-    can_focus = True
-    BINDINGS = [
-        ("enter", "confirm", "确认"),
-        ("y", "confirm", "确认"),
-        ("escape", "cancel", "取消"),
-    ]
-
     def __init__(self, request: ConfirmationRequest) -> None:
-        super().__init__(id="inline-confirmation-card", classes="inline-action-card")
+        # Per-kind class lets the theme give each confirmation its own
+        # border color while sharing one simple layout.  No fixed widget id:
+        # TranscriptView rebuilds children on every state change and Textual
+        # removes old nodes asynchronously, so duplicate ids would collide.
+        super().__init__(
+            classes=f"inline-action-card inline-confirmation-card confirmation-{request.kind}",
+        )
         self.request = request
+        # The Static is created eagerly: compose() runs asynchronously, so
+        # updates must not depend on the card being mounted already.
+        hint = CONFIRMATION_HINTS.get(self.request.kind, "输入 y 确认 · n 取消")
+        self._text = Static(f"{self.request.title}\n\n{self.request.body}\n\n{hint}")
 
     def compose(self) -> ComposeResult:
-        yield Static(f"{self.request.title}\n\n{self.request.body}")
-        yield Button("确认 (y/Enter)", id="inline-confirm", variant="warning")
-        yield Button("取消 (Esc)", id="inline-cancel")
-
-    def action_confirm(self) -> None:
-        self.app.handle_inline_confirmation(True)
-
-    def action_cancel(self) -> None:
-        self.app.handle_inline_confirmation(False)
+        yield self._text
 
 
 class InlineApprovalCard(Vertical):
-    can_focus = True
-    BINDINGS = [
-        ("enter", "approve", "批准"),
-        ("y", "approve", "批准"),
-        ("a", "allow_all", "全部放行"),
-        ("r", "reject", "拒绝"),
-        ("s", "skip", "跳过"),
-        ("escape", "reject", "拒绝"),
-        ("e", "edit", "修改参数"),
-    ]
-
     def __init__(self, request: ApprovalRequest) -> None:
-        super().__init__(id="inline-approval-card", classes="inline-action-card")
+        super().__init__(classes="inline-action-card inline-approval-card")
         self.request = request
+        self._mode = ""
+        self._modified_args: dict | None = None
+        self._text = Static(self._render_text(), classes="inline-approval-text")
 
     def compose(self) -> ComposeResult:
+        yield self._text
+
+    def set_mode(self, mode: str = "", modified_args: dict | None = None) -> None:
+        """Switch the card text; empty mode means waiting for the decision."""
+        self._mode = mode
+        self._modified_args = modified_args
+        self._text.update(self._render_text())
+
+    def _render_text(self) -> str:
+        if self._mode == "approval_edit":
+            return (
+                f"需要人工审批：{self.request.tool_name}\n\n"
+                "请输入修改后的完整 JSON 参数。\n"
+                "修改后的参数仍会经过 PathGuard / CommandGuard 检查。\n"
+                "输入 Esc 取消修改。"
+            )
+        if self._mode == "approval_confirm_modified":
+            args = json.dumps(self._modified_args or {}, ensure_ascii=False, indent=2)
+            return (
+                f"需要人工审批：{self.request.tool_name}\n\n"
+                f"参数已修改为：\n{args}\n\n"
+                "输入 y 确认执行 · r 拒绝执行 · Esc 取消"
+            )
         args = json.dumps(self.request.args, ensure_ascii=False, indent=2)
-        yield Static(
-            f"需要审批：{self.request.tool_name}\n"
-            f"敏感级别：{self.request.level}\n\n{args}"
+        return (
+            "需要人工审批\n"
+            f"工具：{self.request.tool_name}\n"
+            f"敏感级别：{self.request.level}\n"
+            f"当前参数：\n{args}\n\n"
+            f"{APPROVAL_HINT}"
         )
-        yield Input(placeholder="按 e 修改 JSON 参数", id="inline-approval-json")
-        yield Button("批准 (Enter/y)", id="inline-approve", variant="success")
-        yield Button("本会话全部放行 (a)", id="inline-allow-all")
-        yield Button("拒绝 (r/Esc)", id="inline-reject", variant="error")
-        yield Button("跳过 (s)", id="inline-skip")
-
-    def action_approve(self) -> None:
-        self.app.handle_inline_approval("approve")
-
-    def action_allow_all(self) -> None:
-        self.app.handle_inline_approval("allow_all")
-
-    def action_reject(self) -> None:
-        self.app.handle_inline_approval("reject")
-
-    def action_skip(self) -> None:
-        self.app.handle_inline_approval("skip")
-
-    def action_edit(self) -> None:
-        self.query_one("#inline-approval-json", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "inline-approval-json":
-            return
-        try:
-            json.loads(event.value)
-        except json.JSONDecodeError:
-            event.input.value = ""
-            return
-        self.app.handle_inline_approval("modify:" + event.value)

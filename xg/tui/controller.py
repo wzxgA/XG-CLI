@@ -490,10 +490,15 @@ class SessionController:
                 draft = await memory.generate_init_draft(self.agent.llm)
             except Exception as exc:
                 return CommandResult(ok=False, message=f"生成 XG.md 失败：{exc}")
-            request = ConfirmationRequest("init", "写入项目记忆？", draft, draft)
+            request = ConfirmationRequest(
+                "init",
+                "写入项目记忆",
+                f"已生成 XG.md 草稿，将写入项目根目录的 XG.md：\n\n{draft}",
+                draft,
+            )
             self._confirmation = request
             self._confirmation_future = asyncio.get_running_loop().create_future()
-            self._set_state(replace(self.state, pending_confirmation=request, notification="请确认写入 XG.md"))
+            self._set_state(replace(self.state, pending_confirmation=request, notification="请输入 y 确认写入 · n 取消"))
             return CommandResult(ok=True, open_modal="init")
         if lowered == "/memory clear" and memory is not None:
             try:
@@ -502,10 +507,14 @@ class SessionController:
                 return CommandResult(ok=False, message=f"记忆操作失败：{exc}")
             if count == 0:
                 return CommandResult(ok=True, message="当前项目没有长期记忆")
-            request = ConfirmationRequest("memory_clear", "清空长期记忆？", f"将删除当前项目的 {count} 条长期记忆。")
+            request = ConfirmationRequest(
+                "memory_clear",
+                "清空长期记忆",
+                f"当前项目有 {count} 条长期记忆。\n清空后不可通过 XG 恢复。",
+            )
             self._confirmation = request
             self._confirmation_future = asyncio.get_running_loop().create_future()
-            self._set_state(replace(self.state, pending_confirmation=request, notification="请确认清空长期记忆"))
+            self._set_state(replace(self.state, pending_confirmation=request, notification="请输入 clear 确认清空长期记忆"))
             return CommandResult(ok=True, open_modal="memory_clear")
         result = await self.command_service.execute(raw)
         current_usage = self.state.inspector.usage

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 
 from textual.app import App, ComposeResult
@@ -23,6 +24,7 @@ from xg.tui.messages import (
     TraceCardToggled,
 )
 from xg.tui.state import TuiState
+from xg.tui.widgets.action_card import InlineApprovalCard
 from xg.tui.widgets.command_suggestions import CommandSuggestions
 from xg.tui.widgets.composer import Composer
 from xg.tui.widgets.footer import FooterBar
@@ -64,6 +66,10 @@ class XgTuiApp(App[None]):
         self._render_timer: Timer | None = None
         self._modal_kind = ""
         self._replan_mode = False
+        # 决策输入模式："" 等待决策 / "approval_edit" 修改参数 /
+        # "approval_confirm_modified" 修改后二次确认
+        self._decision_mode = ""
+        self._modified_args: dict | None = None
 
     def compose(self) -> ComposeResult:
         # The work area owns the left brand/transcript column and the right
@@ -140,11 +146,21 @@ class XgTuiApp(App[None]):
         note.update(state.notification)
         note.display = bool(state.notification)
         self.query_one("#queue-status", QueueStatus).update_state(state)
-        if state.pending_approval is not None:
-            self.query_one("#inline-approval-card").focus()
-        elif state.pending_confirmation is not None:
-            self.query_one("#inline-confirmation-card").focus()
         composer = self.query_one("#composer", Composer)
+        if state.pending_approval is not None:
+            # Cards are read-only; the decision is typed into the Composer.
+            # remove_children() detaches asynchronously, so during a rebuild
+            # two cards can coexist briefly — always restyle the newest one.
+            if self._decision_mode:
+                cards = list(self.query(InlineApprovalCard))
+                if cards:
+                    cards[-1].set_mode(self._decision_mode, self._modified_args)
+            composer.focus()
+        elif state.pending_confirmation is not None:
+            composer.focus()
+        else:
+            self._decision_mode = ""
+            self._modified_args = None
         suggestions = self.query_one("#command-suggestions", CommandSuggestions)
         suggestions_allowed = (
             not self._replan_mode
@@ -156,7 +172,19 @@ class XgTuiApp(App[None]):
         composer.set_suggestions_enabled(suggestions_allowed)
         if not suggestions_allowed:
             suggestions.close()
-        if self._replan_mode:
+        if state.pending_approval is not None:
+            if self._decision_mode == "approval_edit":
+                composer.placeholder = "修改参数：请输入完整 JSON，Esc 取消修改"
+            elif self._decision_mode == "approval_confirm_modified":
+                composer.placeholder = "输入 y 确认执行 · r 拒绝执行"
+            else:
+                composer.placeholder = "审批中：y 批准 · a 全部放行 · r 拒绝 · s 跳过 · e 修改参数"
+        elif state.pending_confirmation is not None:
+            if state.pending_confirmation.kind == "memory_clear":
+                composer.placeholder = "确认中：输入 clear 确认清空，其他输入取消"
+            else:
+                composer.placeholder = "确认中：输入 y 确认写入 · n 取消"
+        elif self._replan_mode:
             composer.placeholder = "输入重新规划要求，Enter 提交"
         elif state.phase == "awaiting_plan_review" and state.pending_plan is not None:
             composer.placeholder = "按 Enter 执行 · r 重规划 · Esc 取消"
@@ -171,32 +199,142 @@ class XgTuiApp(App[None]):
         self._pending_render_state = None
         self._render_state(state)
 
-    def handle_inline_approval(self, value: str) -> None:
-        self._modal_kind = ""
+    # 决策文本协议：等待审批时只接受明确命令，其他输入不执行工具。
+    APPROVAL_TEXT_COMMANDS = {
+        "": "approve",
+        "y": "approve",
+        "yes": "approve",
+        "approve": "approve",
+        "a": "allow-all",
+        "allow-all": "allow-all",
+        "allow_all": "allow-all",
+        "r": "reject",
+        "n": "reject",
+        "no": "reject",
+        "reject": "reject",
+        "s": "skip",
+        "skip": "skip",
+    }
+
+    def handle_inline_approval(self, command: str, modified_args: dict | None = None) -> None:
         decisions = {
             "approve": ApprovalDecision(allow=True, reason="user_approved"),
             "allow-all": ApprovalDecision(allow=True, reason="user_approved_allow_all"),
             "allow_all": ApprovalDecision(allow=True, reason="user_approved_allow_all"),
             "skip": ApprovalDecision(allow=False, reason="user_skipped"),
         }
-        if value and value.startswith("modify:"):
-            try:
-                import json
-                decision = ApprovalDecision(allow=True, args=json.loads(value[7:]), reason="user_modified")
-            except (ValueError, TypeError, json.JSONDecodeError):
-                decision = ApprovalDecision(allow=False, reason="invalid_modified_args")
+        if command == "approve" and modified_args is not None:
+            decision = ApprovalDecision(allow=True, args=modified_args, reason="user_modified")
         else:
-            decision = decisions.get(value or "reject", ApprovalDecision(allow=False, reason="user_rejected"))
+            decision = decisions.get(command, ApprovalDecision(allow=False, reason="user_rejected"))
+        self._decision_mode = ""
+        self._modified_args = None
         asyncio.create_task(self.controller.approve_tool(decision))
         self.query_one("#composer", Composer).focus()
 
     def handle_inline_confirmation(self, confirmed: bool) -> None:
-        self._modal_kind = ""
+        self._decision_mode = ""
+        self._modified_args = None
         asyncio.create_task(self.controller.confirm_command(confirmed))
         self.query_one("#composer", Composer).focus()
 
+    def _show_decision_hint(self, message: str) -> None:
+        """Surface a decision hint without touching controller state."""
+        self._state = replace(
+            self.controller.snapshot(),
+            notification=message,
+            notification_level="warning",
+        )
+        self._render_state_immediately(self._state)
+
+    def _route_decision_input(self, text: str, composer: Composer) -> bool:
+        """Consume the Composer text as a decision; True means handled.
+
+        Decision states take priority over normal submissions so text like
+        ``y`` or ``clear`` is never sent to the Agent as a user message.
+        """
+        state = self.controller.state
+        if self._decision_mode == "approval_edit":
+            self._handle_modified_args_json(text, composer)
+            return True
+        if self._decision_mode == "approval_confirm_modified":
+            self._handle_modified_args_confirmation(text, composer)
+            return True
+        if state.pending_approval is not None:
+            self._handle_approval_decision(text, composer)
+            return True
+        if state.pending_confirmation is not None:
+            self._handle_confirmation_decision(state.pending_confirmation.kind, text, composer)
+            return True
+        return False
+
+    def _handle_approval_decision(self, text: str, composer: Composer) -> None:
+        lowered = text.lower()
+        if lowered == "e":
+            composer.value = ""
+            self._decision_mode = "approval_edit"
+            self._show_decision_hint("参数修改：请输入完整 JSON，Esc 取消修改")
+            return
+        command = self.APPROVAL_TEXT_COMMANDS.get(lowered)
+        if command is None:
+            # 无效输入保留在输入框，审批状态不变，工具不执行。
+            self._show_decision_hint("审批中仅接受 y / a / r / s / e，本次输入未执行任何操作")
+            return
+        composer.value = ""
+        self.handle_inline_approval(command)
+
+    def _handle_modified_args_json(self, text: str, composer: Composer) -> None:
+        try:
+            parsed = json.loads(text) if text else None
+        except json.JSONDecodeError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            self._show_decision_hint("JSON 无效：请输入完整的 JSON 对象，工具未执行")
+            return
+        self._modified_args = parsed
+        self._decision_mode = "approval_confirm_modified"
+        composer.value = ""
+        self._show_decision_hint("参数已修改，输入 y 确认执行 · r 拒绝执行")
+
+    def _handle_modified_args_confirmation(self, text: str, composer: Composer) -> None:
+        lowered = text.lower()
+        if lowered in ("y", "yes"):
+            composer.value = ""
+            self.handle_inline_approval("approve", self._modified_args)
+            return
+        if lowered in ("r", "n", "no"):
+            composer.value = ""
+            self.handle_inline_approval("reject")
+            return
+        self._show_decision_hint("输入 y 确认执行修改后的参数 · r 拒绝")
+
+    def _handle_confirmation_decision(self, kind: str, text: str, composer: Composer) -> None:
+        lowered = text.lower()
+        if kind == "memory_clear":
+            if lowered == "clear":
+                composer.value = ""
+                self.handle_inline_confirmation(True)
+                return
+            if lowered in ("cancel", "n", "no"):
+                composer.value = ""
+                self.handle_inline_confirmation(False)
+                return
+            self._show_decision_hint("清空长期记忆需精确输入 clear，本次输入未生效")
+            return
+        if lowered in ("y", "yes"):
+            composer.value = ""
+            self.handle_inline_confirmation(True)
+            return
+        if lowered in ("n", "no", "cancel"):
+            composer.value = ""
+            self.handle_inline_confirmation(False)
+            return
+        self._show_decision_hint("输入 y 确认写入 · n 取消，本次输入未生效")
+
     def on_input_submitted(self, event: Composer.Submitted) -> None:
         text = event.value.strip()
+        if self._route_decision_input(text, event.input):
+            return
         if self._has_pending_plan() and not self._replan_mode:
             self._state = replace(
                 self.controller.snapshot(),
@@ -288,10 +426,28 @@ class XgTuiApp(App[None]):
             composer.placeholder = "输入任务或 /help …"
             await self.controller.review_plan(ReviewDecision(action="cancel"))
             return
+        composer = self.query_one("#composer", Composer)
+        if self._decision_mode == "approval_edit":
+            # Esc 取消修改，回到等待决策，不改变审批结果。
+            self._decision_mode = ""
+            self._modified_args = None
+            composer.value = ""
+            self._render_state_immediately(self.controller.snapshot())
+            return
+        state = self.controller.state
+        if state.pending_approval is not None:
+            # fail closed：Esc（含修改后二次确认）视为拒绝当前工具调用。
+            composer.value = ""
+            self.handle_inline_approval("reject")
+            return
+        if state.pending_confirmation is not None:
+            # 确认类操作按未确认处理，不执行写入或清空。
+            composer.value = ""
+            self.handle_inline_confirmation(False)
+            return
         if self.controller.busy:
             await self.controller.cancel()
             return
-        composer = self.query_one("#composer", Composer)
         composer.value = ""
 
     def action_toggle_inspector(self) -> None:
