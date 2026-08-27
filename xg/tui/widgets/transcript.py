@@ -6,6 +6,7 @@ from textual.widgets import Static
 from xg.tui.renderables import render_item
 from xg.tui.state import TuiState
 from xg.tui.widgets.collapsible_card import CollapsibleCard
+from xg.tui.widgets.action_card import InlineApprovalCard, InlineConfirmationCard
 
 
 class TranscriptView(VerticalScroll):
@@ -25,6 +26,10 @@ class TranscriptView(VerticalScroll):
                     widgets.append(CollapsibleCard(item))
                 else:
                     widgets.append(Static(render_item(item)))
+        if state.pending_approval is not None:
+            widgets.append(InlineApprovalCard(state.pending_approval))
+        elif state.pending_confirmation is not None:
+            widgets.append(InlineConfirmationCard(state.pending_confirmation))
         if widgets:
             self.mount(*widgets)
         self.call_after_refresh(self.scroll_end, animate=False)

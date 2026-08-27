@@ -50,6 +50,36 @@ Screen {
     text-align: center;
 }
 
+.inline-action-card {
+    width: 1fr;
+    height: auto;
+    margin: 1 0 1 0;
+    padding: 1 2;
+    background: $panel;
+    border: round $warning;
+}
+
+#inline-approval-card {
+    border: round $error;
+}
+
+.inline-action-card > Static {
+    width: 1fr;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.inline-action-card > Button {
+    width: 1fr;
+    height: 3;
+    margin: 0 0 1 0;
+}
+
+.inline-action-card > Input {
+    width: 1fr;
+    margin-bottom: 1;
+}
+
 #inspector {
     width: 36;
     min-width: 32;

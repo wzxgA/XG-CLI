@@ -22,10 +22,8 @@ from xg.tui.messages import (
     TraceCardToggled,
 )
 from xg.tui.state import TuiState
-from xg.tui.widgets.approval_modal import ApprovalModal
 from xg.tui.widgets.command_suggestions import CommandSuggestions
 from xg.tui.widgets.composer import Composer
-from xg.tui.widgets.confirm_modal import ConfirmModal
 from xg.tui.widgets.footer import FooterBar
 from xg.tui.widgets.header import HeaderBar
 from xg.tui.widgets.inspector import InspectorPanel
@@ -91,7 +89,6 @@ class XgTuiApp(App[None]):
     def on_state_changed(self, message: StateChanged) -> None:
         self._state = message.state
         self._render_state(message.state)
-        self._show_pending_modal(message.state)
 
     def on_trace_card_toggled(self, message: TraceCardToggled) -> None:
         self.controller.toggle_trace_item(message.item_id)
@@ -123,6 +120,10 @@ class XgTuiApp(App[None]):
         note.update(state.notification)
         note.display = bool(state.notification)
         self.query_one("#queue-status", QueueStatus).update_state(state)
+        if state.pending_approval is not None:
+            self.query_one("#inline-approval-card").focus()
+        elif state.pending_confirmation is not None:
+            self.query_one("#inline-confirmation-card").focus()
         composer = self.query_one("#composer", Composer)
         suggestions = self.query_one("#command-suggestions", CommandSuggestions)
         suggestions_allowed = (
@@ -142,15 +143,7 @@ class XgTuiApp(App[None]):
         else:
             composer.placeholder = "输入任务或 /help …"
 
-    def _show_pending_modal(self, state: TuiState) -> None:
-        if state.pending_approval is not None and self._modal_kind != "approval":
-            self._modal_kind = "approval"
-            self.push_screen(ApprovalModal(state.pending_approval), self._approval_closed)
-        elif state.pending_confirmation is not None and self._modal_kind != "confirm":
-            self._modal_kind = "confirm"
-            self.push_screen(ConfirmModal(state.pending_confirmation), self._confirm_closed)
-
-    def _approval_closed(self, value: str | None) -> None:
+    def handle_inline_approval(self, value: str) -> None:
         self._modal_kind = ""
         decisions = {
             "approve": ApprovalDecision(allow=True, reason="user_approved"),
@@ -169,9 +162,9 @@ class XgTuiApp(App[None]):
         asyncio.create_task(self.controller.approve_tool(decision))
         self.query_one("#composer", Composer).focus()
 
-    def _confirm_closed(self, value: str | None) -> None:
+    def handle_inline_confirmation(self, confirmed: bool) -> None:
         self._modal_kind = ""
-        asyncio.create_task(self.controller.confirm_command(value == "confirm"))
+        asyncio.create_task(self.controller.confirm_command(confirmed))
         self.query_one("#composer", Composer).focus()
 
     def on_input_submitted(self, event: Composer.Submitted) -> None:
