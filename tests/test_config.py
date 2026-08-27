@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from xg.config.manager import ConfigManager, mask_key
+from xg.config.settings import load_settings
 
 
 def make_manager(
@@ -288,3 +289,17 @@ class TestMaskKey:
         assert mask_key("sk-abcdef") == "sk-a****"
         assert mask_key("") == "(未配置)"
         assert mask_key("abc") == "****"
+
+
+class TestTuiSettings:
+    def test_refresh_fps_defaults_to_twenty_and_reads_environment(self, tmp_path):
+        manager = make_manager(tmp_path, env={"XG_TUI_REFRESH_FPS": "30"})
+        assert load_settings(manager).tui_refresh_fps == 30
+
+    @pytest.mark.parametrize("raw", ["0", "4", "61", "not-a-number"])
+    def test_refresh_fps_is_safe_for_invalid_or_out_of_range_values(self, tmp_path, raw):
+        manager = make_manager(tmp_path, env={"XG_TUI_REFRESH_FPS": raw})
+        settings = load_settings(manager)
+        assert 5 <= settings.tui_refresh_fps <= 60
+        if raw == "not-a-number":
+            assert settings.tui_refresh_fps == 20

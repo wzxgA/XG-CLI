@@ -45,6 +45,8 @@ class Settings:
     plan_subtask_steps: int = 10
     # 计划模式：计划级允许的子任务失败数（超出终止剩余批次）
     plan_max_failures: int = 3
+    # Textual TUI 最大刷新频率（第 6 期）
+    tui_refresh_fps: int = 20
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -82,6 +84,7 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         plan_max_subtasks=_get_int(manager.env, "XG_PLAN_MAX_SUBTASKS", 12),
         plan_subtask_steps=_get_int(manager.env, "XG_PLAN_SUBTASK_STEPS", 10),
         plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
+        tui_refresh_fps=max(5, min(60, _get_int(manager.env, "XG_TUI_REFRESH_FPS", 20))),
     )
 
 

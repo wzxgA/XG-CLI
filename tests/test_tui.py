@@ -247,6 +247,30 @@ async def test_tui_uses_full_width_footer_composer_and_top_inspector(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_coalesces_state_renders_at_configured_rate(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    settings.tui_refresh_fps = 20
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        renders: list[str] = []
+        original_render = app._render_state
+
+        def track_render(state: TuiState) -> None:
+            renders.append(state.notification)
+            original_render(state)
+
+        app._render_state = track_render
+        app._on_state_change(TuiState(notification="first"))
+        app._on_state_change(TuiState(notification="second"))
+        app._on_state_change(TuiState(notification="latest"))
+        await pilot.pause(0)
+
+        assert renders == []
+        await pilot.pause(0.1)
+        assert renders == ["latest"]
+
+
+@pytest.mark.asyncio
 async def test_tui_empty_transcript_shows_brand_welcome_state(tmp_path):
     agent, settings, manager = make_context(tmp_path)
     app = XgTuiApp(agent, settings, manager)
@@ -259,7 +283,7 @@ async def test_tui_empty_transcript_shows_brand_welcome_state(tmp_path):
 
         app.query_one("#composer").value = "hi"
         await pilot.press("enter")
-        await pilot.pause()
+        await pilot.pause(0.1)
         assert len(app.query(".transcript-empty-state")) == 0
 
 
@@ -277,7 +301,7 @@ async def test_tui_inspector_views_switch_with_bindings_and_tabs(tmp_path):
         assert app.query_one("#inspector-tab-plan").render() == "Plan"
 
         await pilot.press("ctrl+2")
-        await pilot.pause()
+        await pilot.pause(0.1)
         assert app.controller.state.inspector.active_view == "plan"
         assert app.query_one("#inspector-content").current == "inspector-plan"
 
@@ -306,7 +330,7 @@ async def test_tui_keeps_composer_available_and_shows_queue(tmp_path):
 
         app.query_one("#composer").value = "second task"
         await pilot.press("enter")
-        await pilot.pause()
+        await pilot.pause(0.1)
 
         assert app.query_one("#composer").disabled is False
         queue_status = app.query_one("#queue-status")
@@ -318,7 +342,7 @@ async def test_tui_keeps_composer_available_and_shows_queue(tmp_path):
             if client.calls == ["first task", "second task"] and not app.controller.busy:
                 break
             await pilot.pause(0.01)
-        await pilot.pause()
+        await pilot.pause(0.1)
         assert client.calls == ["first task", "second task"]
         assert queue_status.display is False
 

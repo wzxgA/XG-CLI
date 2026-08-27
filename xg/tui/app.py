@@ -8,6 +8,7 @@ from dataclasses import replace
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.events import Resize
+from textual.timer import Timer
 from textual.widgets import Static
 
 from xg.agent.plan import ReviewDecision
@@ -56,8 +57,11 @@ class XgTuiApp(App[None]):
 
     def __init__(self, agent, settings: Settings, manager: ConfigManager) -> None:
         super().__init__()
+        self.settings = settings
         self.controller = SessionController(agent, settings, manager, self._on_state_change)
         self._state = self.controller.snapshot()
+        self._pending_render_state: TuiState | None = None
+        self._render_timer: Timer | None = None
         self._modal_kind = ""
         self._replan_mode = False
 
@@ -88,7 +92,23 @@ class XgTuiApp(App[None]):
 
     def on_state_changed(self, message: StateChanged) -> None:
         self._state = message.state
-        self._render_state(message.state)
+        self._pending_render_state = message.state
+        self._schedule_render()
+
+    def _schedule_render(self) -> None:
+        if self._render_timer is not None or not self.is_attached:
+            return
+        interval = 1 / max(1, self.settings.tui_refresh_fps)
+        self._render_timer = self.set_timer(interval, self._flush_render)
+
+    def _flush_render(self) -> None:
+        self._render_timer = None
+        state = self._pending_render_state
+        self._pending_render_state = None
+        if state is not None and self.is_attached:
+            self._render_state(state)
+        if self._pending_render_state is not None:
+            self._schedule_render()
 
     def on_trace_card_toggled(self, message: TraceCardToggled) -> None:
         self.controller.toggle_trace_item(message.item_id)
@@ -142,6 +162,14 @@ class XgTuiApp(App[None]):
             composer.placeholder = "按 Enter 执行 · r 重规划 · Esc 取消"
         else:
             composer.placeholder = "输入任务或 /help …"
+
+    def _render_state_immediately(self, state: TuiState) -> None:
+        """Render an explicit local UI action without an older queued state."""
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
+        self._pending_render_state = None
+        self._render_state(state)
 
     def handle_inline_approval(self, value: str) -> None:
         self._modal_kind = ""
@@ -209,7 +237,7 @@ class XgTuiApp(App[None]):
     async def action_clear_transcript(self) -> None:
         await self.controller.submit("/clear")
         self._state = self.controller.snapshot()
-        self._render_state(self._state)
+        self._render_state_immediately(self._state)
 
     def _has_pending_plan(self) -> bool:
         return self.controller.state.phase == "awaiting_plan_review" and self.controller.state.pending_plan is not None
@@ -292,9 +320,13 @@ class XgTuiApp(App[None]):
         self._state = TuiState(
             **{**self._state.__dict__, "notification": "Enter 发送 · Ctrl+C 取消 · /plan 计划 · /model 切换模型 · /memory 管理记忆", "notification_level": "info"}
         )
-        self._render_state(self._state)
+        self._render_state_immediately(self._state)
 
     async def on_unmount(self) -> None:
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
+        self._pending_render_state = None
         await self.controller.shutdown()
 
     def on_resize(self, event: Resize) -> None:
@@ -303,7 +335,7 @@ class XgTuiApp(App[None]):
         self.query_one("#inspector", InspectorPanel).display = event.size.width >= 100
         # DiagramCard is a width-aware Rich renderable. Rewriting the log is
         # enough to relayout it; no model or LLM request is involved.
-        self.query_one("#transcript", TranscriptView).update_state(self._state)
+        self._render_state_immediately(self._state)
 
 
 def run_tui(agent, settings: Settings, manager: ConfigManager) -> None:
