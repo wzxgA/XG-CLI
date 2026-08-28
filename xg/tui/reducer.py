@@ -49,6 +49,17 @@ def _remove_progress(state: TuiState, turn_id: str) -> None:
     ]
 
 
+def _update_progress(state: TuiState, turn_id: str, text: str) -> None:
+    """Update a local waiting indicator without creating a transcript item."""
+    if not text:
+        return
+    for item in reversed(state.transcript):
+        if item.kind == "progress" and item.turn_id == turn_id:
+            item.progress_kind = "context"
+            item.text = text
+            return
+
+
 def _trace_id(turn_id: str, trace_id: str | None) -> str:
     return trace_id or turn_id
 
@@ -342,6 +353,8 @@ def reduce_agent_event(
         _set_safety_decision(out, event)
         return out
     if kind in ("context_compacted", "context_warning"):
+        if kind == "context_compacted":
+            _update_progress(out, turn_id, "正在整理上下文")
         _append(out, TranscriptItem(id=f"context-{len(out.transcript)}", kind="context", text=event.text, turn_id=turn_id))
         out.notification = event.text
         out.notification_level = "warning" if kind == "context_warning" else "info"

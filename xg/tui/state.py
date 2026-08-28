@@ -13,6 +13,7 @@ TranscriptKind = Literal[
 TranscriptStatus = Literal[
     "streaming", "running", "success", "failed", "cancelled", "done",
 ]
+ProgressKind = Literal["response", "plan", "context"]
 QueueItemKind = Literal["task", "plan", "command"]
 InspectorView = Literal["session", "plan", "memory", "safety"]
 TuiPhase = Literal[
@@ -24,6 +25,7 @@ TuiPhase = Literal[
 class TranscriptItem:
     id: str
     kind: TranscriptKind
+    progress_kind: ProgressKind = "response"
     text: str = ""
     tool_name: str = ""
     tool_args: str = ""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -107,6 +108,7 @@ def test_reducer_merges_streaming_content_and_ignores_stale_turn():
         TranscriptItem(
             id="progress-turn-1",
             kind="progress",
+            progress_kind="response",
             text="正在准备响应",
             turn_id="turn-1",
             trace_id="turn-1",
@@ -141,6 +143,28 @@ def test_reducer_clears_progress_on_terminal_events():
         )
         state = reduce_agent_event(state, event, "turn-1")
         assert not any(item.kind == "progress" for item in state.transcript)
+
+
+def test_reducer_updates_progress_when_context_is_compacted():
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    state.transcript.append(
+        TranscriptItem(
+            id="progress-turn-1",
+            kind="progress",
+            text="正在准备响应",
+            turn_id="turn-1",
+            trace_id="turn-1",
+            status="running",
+        )
+    )
+    state = reduce_agent_event(
+        state,
+        AgentEvent(kind="context_compacted", text="上下文已压缩"),
+        "turn-1",
+    )
+    progress = next(item for item in state.transcript if item.kind == "progress")
+    assert progress.progress_kind == "context"
+    assert progress.text == "正在整理上下文"
 
 
 def test_reducer_keeps_new_turn_progress_when_stale_event_arrives():
@@ -219,6 +243,50 @@ async def test_controller_shows_progress_before_first_agent_event(tmp_path):
     assert await asyncio.wait_for(task, 1) is True
     assert not any(item.kind == "progress" for item in controller.state.transcript)
     assert controller.state.transcript[-1].kind == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_tui_progress_animation_slow_notice_and_timer_cleanup(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    client = SlowClient()
+    agent = ReActAgent(client, build_registry(base_dir=project), settings)
+    app = XgTuiApp(agent, settings, manager)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        task = asyncio.create_task(app.controller.submit("slow task"))
+        await asyncio.wait_for(client.started.wait(), 1)
+        await pilot.pause(0.1)
+        assert app._progress_timer is not None
+        progress = app._progress_item(app.controller.state)
+        assert progress is not None
+
+        app._progress_started_at = time.monotonic() - app.PROGRESS_SLOW_SECONDS - 1
+        app._progress_frame = 1
+        assert app._progress_display_text(progress) == "AI 响应较慢，请稍候."
+
+        app._progress_started_at = time.monotonic() - app.PROGRESS_WAITING_SECONDS - 0.1
+        assert app._progress_display_text(progress) == "等待 AI 响应."
+
+        plan_progress = TranscriptItem(
+            id="progress-plan",
+            kind="progress",
+            progress_kind="plan",
+            text="正在生成执行计划",
+            turn_id="turn-plan",
+            trace_id="turn-plan",
+            status="running",
+        )
+        assert app._progress_display_text(plan_progress) == "正在生成执行计划."
+        app._progress_started_at = time.monotonic() - app.PROGRESS_SLOW_SECONDS - 1
+        assert app._progress_display_text(plan_progress) == "计划生成较慢，请稍候."
+
+        client.release.set()
+        assert await asyncio.wait_for(task, 1) is True
+        await pilot.pause(0.1)
+        assert app._progress_timer is None
 
 
 @pytest.mark.asyncio

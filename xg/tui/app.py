@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import replace
 
 from textual.app import App, ComposeResult
@@ -37,6 +38,10 @@ from xg.tui.widgets.transcript import TranscriptView
 
 class XgTuiApp(App[None]):
     """One active session, with all execution delegated to the controller."""
+
+    PROGRESS_TICK_SECONDS = 0.5
+    PROGRESS_WAITING_SECONDS = 1.0
+    PROGRESS_SLOW_SECONDS = 8.0
 
     TITLE = "XG"
     CSS_PATH = "theme.tcss"
@@ -77,6 +82,10 @@ class XgTuiApp(App[None]):
         self._state = self.controller.snapshot()
         self._pending_render_state: TuiState | None = None
         self._render_timer: Timer | None = None
+        self._progress_timer: Timer | None = None
+        self._progress_turn_id = ""
+        self._progress_started_at: float | None = None
+        self._progress_frame = 0
         self._modal_kind = ""
         self._replan_mode = False
         # 决策输入模式："" 等待决策 / "approval_edit" 修改参数 /
@@ -114,8 +123,76 @@ class XgTuiApp(App[None]):
 
     def on_state_changed(self, message: StateChanged) -> None:
         self._state = message.state
+        self._sync_progress_timer(message.state)
         self._pending_render_state = message.state
         self._schedule_render()
+
+    def _progress_item(self, state: TuiState):
+        return next(
+            (item for item in reversed(state.transcript) if item.kind == "progress"),
+            None,
+        )
+
+    def _stop_progress_timer(self) -> None:
+        if self._progress_timer is not None:
+            self._progress_timer.stop()
+            self._progress_timer = None
+        self._progress_turn_id = ""
+        self._progress_started_at = None
+        self._progress_frame = 0
+
+    def _sync_progress_timer(self, state: TuiState) -> None:
+        progress = self._progress_item(state)
+        if progress is None or not self.is_attached:
+            self._stop_progress_timer()
+            return
+        if progress.turn_id != self._progress_turn_id:
+            self._progress_turn_id = progress.turn_id
+            self._progress_started_at = time.monotonic()
+            self._progress_frame = 0
+        if self._progress_timer is None:
+            self._progress_timer = self.set_interval(
+                self.PROGRESS_TICK_SECONDS,
+                self._tick_progress,
+            )
+
+    def _progress_display_text(self, progress) -> str:
+        elapsed = (
+            time.monotonic() - self._progress_started_at
+            if self._progress_started_at is not None else 0.0
+        )
+        if elapsed >= self.PROGRESS_SLOW_SECONDS:
+            base = {
+                "plan": "计划生成较慢，请稍候",
+                "context": "上下文处理较慢，请稍候",
+                "response": "AI 响应较慢，请稍候",
+            }[progress.progress_kind]
+        elif progress.progress_kind == "response" and elapsed >= self.PROGRESS_WAITING_SECONDS:
+            base = "等待 AI 响应"
+        else:
+            base = progress.text
+        return f"{base}{'.' * self._progress_frame}"
+
+    def _tick_progress(self) -> None:
+        if not self.is_attached:
+            self._stop_progress_timer()
+            return
+        progress = self._progress_item(self._state)
+        if progress is None:
+            self._stop_progress_timer()
+            return
+        self._progress_frame = (self._progress_frame + 1) % 4
+        text = self._progress_display_text(progress)
+        display_items = [
+            replace(item, text=text) if item.id == progress.id else item
+            for item in self._state.transcript
+        ]
+        display_item = next(item for item in display_items if item.id == progress.id)
+        transcript = self.query_one("#transcript", TranscriptView)
+        if not transcript.update_progress(progress.id, display_item):
+            # The first timer tick can race the initial state render. Fall back
+            # to one complete render; subsequent ticks stay local to the card.
+            self._render_state(replace(self._state, transcript=display_items))
 
     def _schedule_render(self) -> None:
         if self._render_timer is not None or not self.is_attached:
@@ -496,6 +573,7 @@ class XgTuiApp(App[None]):
         self._render_state_immediately(self._state)
 
     async def on_unmount(self) -> None:
+        self._stop_progress_timer()
         if self._render_timer is not None:
             self._render_timer.stop()
             self._render_timer = None

@@ -339,6 +339,7 @@ class SessionController:
         self._append_item(TranscriptItem(
             id=f"progress-{turn_id}",
             kind="progress",
+            progress_kind="plan" if is_plan else "response",
             text=progress_text,
             turn_id=turn_id,
             trace_id=turn_id,

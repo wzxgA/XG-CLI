@@ -10,6 +10,14 @@ from xg.tui.widgets.action_card import InlineApprovalCard, InlineConfirmationCar
 
 
 class TranscriptView(VerticalScroll):
+    def update_progress(self, item_id: str, item) -> bool:
+        """Update one local progress card without rebuilding the transcript."""
+        for widget in self.children:
+            if getattr(widget, "transcript_item_id", "") == item_id:
+                widget.update(render_item(item))
+                return True
+        return False
+
     def update_state(self, state: TuiState) -> None:
         # StateChanged can arrive while the App is still composing its
         # children. Defer the first render until this scroll view is attached.
@@ -30,7 +38,9 @@ class TranscriptView(VerticalScroll):
                 if item.collapsible and item.kind in ("thinking", "tool_call", "tool_result", "approval"):
                     widgets.append(CollapsibleCard(item))
                 else:
-                    widgets.append(Static(render_item(item)))
+                    widget = Static(render_item(item))
+                    widget.transcript_item_id = item.id
+                    widgets.append(widget)
         if state.pending_approval is not None:
             widgets.append(InlineApprovalCard(state.pending_approval))
         elif state.pending_confirmation is not None:
