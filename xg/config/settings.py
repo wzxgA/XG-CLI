@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from xg.config.manager import ConfigManager
+from xg.config.skills import SkillConfigManager
 
 
 @dataclass
@@ -68,6 +69,13 @@ class Settings:
     web_fetch_max_chars: int = 32_000
     web_max_redirects: int = 5
     web_rate_limit_per_minute: int = 30
+    # 第 9 期：Skill 索引和按需加载限制
+    skills_enabled: bool = True
+    skills_max_index_items: int = 20
+    skills_max_index_chars: int = 4_096
+    skills_max_chars: int = 32_000
+    skills_max_reference_chars: int = 16_000
+    skills_max_loaded_chars: int = 64_000
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -87,6 +95,11 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
     """加载配置并产出运行时快照。"""
     manager = manager or ConfigManager()
     active = manager.active()
+    skill_config = SkillConfigManager(
+        user_dir=manager.user_dir,
+        project_root=manager.project_dir.parent,
+        env=manager.env,
+    ).load()
     return Settings(
         provider=active.provider_name,
         api_base=active.api_base,
@@ -125,6 +138,12 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         web_fetch_max_chars=max(256, _get_int(manager.env, "XG_WEB_FETCH_MAX_CHARS", 32_000)),
         web_max_redirects=max(0, _get_int(manager.env, "XG_WEB_MAX_REDIRECTS", 5)),
         web_rate_limit_per_minute=max(1, _get_int(manager.env, "XG_WEB_RATE_LIMIT_PER_MINUTE", 30)),
+        skills_enabled=skill_config.enabled,
+        skills_max_index_items=skill_config.max_index_items,
+        skills_max_index_chars=skill_config.max_index_chars,
+        skills_max_chars=skill_config.max_skill_chars,
+        skills_max_reference_chars=skill_config.max_reference_chars,
+        skills_max_loaded_chars=skill_config.max_loaded_chars,
     )
 
 

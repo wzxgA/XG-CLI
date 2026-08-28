@@ -303,3 +303,13 @@ class TestTuiSettings:
         assert 5 <= settings.tui_refresh_fps <= 60
         if raw == "not-a-number":
             assert settings.tui_refresh_fps == 20
+
+    def test_skill_settings_follow_skill_config_file_and_environment(self, tmp_path):
+        manager = make_manager(tmp_path, env={"XG_SKILLS_MAX_CHARS": "888"})
+        (tmp_path / "user_xg" / "skills.json").write_text(
+            json.dumps({"max_index_items": 7, "max_loaded_chars": 4321}), encoding="utf-8"
+        )
+        settings = load_settings(manager)
+        assert settings.skills_max_index_items == 7
+        assert settings.skills_max_loaded_chars == 4321
+        assert settings.skills_max_chars == 888

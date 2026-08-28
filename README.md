@@ -74,6 +74,9 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `/mcp status` | 查看 MCP Server、工具和 resources 状态 |
 | `/web status|providers|search|fetch` | 查看状态、搜索公开互联网或抓取公开网页 |
 | `/mcp restart|logs|enable|disable|resources` | 管理 MCP Server |
+| `/skill list` | 查看当前项目可用的 Skill 元信息 |
+| `/skill load <name> [reference ...]` | 手动按需加载 Skill 和指定参考资料 |
+| `/skill enable|disable <name>` | 启用或禁用 Skill |
 | `/hitl` | 查看 HITL 审批状态 |
 | `/hitl on\|off` | 开启 / 关闭危险操作审批 |
 | `/clear` | 清空当前对话上下文 |
@@ -98,13 +101,19 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 - **策略层**：路径越界（PathGuard，含 symlink 逃逸）与黑名单命令（CommandGuard）直接拒绝，**不可被审批绕过**
 - **审计日志**：所有工具调用/审批/拒绝记录到 `.xg/audit.log`（JSONL，敏感字段脱敏）
 
-内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `web_search` / `web_fetch`。
+内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `web_search` / `web_fetch` / `load_skill`（按配置启用）。
 
 ## Web 只读联网能力
 
 提供 `web_search` 和 `web_fetch` 两个异步内置工具。搜索支持智谱、SerpAPI、SearXNG 三种 provider；抓取只允许公开 HTTP(S) 网页，逐跳校验 DNS 和重定向，拒绝 localhost、内网/保留 IP、非文本资源、超大响应和登录/动态页面。网页内容会标记为外部不可信资料，不会获得新的工具权限。
 
 默认不启用搜索 provider，但 XG 仍可启动；抓取不依赖搜索配置。可通过环境变量或 `.xg/web.json` 配置，常用变量见 `.env.example`。命令行中使用 `/web status`、`/web providers`、`/web search <query>` 和 `/web fetch <url>`。
+
+## Skill 技能系统
+
+Skill 是可发现、按需加载的本地任务规范，不是脚本、插件或新的执行权限。XG 启动时只扫描 `SKILL.md` 的名称和描述并注入有限索引；Agent 或用户执行 `/skill load <name>` 后，才读取正文和明确指定的 `references/` 文件。Skill 中的文字仍是补充资料，不能覆盖系统提示、安全策略、HITL 或工具权限。
+
+Skill 目录按优先级从低到高合并：内置 `xg/skills/`、用户级 `~/.xg/skills/`、项目级 `<project>/.xg/skills/`。同名 Skill 由高层完整覆盖。用户/项目启用状态保存在对应层的 `skills.json`，常用命令为 `/skill list`、`/skill load <name>`、`/skill enable <name>` 和 `/skill disable <name>`。默认的索引、正文和 reference 大小限制见 `.env.example`；`XG_SKILLS_ENABLED=off` 时不会注册 `load_skill`，其他工具仍可用。
 
 ## MCP 外部能力
 
@@ -193,6 +202,12 @@ Server 工具会动态注册为 `mcp__{server}__{tool}`，默认经过 HITL 确�
 | `XG_WEB_FETCH_MAX_CHARS` | 单网页正文字符上限（默认 32000） |
 | `XG_WEB_MAX_REDIRECTS` | 最大重定向次数（默认 5） |
 | `XG_WEB_RATE_LIMIT_PER_MINUTE` | 每类 Web 调用每分钟上限（默认 30） |
+| `XG_SKILLS_ENABLED` | Skill 总开关（默认 on） |
+| `XG_SKILLS_MAX_INDEX_ITEMS` | system prompt 最多展示的 Skill 数（默认 20） |
+| `XG_SKILLS_MAX_INDEX_CHARS` | Skill 索引字符上限（默认 4096） |
+| `XG_SKILLS_MAX_CHARS` | 单个 Skill 正文字符上限（默认 32000） |
+| `XG_SKILLS_MAX_REFERENCE_CHARS` | 单个 reference 字符上限（默认 16000） |
+| `XG_SKILLS_MAX_LOADED_CHARS` | 单次 Skill 加载总字符上限（默认 64000） |
 
 API Key 只从环境变量 / .env 读取，不写入配置文件；`/config` 显示时脱敏。
 
@@ -204,4 +219,4 @@ uv run pytest                 # 全量测试
 uv run xg                     # 手工验收
 ```
 
-项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（统一工具注册表 + 内置工具）、`xg/mcp`（协议、transport、动态工具和 resources）、`xg/memory`（项目/长期记忆 + 上下文压缩）、`xg/tui`（Textual 全屏交互层）、`xg/cli`（入口与 inline fallback）、`xg/config`（provider/MCP 配置与运行时快照）。
+项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（统一工具注册表 + 内置工具）、`xg/mcp`（协议、transport、动态工具和 resources）、`xg/skill`（Skill 发现、解析、按需加载与安全策略）、`xg/memory`（项目/长期记忆 + 上下文压缩）、`xg/tui`（Textual 全屏交互层）、`xg/cli`（入口与 inline fallback）、`xg/config`（provider/MCP/Web/Skill 配置与运行时快照）。

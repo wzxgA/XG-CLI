@@ -21,11 +21,12 @@ from rich.table import Table
 from rich.text import Text
 
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, PlanTask, ReviewDecision
-from xg.agent.react import AgentEvent, ReActAgent
+from xg.agent.react import DEFAULT_SYSTEM_PROMPT, AgentEvent, ReActAgent
 from xg.config.manager import ConfigManager, mask_key
 from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.config.web import WebConfigManager
+from xg.config.skills import SkillConfigManager
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
 from xg.memory.manager import MemoryManager, MemoryUnavailableError
@@ -36,6 +37,7 @@ from xg.safety.hitl import ApprovalDecision, HITLPolicy
 from xg.tool.builtin import build_registry
 from xg.web.fetch import WebFetchService
 from xg.web.search import WebSearchService
+from xg.skill.registry import SkillRegistry
 
 console = Console()
 
@@ -44,6 +46,7 @@ BANNER = """\
 输入任务开始对话；/plan 先拆解计划再执行，/model 切换 provider 或模型，
 /config 查看/设置配置，/init 初始化项目记忆，/save 保存记忆，
 /memory 管理记忆，/mcp 管理外部能力，/web 查看联网能力，/hitl 审批开关，/clear 清空上下文，/exit 退出。
+也可以使用 /skill list|load|enable|disable 管理本地任务规范。
 """
 
 
@@ -65,6 +68,18 @@ def build_agent(
         web_config = replace(web_config, enabled=False)
     web_search = WebSearchService(web_config, audit=audit) if web_config.enabled else None
     web_fetch = WebFetchService(web_config, audit=audit) if web_config.enabled else None
+    skill_config_manager = SkillConfigManager(
+        user_dir=config_manager.user_dir, project_root=base, env=config_manager.env
+    )
+    skill_config = skill_config_manager.load()
+    if not settings.skills_enabled:
+        skill_config = replace(skill_config, enabled=False)
+    skill_registry = SkillRegistry(
+        project_root=base,
+        config=skill_config,
+        config_manager=skill_config_manager,
+        audit=audit,
+    )
     tools = build_registry(
         base_dir=base,
         max_output_chars=settings.max_tool_output_chars,
@@ -73,6 +88,7 @@ def build_agent(
         web_config=web_config,
         web_search=web_search,
         web_fetch=web_fetch,
+        skill_registry=skill_registry,
     )
     hitl = HITLPolicy(enabled=settings.hitl)
     memory_manager = MemoryManager(
@@ -105,10 +121,15 @@ def build_agent(
         max_servers=settings.mcp_max_servers,
         resource_total_chars=settings.mcp_resource_total_chars,
     )
+    system_prompt = DEFAULT_SYSTEM_PROMPT
+    skill_index = skill_registry.index_text()
+    if skill_index:
+        system_prompt += "\n\n" + skill_index
     agent = ReActAgent(
         llm=client,
         tools=tools,
         settings=settings,
+        system_prompt=system_prompt,
         approval_policy=hitl,
         audit=audit,
         memory_manager=memory_manager,
@@ -118,6 +139,8 @@ def build_agent(
     agent.web_config_manager = web_config_manager
     agent.web_search = web_search
     agent.web_fetch = web_fetch
+    agent.skill_registry = skill_registry
+    agent.skill_config_manager = skill_config_manager
     return agent
 
 
@@ -469,6 +492,10 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
                 from xg.cli.commands import execute_web_command
 
                 message, should_exit = await execute_web_command(agent, user_input)
+            elif user_input.split(maxsplit=1)[0].lower() == "/skill":
+                from xg.cli.commands import execute_skill_command
+
+                message, should_exit = await execute_skill_command(agent, user_input)
             else:
                 message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:

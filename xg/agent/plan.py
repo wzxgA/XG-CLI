@@ -547,6 +547,11 @@ class PlanExecutor:
             "# 计划上下文",
             f"总目标：{plan.goal}",
         ]
+        skill_registry = getattr(self.tools, "skill_registry", None)
+        if skill_registry is not None:
+            index = skill_registry.index_text()
+            if index:
+                parts.extend(["", index])
         completed = [t for t in plan.tasks if t.status == "done"]
         if completed:
             parts.append("已完成的子任务：\n" + "\n".join(f"- {t.id}: {t.title}" for t in completed))

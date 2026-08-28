@@ -48,6 +48,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/config", usage="/config get|set ...", description="查看或修改配置", category="config"),
     SlashCommandSpec("/mcp", usage="/mcp status|restart|logs|enable|disable|resources", description="管理 MCP Server", category="config"),
     SlashCommandSpec("/web", usage="/web status|providers|search|fetch", description="查看或使用只读联网能力", category="config"),
+    SlashCommandSpec("/skill", usage="/skill list|load|enable|disable", description="管理任务 Skill", category="config"),
     SlashCommandSpec("/memory", usage="/memory list|search|delete|clear", description="管理长期记忆", category="memory"),
     SlashCommandSpec("/help", aliases=("/?",), usage="/help", description="查看命令帮助", category="general"),
     SlashCommandSpec("/init", usage="/init", description="初始化项目记忆", category="memory"),
@@ -116,6 +117,9 @@ class CommandService:
             return CommandResult(ok=ok, message=message)
         if raw.split(maxsplit=1)[0].lower() == "/web":
             message, ok = await execute_web_command(self.context.agent, raw)
+            return CommandResult(ok=ok, message=message)
+        if raw.split(maxsplit=1)[0].lower() == "/skill":
+            message, ok = await execute_skill_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
 
         # Lazy import avoids a cycle: app.py still owns the legacy renderer
@@ -212,3 +216,28 @@ async def execute_web_command(agent: Any, raw: str) -> tuple[str, bool]:
         ok, output = await service.fetch_tool({"url": parts[2].strip()})
         return output, ok
     return "用法: /web status|providers|search <query>|fetch <url>", False
+
+
+async def execute_skill_command(agent: Any, raw: str) -> tuple[str, bool]:
+    """Shared read-only Skill management command semantics."""
+    registry = getattr(agent, "skill_registry", None)
+    if registry is None or not registry.config.enabled:
+        return "Skill 能力未启用。", False
+    parts = raw.split()
+    sub = parts[1].lower() if len(parts) > 1 else "list"
+    if sub == "list":
+        registry.reload()
+        return registry.format_list(), True
+    if sub == "load":
+        if len(parts) < 3:
+            return "用法: /skill load <name> [reference ...]", False
+        ok, output = registry.manual_load(parts[2], tuple(parts[3:]))
+        return output, ok
+    if sub in {"enable", "disable"}:
+        if len(parts) < 3:
+            return f"用法: /skill {sub} <name>", False
+        enabled = sub == "enable"
+        ok = registry.set_enabled(parts[2], enabled)
+        action = "启用" if enabled else "禁用"
+        return (f"Skill {parts[2]} 已{action}。" if ok else f"Skill {parts[2]} 不存在或无法修改。"), ok
+    return "用法: /skill list|load <name> [reference ...]|enable <name>|disable <name>", False
