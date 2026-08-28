@@ -76,6 +76,12 @@ class Settings:
     skills_max_chars: int = 32_000
     skills_max_reference_chars: int = 16_000
     skills_max_loaded_chars: int = 64_000
+    # 输入历史：只影响本地 Composer/inline 输入，不进入 Agent 上下文
+    input_history_enabled: bool = True
+    input_history_persist: bool = True
+    input_history_max_entries: int = 100
+    input_history_max_chars: int = 8_000
+    input_history_max_bytes: int = 1_048_576
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -144,6 +150,11 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         skills_max_chars=skill_config.max_skill_chars,
         skills_max_reference_chars=skill_config.max_reference_chars,
         skills_max_loaded_chars=skill_config.max_loaded_chars,
+        input_history_enabled=manager.env.get("XG_INPUT_HISTORY_ENABLED", "on").lower() not in ("off", "0", "false"),
+        input_history_persist=manager.env.get("XG_INPUT_HISTORY_PERSIST", "on").lower() not in ("off", "0", "false"),
+        input_history_max_entries=max(1, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_ENTRIES", 100)),
+        input_history_max_chars=max(256, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_CHARS", 8_000)),
+        input_history_max_bytes=max(4_096, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_BYTES", 1_048_576)),
     )
 
 

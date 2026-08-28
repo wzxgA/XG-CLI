@@ -27,6 +27,7 @@ from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.config.web import WebConfigManager
 from xg.config.skills import SkillConfigManager
+from xg.input_history import HistoryConfig, InputHistory, PromptToolkitHistory
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
 from xg.memory.manager import MemoryManager, MemoryUnavailableError
@@ -46,7 +47,7 @@ BANNER = """\
 输入任务开始对话；/plan 先拆解计划再执行，/model 切换 provider 或模型，
 /config 查看/设置配置，/init 初始化项目记忆，/save 保存记忆，
 /memory 管理记忆，/mcp 管理外部能力，/web 查看联网能力，/hitl 审批开关，/clear 清空上下文，/exit 退出。
-也可以使用 /skill list|load|enable|disable 管理本地任务规范。
+也可以使用 /skill list|load|enable|disable 管理本地任务规范，/history status|clear 管理输入历史。
 """
 
 
@@ -79,6 +80,17 @@ def build_agent(
         config=skill_config,
         config_manager=skill_config_manager,
         audit=audit,
+    )
+    input_history = InputHistory(
+        project_root=base,
+        user_dir=config_manager.user_dir,
+        config=HistoryConfig(
+            enabled=settings.input_history_enabled,
+            persist=settings.input_history_persist,
+            max_entries=settings.input_history_max_entries,
+            max_entry_chars=settings.input_history_max_chars,
+            max_file_bytes=settings.input_history_max_bytes,
+        ),
     )
     tools = build_registry(
         base_dir=base,
@@ -141,6 +153,7 @@ def build_agent(
     agent.web_fetch = web_fetch
     agent.skill_registry = skill_registry
     agent.skill_config_manager = skill_config_manager
+    agent.input_history = input_history
     return agent
 
 
@@ -444,7 +457,9 @@ async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager
 
 
 async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigManager) -> None:
-    session: PromptSession[str] = PromptSession()
+    input_history = getattr(agent, "input_history", None)
+    history_adapter = PromptToolkitHistory(input_history) if input_history is not None else None
+    session: PromptSession[str] = PromptSession(history=history_adapter)
     console.print(Panel(BANNER, title="XG", border_style="cyan"))
 
     approval_ui = ApprovalUI(session)
@@ -453,10 +468,15 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
 
     while True:
         try:
+            if history_adapter is not None:
+                history_adapter.recording_enabled = True
             user_input = await session.prompt_async(HTML("<ansicyan>xg ></ansicyan> "))
         except (KeyboardInterrupt, EOFError):
             console.print("再见。")
             return
+        finally:
+            if history_adapter is not None:
+                history_adapter.recording_enabled = False
 
         user_input = user_input.strip()
         if not user_input:
@@ -496,6 +516,10 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
                 from xg.cli.commands import execute_skill_command
 
                 message, should_exit = await execute_skill_command(agent, user_input)
+            elif user_input.split(maxsplit=1)[0].lower() == "/history":
+                from xg.cli.commands import execute_history_command
+
+                message, should_exit = await execute_history_command(agent, user_input)
             else:
                 message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:
@@ -521,7 +545,7 @@ def _handle_command(
     arg = parts[1].strip() if len(parts) > 1 else ""
 
     if cmd in ("/help", "/?"):
-        return "用法: /plan /model /config /mcp /init /save /memory /hitl /clear /cancel /exit", False
+        return "用法: /plan /model /config /mcp /web /skill /history /init /save /memory /hitl /clear /cancel /exit", False
     if cmd in ("/exit", "/quit"):
         return "再见。", True
     if cmd == "/clear":

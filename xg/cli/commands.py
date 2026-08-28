@@ -49,6 +49,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/mcp", usage="/mcp status|restart|logs|enable|disable|resources", description="管理 MCP Server", category="config"),
     SlashCommandSpec("/web", usage="/web status|providers|search|fetch", description="查看或使用只读联网能力", category="config"),
     SlashCommandSpec("/skill", usage="/skill list|load|enable|disable", description="管理任务 Skill", category="config"),
+    SlashCommandSpec("/history", usage="/history status|clear", description="查看或清理输入历史", category="session"),
     SlashCommandSpec("/memory", usage="/memory list|search|delete|clear", description="管理长期记忆", category="memory"),
     SlashCommandSpec("/help", aliases=("/?",), usage="/help", description="查看命令帮助", category="general"),
     SlashCommandSpec("/init", usage="/init", description="初始化项目记忆", category="memory"),
@@ -120,6 +121,9 @@ class CommandService:
             return CommandResult(ok=ok, message=message)
         if raw.split(maxsplit=1)[0].lower() == "/skill":
             message, ok = await execute_skill_command(self.context.agent, raw)
+            return CommandResult(ok=ok, message=message)
+        if raw.split(maxsplit=1)[0].lower() == "/history":
+            message, ok = await execute_history_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
 
         # Lazy import avoids a cycle: app.py still owns the legacy renderer
@@ -241,3 +245,18 @@ async def execute_skill_command(agent: Any, raw: str) -> tuple[str, bool]:
         action = "启用" if enabled else "禁用"
         return (f"Skill {parts[2]} 已{action}。" if ok else f"Skill {parts[2]} 不存在或无法修改。"), ok
     return "用法: /skill list|load <name> [reference ...]|enable <name>|disable <name>", False
+
+
+async def execute_history_command(agent: Any, raw: str) -> tuple[str, bool]:
+    """Show or explicitly clear local input history without exposing entries."""
+    history = getattr(agent, "input_history", None)
+    if history is None:
+        return "输入历史未初始化。", False
+    parts = raw.split()
+    sub = parts[1].lower() if len(parts) > 1 else "status"
+    if sub in {"status", ""}:
+        return history.status(), True
+    if sub == "clear":
+        count = history.clear(persistent=True)
+        return f"已清理输入历史（{count} 条）。", True
+    return "用法: /history status|clear", False

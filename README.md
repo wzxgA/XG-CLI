@@ -77,6 +77,8 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `/skill list` | 查看当前项目可用的 Skill 元信息 |
 | `/skill load <name> [reference ...]` | 手动按需加载 Skill 和指定参考资料 |
 | `/skill enable|disable <name>` | 启用或禁用 Skill |
+| `/history status` | 查看当前项目输入历史状态 |
+| `/history clear` | 清理当前项目输入历史 |
 | `/hitl` | 查看 HITL 审批状态 |
 | `/hitl on\|off` | 开启 / 关闭危险操作审批 |
 | `/clear` | 清空当前对话上下文 |
@@ -114,6 +116,12 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 Skill 是可发现、按需加载的本地任务规范，不是脚本、插件或新的执行权限。XG 启动时只扫描 `SKILL.md` 的名称和描述并注入有限索引；Agent 或用户执行 `/skill load <name>` 后，才读取正文和明确指定的 `references/` 文件。Skill 中的文字仍是补充资料，不能覆盖系统提示、安全策略、HITL 或工具权限。
 
 Skill 目录按优先级从低到高合并：内置 `xg/skills/`、用户级 `~/.xg/skills/`、项目级 `<project>/.xg/skills/`。同名 Skill 由高层完整覆盖。用户/项目启用状态保存在对应层的 `skills.json`，常用命令为 `/skill list`、`/skill load <name>`、`/skill enable <name>` 和 `/skill disable <name>`。默认的索引、正文和 reference 大小限制见 `.env.example`；`XG_SKILLS_ENABLED=off` 时不会注册 `load_skill`，其他工具仍可用。
+
+## 输入历史
+
+全屏 TUI 的 Composer 支持使用 `↑` / `↓` 浏览已提交的输入，找回后可以继续编辑再按 Enter 提交。命令提示展开时，上下键仍用于选择命令；计划审阅、审批和确认输入不会被历史导航覆盖。输入历史只保存用户输入，不保存模型回答、工具输出或 Agent 上下文。
+
+历史默认按项目隔离保存在用户目录 `~/.xg/input-history/`，敏感输入（如 API Key、密码、Bearer token、`/save` 和 `/config set`）不会写入磁盘。可使用 `/history status` 查看状态、`/history clear` 清理历史，或通过 `.env` 中的 `XG_INPUT_HISTORY_*` 变量关闭持久化、调整数量和大小限制。
 
 ## MCP 外部能力
 
@@ -208,6 +216,11 @@ Server 工具会动态注册为 `mcp__{server}__{tool}`，默认经过 HITL 确�
 | `XG_SKILLS_MAX_CHARS` | 单个 Skill 正文字符上限（默认 32000） |
 | `XG_SKILLS_MAX_REFERENCE_CHARS` | 单个 reference 字符上限（默认 16000） |
 | `XG_SKILLS_MAX_LOADED_CHARS` | 单次 Skill 加载总字符上限（默认 64000） |
+| `XG_INPUT_HISTORY_ENABLED` | Composer 输入历史总开关（默认 on） |
+| `XG_INPUT_HISTORY_PERSIST` | 是否持久化非敏感输入历史（默认 on） |
+| `XG_INPUT_HISTORY_MAX_ENTRIES` | 每个项目保留的历史条数（默认 100） |
+| `XG_INPUT_HISTORY_MAX_CHARS` | 单条历史输入字符上限（默认 8000） |
+| `XG_INPUT_HISTORY_MAX_BYTES` | 单项目历史文件字节上限（默认 1 MiB） |
 
 API Key 只从环境变量 / .env 读取，不写入配置文件；`/config` 显示时脱敏。
 
@@ -219,4 +232,4 @@ uv run pytest                 # 全量测试
 uv run xg                     # 手工验收
 ```
 
-项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（统一工具注册表 + 内置工具）、`xg/mcp`（协议、transport、动态工具和 resources）、`xg/skill`（Skill 发现、解析、按需加载与安全策略）、`xg/memory`（项目/长期记忆 + 上下文压缩）、`xg/tui`（Textual 全屏交互层）、`xg/cli`（入口与 inline fallback）、`xg/config`（provider/MCP/Web/Skill 配置与运行时快照）。
+项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（统一工具注册表 + 内置工具）、`xg/mcp`（协议、transport、动态工具和 resources）、`xg/skill`（Skill 发现、解析、按需加载与安全策略）、`xg/input_history`（输入历史、游标、持久化与隐私策略）、`xg/memory`（项目/长期记忆 + 上下文压缩）、`xg/tui`（Textual 全屏交互层）、`xg/cli`（入口与 inline fallback）、`xg/config`（provider/MCP/Web/Skill 配置与运行时快照）。

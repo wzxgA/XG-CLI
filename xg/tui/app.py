@@ -15,6 +15,7 @@ from textual.widgets import Static
 from xg.agent.plan import ReviewDecision
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
+from xg.input_history import HistoryConfig, InputHistory
 from xg.safety.hitl import ApprovalDecision
 from xg.tui.controller import SessionController
 from xg.tui.messages import (
@@ -60,6 +61,18 @@ class XgTuiApp(App[None]):
     def __init__(self, agent, settings: Settings, manager: ConfigManager) -> None:
         super().__init__()
         self.settings = settings
+        self.input_history = getattr(agent, "input_history", None) or InputHistory(
+            project_root=manager.project_dir.parent,
+            user_dir=manager.user_dir,
+            config=HistoryConfig(
+                enabled=settings.input_history_enabled,
+                persist=settings.input_history_persist,
+                max_entries=settings.input_history_max_entries,
+                max_entry_chars=settings.input_history_max_chars,
+                max_file_bytes=settings.input_history_max_bytes,
+            ),
+        )
+        agent.input_history = self.input_history
         self.controller = SessionController(agent, settings, manager, self._on_state_change)
         self._state = self.controller.snapshot()
         self._pending_render_state: TuiState | None = None
@@ -91,7 +104,9 @@ class XgTuiApp(App[None]):
 
     def on_mount(self) -> None:
         self._render_state(self._state)
-        self.query_one("#composer", Composer).focus()
+        composer = self.query_one("#composer", Composer)
+        composer.set_input_history(self.input_history)
+        composer.focus()
         self.run_worker(self.controller.startup(), exclusive=False, name="mcp-startup")
 
     def _on_state_change(self, state: TuiState) -> None:
@@ -358,8 +373,9 @@ class XgTuiApp(App[None]):
     async def _submit_text(self, text: str) -> None:
         try:
             accepted = await self.controller.submit(text)
+            composer = self.query_one("#composer", Composer)
+            composer.record_submission(text, accepted)
             if not accepted:
-                composer = self.query_one("#composer", Composer)
                 if not composer.value:
                     composer.value = text
         except asyncio.CancelledError:

@@ -226,6 +226,31 @@ async def test_tui_pilot_layout_and_input(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_composer_navigates_submitted_input_history(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer")
+        composer.value = "first task"
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+        composer.value = "second task"
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+
+        await pilot.press("up")
+        assert composer.value == "second task"
+        await pilot.press("up")
+        assert composer.value == "first task"
+        await pilot.press("down", "down")
+        assert composer.value == ""
+
+        composer.value = "draft"
+        await pilot.press("ctrl+p", "ctrl+n")
+        assert composer.value == "draft"
+
+
+@pytest.mark.asyncio
 async def test_tui_uses_full_width_footer_composer_and_top_inspector(tmp_path):
     agent, settings, manager = make_context(tmp_path)
     app = XgTuiApp(agent, settings, manager)

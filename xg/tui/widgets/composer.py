@@ -5,17 +5,60 @@ import asyncio
 from textual.events import Key
 from textual.widgets import Input
 
+from xg.input_history import InputHistory
 from xg.tui.widgets.command_suggestions import CommandSuggestions
 
 
 class Composer(Input):
-    """Single-line first version; Textual handles focus and history later."""
+    """Single-line Composer with bounded XG input history navigation."""
 
     BINDINGS = [("escape", "escape_input", "清除输入或取消当前操作")]
 
     def __init__(self) -> None:
         super().__init__(placeholder="输入任务或 /help …", id="composer")
         self.suggestions_enabled = True
+        self.input_history: InputHistory | None = None
+
+    def set_input_history(self, history: InputHistory | None) -> None:
+        self.input_history = history
+
+    def record_submission(self, text: str, accepted: bool) -> None:
+        if self.input_history is None:
+            return
+        if accepted:
+            self.input_history.add(text)
+        else:
+            self.input_history.reset_cursor()
+
+    def reset_history_cursor(self) -> None:
+        if self.input_history is not None:
+            self.input_history.reset_cursor()
+
+    def _history_blocked(self, app) -> bool:
+        if getattr(app, "_replan_mode", False):
+            return True
+        controller = getattr(app, "controller", None)
+        state = getattr(controller, "state", None)
+        return bool(
+            getattr(app, "_has_pending_plan", lambda: False)()
+            or getattr(state, "pending_approval", None) is not None
+            or getattr(state, "pending_confirmation", None) is not None
+        )
+
+    def _navigate_history(self, direction: str) -> None:
+        if self.input_history is None:
+            return
+        suggestions = self._suggestions()
+        if suggestions is not None:
+            suggestions.close()
+        value = (
+            self.input_history.previous(self.value)
+            if direction == "previous"
+            else self.input_history.next()
+        )
+        self.value = value
+        self.cursor_position = len(value)
+        self.focus()
 
     def set_suggestions_enabled(self, enabled: bool) -> None:
         self.suggestions_enabled = enabled
@@ -65,6 +108,16 @@ class Composer(Input):
                 return
 
         has_pending_plan = getattr(app, "_has_pending_plan", lambda: False)()
+        if not self._history_blocked(app) and event.key == "up":
+            event.prevent_default()
+            event.stop()
+            self._navigate_history("previous")
+            return
+        if not self._history_blocked(app) and event.key == "down":
+            event.prevent_default()
+            event.stop()
+            self._navigate_history("next")
+            return
         if not has_pending_plan or getattr(app, "_replan_mode", False):
             if (
                 event.key == "d"
