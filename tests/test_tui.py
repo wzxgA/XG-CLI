@@ -19,7 +19,7 @@ from xg.tool.builtin import build_registry
 from xg.tui.app import XgTuiApp
 from xg.tui.controller import SessionController
 from xg.tui.reducer import reduce_agent_event
-from xg.tui.state import TuiState
+from xg.tui.state import TuiState, TranscriptItem
 from xg.tui.state import ApprovalRequest
 from xg.tui.widgets.approval_modal import ApprovalModal
 from xg.tui.widgets.collapsible_card import CollapsibleCard
@@ -103,12 +103,60 @@ def make_context(tmp_path: Path):
 
 def test_reducer_merges_streaming_content_and_ignores_stale_turn():
     state = TuiState(active_turn_id="turn-1", phase="running")
+    state.transcript.append(
+        TranscriptItem(
+            id="progress-turn-1",
+            kind="progress",
+            text="正在准备响应",
+            turn_id="turn-1",
+            trace_id="turn-1",
+            status="running",
+        )
+    )
     state = reduce_agent_event(state, AgentEvent(kind="content", text="he"), "turn-1")
     state = reduce_agent_event(state, AgentEvent(kind="content", text="llo"), "turn-1")
-    assert len(state.transcript) == 1
+    assert [item.kind for item in state.transcript] == ["assistant"]
     assert state.transcript[0].text == "hello"
     stale = reduce_agent_event(state, AgentEvent(kind="content", text="bad"), "turn-old")
     assert stale.transcript[0].text == "hello"
+
+
+def test_reducer_clears_progress_on_terminal_events():
+    for event in (
+        AgentEvent(kind="error", text="请求失败"),
+        AgentEvent(kind="context_overflow", text="上下文过长"),
+        AgentEvent(kind="step_limit"),
+        AgentEvent(kind="done"),
+    ):
+        state = TuiState(active_turn_id="turn-1", phase="running")
+        state.transcript.append(
+            TranscriptItem(
+                id="progress-turn-1",
+                kind="progress",
+                text="正在准备响应",
+                turn_id="turn-1",
+                trace_id="turn-1",
+                status="running",
+            )
+        )
+        state = reduce_agent_event(state, event, "turn-1")
+        assert not any(item.kind == "progress" for item in state.transcript)
+
+
+def test_reducer_keeps_new_turn_progress_when_stale_event_arrives():
+    state = TuiState(active_turn_id="turn-2", phase="running")
+    state.transcript.append(
+        TranscriptItem(
+            id="progress-turn-2",
+            kind="progress",
+            text="正在准备响应",
+            turn_id="turn-2",
+            trace_id="turn-2",
+            status="running",
+        )
+    )
+    state = reduce_agent_event(state, AgentEvent(kind="content", text="旧回答"), "turn-1")
+    assert [item.kind for item in state.transcript] == ["progress"]
 
 
 def test_reducer_reclassifies_intermediate_content_and_collapses_trace():
@@ -150,6 +198,27 @@ async def test_controller_submit_returns_to_idle(tmp_path):
     assert controller.state.phase == "idle"
     assert [item.kind for item in controller.state.transcript] == ["user", "assistant"]
     assert controller.state.transcript[-1].text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_controller_shows_progress_before_first_agent_event(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = ConfigManager(user_dir=tmp_path / "user", project_dir=project, env={}, load_env=False)
+    settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
+    client = SlowClient()
+    agent = ReActAgent(client, build_registry(base_dir=project), settings)
+    controller = SessionController(agent, settings, manager)
+
+    task = asyncio.create_task(controller.submit("slow task"))
+    await asyncio.wait_for(client.started.wait(), 1)
+    assert [item.kind for item in controller.state.transcript] == ["user", "progress"]
+    assert controller.state.transcript[-1].text == "正在准备响应"
+
+    client.release.set()
+    assert await asyncio.wait_for(task, 1) is True
+    assert not any(item.kind == "progress" for item in controller.state.transcript)
+    assert controller.state.transcript[-1].kind == "assistant"
 
 
 @pytest.mark.asyncio

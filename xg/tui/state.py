@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 TranscriptKind = Literal[
     "user", "assistant", "thinking", "tool_call", "tool_result", "approval",
-    "context", "plan", "error", "system",
+    "context", "plan", "error", "system", "progress",
 ]
 TranscriptStatus = Literal[
     "streaming", "running", "success", "failed", "cancelled", "done",

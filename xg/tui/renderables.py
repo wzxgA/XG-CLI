@@ -141,6 +141,12 @@ def _assistant_renderable(item: TranscriptItem):
 def render_item(item: TranscriptItem):
     if item.kind == "user":
         return Panel(Text(item.text), title="你", border_style="cyan")
+    if item.kind == "progress":
+        return Panel(
+            Text(f"… {item.text}"),
+            title="XG · Working",
+            border_style="yellow",
+        )
     if item.kind == "assistant":
         return _assistant_renderable(item)
     if item.kind in ("thinking", "tool_call", "tool_result", "approval") and item.collapsible:

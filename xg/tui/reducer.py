@@ -41,6 +41,14 @@ def _append(state: TuiState, item: TranscriptItem) -> None:
     state.transcript.append(item)
 
 
+def _remove_progress(state: TuiState, turn_id: str) -> None:
+    """Remove local waiting indicators without touching Agent history."""
+    state.transcript[:] = [
+        item for item in state.transcript
+        if not (item.kind == "progress" and item.turn_id == turn_id)
+    ]
+
+
 def _trace_id(turn_id: str, trace_id: str | None) -> str:
     return trace_id or turn_id
 
@@ -242,6 +250,7 @@ def _collapse_turn(state: TuiState, turn_id: str, *, status: str = "done") -> No
 def finalize_trace(state: TuiState, turn_id: str, *, status: str = "cancelled") -> TuiState:
     """Finalize a turn when its worker is cancelled outside the event stream."""
     out = _copy(state)
+    _remove_progress(out, turn_id)
     _collapse_turn(out, turn_id, status=status)
     return out
 
@@ -259,6 +268,11 @@ def reduce_agent_event(
     out = _copy(state)
     trace_id = _trace_id(turn_id, trace_id)
     kind = event.kind
+    if kind in {
+        "thinking", "content", "tool_call", "tool_result", "approval",
+        "error", "context_overflow", "budget_exceeded", "step_limit", "done",
+    }:
+        _remove_progress(out, turn_id)
     if event.estimated_prompt_tokens is not None:
         _update_context_usage(out, event)
     if kind == "context_usage":
@@ -365,6 +379,8 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
         return state
     out = _copy(state)
     kind = event.kind
+    if kind in {"plan_generated", "plan_done", "cancelled", "plan_failed"}:
+        _remove_progress(out, turn_id)
     if kind == "plan_generated" and event.plan:
         if event.estimated_prompt_tokens is not None:
             _update_context_usage(out, AgentEvent(

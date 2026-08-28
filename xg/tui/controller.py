@@ -327,14 +327,27 @@ class SessionController:
         if turn_id is None:
             return False
         self._append_item(TranscriptItem(id=f"user-{len(self.state.transcript)}", kind="user", text=text, turn_id=turn_id))
+        is_plan = text.lower().startswith("/plan")
+        goal = text[5:].strip() if is_plan else ""
+        if is_plan and not goal:
+            self._append_system("用法: /plan <任务描述>")
+            return True
+        if is_plan:
+            progress_text = "正在生成执行计划"
+        else:
+            progress_text = "正在准备响应"
+        self._append_item(TranscriptItem(
+            id=f"progress-{turn_id}",
+            kind="progress",
+            text=progress_text,
+            turn_id=turn_id,
+            trace_id=turn_id,
+            status="running",
+        ))
         current = asyncio.current_task()
         self._active_task = current
         try:
-            if text.lower().startswith("/plan"):
-                goal = text[5:].strip()
-                if not goal:
-                    self._append_system("用法: /plan <任务描述>")
-                    return True
+            if is_plan:
                 await self._run_plan(goal, turn_id)
             else:
                 await self._run_agent(text, turn_id)
@@ -343,6 +356,7 @@ class SessionController:
             self._set_state(replace(cancelled, phase="idle", pending_approval=None, pending_plan=None, notification="当前任务已取消"))
             raise
         finally:
+            self._remove_progress(turn_id)
             if self._active_task is current:
                 self._active_task = None
             self._approval_future = None
@@ -695,3 +709,12 @@ class SessionController:
     def _append_system(self, message: str) -> None:
         if message:
             self._append_item(TranscriptItem(id=f"system-{len(self.state.transcript)}", kind="system", text=message))
+
+    def _remove_progress(self, turn_id: str) -> None:
+        """Remove the local waiting indicator for one active turn."""
+        items = [
+            item for item in self.state.transcript
+            if not (item.kind == "progress" and item.turn_id == turn_id)
+        ]
+        if len(items) != len(self.state.transcript):
+            self._set_state(replace(self.state, transcript=items))
