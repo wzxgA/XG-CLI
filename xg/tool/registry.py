@@ -11,7 +11,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from xg.llm.types import ToolCall, ToolResult
 
@@ -23,7 +23,10 @@ class Tool:
     name: str
     description: str
     parameters: dict  # JSON Schema（properties / required）
-    handler: Callable[[dict], ToolResult]
+    handler: Callable[[dict], ToolResult] | None = None
+    async_handler: Callable[[dict], Awaitable[ToolResult]] | None = None
+    source: str = "builtin"
+    metadata: dict[str, Any] | None = None
 
 
 class ToolRegistry:
@@ -40,6 +43,32 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+
+    def unregister(self, name: str) -> bool:
+        return self._tools.pop(name, None) is not None
+
+    def unregister_source(self, source: str) -> list[str]:
+        """Remove all tools supplied by one dynamic source."""
+        removed = [name for name, tool in self._tools.items() if tool.source == source]
+        for name in removed:
+            self._tools.pop(name, None)
+        return removed
+
+    def replace_source(self, source: str, tools: list[Tool]) -> None:
+        """Atomically replace tools from ``source`` after collision validation."""
+        incoming: dict[str, Tool] = {}
+        for tool in tools:
+            if tool.name in incoming:
+                raise ValueError(f"重复工具名: {tool.name}")
+            existing = self._tools.get(tool.name)
+            if existing is not None and existing.source != source:
+                raise ValueError(f"工具名冲突: {tool.name}（来源 {existing.source}）")
+            incoming[tool.name] = tool
+        retained = {
+            name: tool for name, tool in self._tools.items() if tool.source != source
+        }
+        retained.update(incoming)
+        self._tools = retained
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -76,8 +105,14 @@ class ToolRegistry:
                 tool_call_id="", name=name, ok=False,
                 error=f"未知工具: {name}，可用工具: {', '.join(self._tools)}",
             )
+        if tool.async_handler is not None and tool.handler is None:
+            return ToolResult(
+                tool_call_id="", name=name, ok=False,
+                error="异步工具不能通过同步执行入口调用",
+            )
         started = time.monotonic()
         try:
+            assert tool.handler is not None
             result = tool.handler(args)
         except Exception as e:  # 工具内部异常统一转为 error 回灌
             result = ToolResult(tool_call_id="", name=name, ok=False, error=f"{type(e).__name__}: {e}")
@@ -85,6 +120,64 @@ class ToolRegistry:
             result.output = (
                 result.output[: self.max_output_chars]
                 + f"\n... (输出已截断，原始长度 {len(result.output)} 字符)"
+            )
+        if len(result.error) > self.max_output_chars:
+            result.error = (
+                result.error[: self.max_output_chars]
+                + f"\n... (错误已截断，原始长度 {len(result.error)} 字符)"
+            )
+        if self.audit is not None:
+            self.audit.tool_call(
+                tool=name,
+                args=args,
+                ok=result.ok,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+        return result
+
+    async def aexecute(self, name: str, args: dict) -> ToolResult:
+        """Execute either an async-native tool or a synchronous tool safely."""
+        if self.guard is not None:
+            verdict = self.guard(name, args)
+            if not getattr(verdict, "ok", True):
+                if self.audit is not None:
+                    self.audit.blocked(reason=verdict.reason, tool=name, args=args)
+                return ToolResult(
+                    tool_call_id="", name=name, ok=False,
+                    error=f"策略拒绝（{verdict.reason}）: {verdict.detail}",
+                )
+
+        tool = self._tools.get(name)
+        if tool is None:
+            return ToolResult(
+                tool_call_id="", name=name, ok=False,
+                error=f"未知工具: {name}，可用工具: {', '.join(self._tools)}",
+            )
+        started = time.monotonic()
+        try:
+            if tool.async_handler is not None:
+                result = await tool.async_handler(args)
+            elif tool.handler is not None:
+                result = await asyncio.to_thread(tool.handler, args)
+            else:
+                result = ToolResult(
+                    tool_call_id="", name=name, ok=False, error="工具没有可执行 handler"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            result = ToolResult(
+                tool_call_id="", name=name, ok=False, error=f"{type(e).__name__}: {e}"
+            )
+        if len(result.output) > self.max_output_chars:
+            result.output = (
+                result.output[: self.max_output_chars]
+                + f"\n... (输出已截断，原始长度 {len(result.output)} 字符)"
+            )
+        if len(result.error) > self.max_output_chars:
+            result.error = (
+                result.error[: self.max_output_chars]
+                + f"\n... (错误已截断，原始长度 {len(result.error)} 字符)"
             )
         if self.audit is not None:
             self.audit.tool_call(
@@ -117,8 +210,7 @@ class ToolRegistry:
             async with sem:
                 try:
                     return await asyncio.wait_for(
-                        asyncio.to_thread(self.execute, call.name, call.parsed_arguments()),
-                        timeout=timeout,
+                        self.aexecute(call.name, call.parsed_arguments()), timeout=timeout
                     )
                 except asyncio.TimeoutError:
                     return ToolResult(

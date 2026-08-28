@@ -46,6 +46,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/plan", usage="/plan <任务>", description="生成、审阅并执行计划", category="workflow"),
     SlashCommandSpec("/model", usage="/model [provider] [model]", description="查看或切换 provider / 模型", category="config"),
     SlashCommandSpec("/config", usage="/config get|set ...", description="查看或修改配置", category="config"),
+    SlashCommandSpec("/mcp", usage="/mcp status|restart|logs|enable|disable|resources", description="管理 MCP Server", category="config"),
     SlashCommandSpec("/memory", usage="/memory list|search|delete|clear", description="管理长期记忆", category="memory"),
     SlashCommandSpec("/help", aliases=("/?",), usage="/help", description="查看命令帮助", category="general"),
     SlashCommandSpec("/init", usage="/init", description="初始化项目记忆", category="memory"),
@@ -109,6 +110,10 @@ class CommandService:
         if raw.lower() in ("/cancel", "/c"):
             return CommandResult(ok=True, message="已请求取消当前任务")
 
+        if raw.split(maxsplit=1)[0].lower() == "/mcp":
+            message, ok = await execute_mcp_command(self.context.agent, raw)
+            return CommandResult(ok=ok, message=message)
+
         # Lazy import avoids a cycle: app.py still owns the legacy renderer
         # and its command helpers are kept as the public compatibility API.
         from xg.cli.app import _handle_command, _handle_memory_command
@@ -129,3 +134,35 @@ class CommandService:
             self.context.agent, self.context.settings, self.context.manager, raw
         )
         return CommandResult(ok=not (message and message.startswith("未知命令")), message=message or "", should_exit=should_exit)
+
+
+async def execute_mcp_command(agent: Any, raw: str) -> tuple[str, bool]:
+    """Execute the shared asynchronous /mcp command group."""
+    manager = getattr(agent, "mcp_manager", None)
+    if manager is None:
+        return "MCP 未初始化。", False
+    await manager.ensure_started()
+    parts = raw.split()
+    sub = parts[1].lower() if len(parts) > 1 else "status"
+    name = parts[2] if len(parts) > 2 else ""
+    if sub == "status":
+        return manager.format_status(), True
+    if sub == "resources":
+        return manager.format_resources(name or None), True
+    if sub == "logs":
+        if not name:
+            return "用法: /mcp logs <server>", False
+        return manager.logs(name), name in {item.name for item in manager.snapshots()}
+    if sub == "restart":
+        if not name:
+            return "用法: /mcp restart <server>", False
+        ok = await manager.restart(name)
+        return (f"MCP Server {name} 已重启。" if ok else f"MCP Server {name} 重启失败或不存在。"), ok
+    if sub in {"enable", "disable"}:
+        if not name:
+            return f"用法: /mcp {sub} <server>", False
+        enabled = sub == "enable"
+        ok = await manager.set_enabled(name, enabled)
+        action = "启用" if enabled else "禁用"
+        return (f"MCP Server {name} 已{action}。" if ok else f"MCP Server {name} {action}失败或不存在。"), ok
+    return "用法: /mcp status|restart <server>|logs <server>|enable <server>|disable <server>|resources [server]", False

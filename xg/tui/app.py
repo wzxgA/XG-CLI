@@ -92,6 +92,7 @@ class XgTuiApp(App[None]):
     def on_mount(self) -> None:
         self._render_state(self._state)
         self.query_one("#composer", Composer).focus()
+        self.run_worker(self.controller.startup(), exclusive=False, name="mcp-startup")
 
     def _on_state_change(self, state: TuiState) -> None:
         self.post_message(StateChanged(state))
@@ -474,7 +475,7 @@ class XgTuiApp(App[None]):
 
     def action_show_help(self) -> None:
         self._state = TuiState(
-            **{**self._state.__dict__, "notification": "Enter 发送 · Ctrl+C 取消 · /plan 计划 · /model 切换模型 · /memory 管理记忆", "notification_level": "info"}
+            **{**self._state.__dict__, "notification": "Enter 发送 · Ctrl+C 取消 · /plan 计划 · /model 切换模型 · /mcp 外部能力", "notification_level": "info"}
         )
         self._render_state_immediately(self._state)
 

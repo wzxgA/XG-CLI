@@ -47,6 +47,18 @@ class Settings:
     plan_max_failures: int = 3
     # Textual TUI 最大刷新频率（第 6 期）
     tui_refresh_fps: int = 20
+    # 第 7 期：MCP 客户端与资源限制
+    mcp_enabled: bool = True
+    mcp_startup_timeout: float = 15.0
+    mcp_request_timeout: float = 120.0
+    mcp_shutdown_timeout: float = 5.0
+    mcp_max_servers: int = 32
+    mcp_max_tools: int = 256
+    mcp_max_resources: int = 512
+    mcp_max_message_bytes: int = 2_097_152
+    mcp_resource_max_chars: int = 32_000
+    mcp_resource_total_chars: int = 64_000
+    mcp_log_lines: int = 200
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -85,6 +97,17 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         plan_subtask_steps=_get_int(manager.env, "XG_PLAN_SUBTASK_STEPS", 10),
         plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
         tui_refresh_fps=max(5, min(60, _get_int(manager.env, "XG_TUI_REFRESH_FPS", 20))),
+        mcp_enabled=manager.env.get("XG_MCP_ENABLED", "on").lower() not in ("off", "0", "false"),
+        mcp_startup_timeout=max(0.1, _get_float(manager.env, "XG_MCP_STARTUP_TIMEOUT", 15.0)),
+        mcp_request_timeout=max(0.1, _get_float(manager.env, "XG_MCP_REQUEST_TIMEOUT", 120.0)),
+        mcp_shutdown_timeout=max(0.1, _get_float(manager.env, "XG_MCP_SHUTDOWN_TIMEOUT", 5.0)),
+        mcp_max_servers=max(1, _get_int(manager.env, "XG_MCP_MAX_SERVERS", 32)),
+        mcp_max_tools=max(1, _get_int(manager.env, "XG_MCP_MAX_TOOLS", 256)),
+        mcp_max_resources=max(1, _get_int(manager.env, "XG_MCP_MAX_RESOURCES", 512)),
+        mcp_max_message_bytes=max(1024, _get_int(manager.env, "XG_MCP_MAX_MESSAGE_BYTES", 2_097_152)),
+        mcp_resource_max_chars=max(256, _get_int(manager.env, "XG_MCP_RESOURCE_MAX_CHARS", 32_000)),
+        mcp_resource_total_chars=max(256, _get_int(manager.env, "XG_MCP_RESOURCE_TOTAL_CHARS", 64_000)),
+        mcp_log_lines=max(10, _get_int(manager.env, "XG_MCP_LOG_LINES", 200)),
     )
 
 

@@ -22,10 +22,12 @@ from rich.text import Text
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, PlanTask, ReviewDecision
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.config.manager import ConfigManager, mask_key
+from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
 from xg.memory.manager import MemoryManager, MemoryUnavailableError
+from xg.mcp.manager import McpManager
 from xg.safety.audit import AuditLogger
 from xg.safety.guards import guard_tool_call
 from xg.safety.hitl import ApprovalDecision, HITLPolicy
@@ -37,11 +39,15 @@ BANNER = """\
 [XG] Agent CLI v0.1.0
 输入任务开始对话；/plan 先拆解计划再执行，/model 切换 provider 或模型，
 /config 查看/设置配置，/init 初始化项目记忆，/save 保存记忆，
-/memory 管理记忆，/hitl 审批开关，/clear 清空上下文，/exit 退出。
+/memory 管理记忆，/mcp 管理外部能力，/hitl 审批开关，/clear 清空上下文，/exit 退出。
 """
 
 
-def build_agent(settings: Settings, base_dir=None) -> ReActAgent:
+def build_agent(
+    settings: Settings,
+    base_dir=None,
+    config_manager: ConfigManager | None = None,
+) -> ReActAgent:
     base = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
     client = create_client(settings.api_base, settings.api_key, settings.model)
     audit = AuditLogger(base / ".xg" / "audit.log")
@@ -58,6 +64,32 @@ def build_agent(settings: Settings, base_dir=None) -> ReActAgent:
         project_memory_max_chars=settings.project_memory_max_chars,
         memory_prompt_max_chars=settings.memory_prompt_max_chars,
     )
+    config_manager = config_manager or ConfigManager(project_dir=base / ".xg")
+    mcp_config = McpConfigManager(
+        user_dir=config_manager.user_dir,
+        project_root=base,
+        env=config_manager.env,
+        defaults={
+            "startup_timeout": settings.mcp_startup_timeout,
+            "request_timeout": settings.mcp_request_timeout,
+            "shutdown_timeout": settings.mcp_shutdown_timeout,
+            "max_output_chars": settings.max_tool_output_chars,
+            "max_tools": settings.mcp_max_tools,
+            "max_resources": settings.mcp_max_resources,
+            "max_message_bytes": settings.mcp_max_message_bytes,
+            "resource_max_chars": settings.mcp_resource_max_chars,
+            "log_lines": settings.mcp_log_lines,
+        },
+    )
+    mcp_manager = McpManager(
+        tools,
+        mcp_config,
+        approval_policy=hitl,
+        audit=audit,
+        enabled=settings.mcp_enabled,
+        max_servers=settings.mcp_max_servers,
+        resource_total_chars=settings.mcp_resource_total_chars,
+    )
     return ReActAgent(
         llm=client,
         tools=tools,
@@ -65,6 +97,7 @@ def build_agent(settings: Settings, base_dir=None) -> ReActAgent:
         approval_policy=hitl,
         audit=audit,
         memory_manager=memory_manager,
+        mcp_manager=mcp_manager,
     )
 
 
@@ -340,6 +373,7 @@ async def handle_plan_turn(
         approval_policy=agent.approval_policy,
         audit=agent.audit,
         memory_manager=agent.memory_manager,
+        mcp_manager=getattr(agent, "mcp_manager", None),
     )
     try:
         async for event in executor.run(goal):
@@ -349,6 +383,20 @@ async def handle_plan_turn(
 
 
 async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager) -> None:
+    mcp_manager = getattr(agent, "mcp_manager", None)
+    if mcp_manager is not None:
+        await mcp_manager.ensure_started()
+        if mcp_manager.config_errors:
+            for error in mcp_manager.config_errors:
+                console.print(Text(f"MCP 配置提示：{error}", style="yellow"))
+    try:
+        await _run_loop_body(agent, settings, manager)
+    finally:
+        if mcp_manager is not None:
+            await mcp_manager.close()
+
+
+async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigManager) -> None:
     session: PromptSession[str] = PromptSession()
     console.print(Panel(BANNER, title="XG", border_style="cyan"))
 
@@ -388,7 +436,13 @@ async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager
             continue
 
         if user_input.startswith("/"):
-            message, should_exit = _handle_command(agent, settings, manager, user_input)
+            if user_input.split(maxsplit=1)[0].lower() == "/mcp":
+                from xg.cli.commands import execute_mcp_command
+
+                message, _ = await execute_mcp_command(agent, user_input)
+                should_exit = False
+            else:
+                message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:
                 console.print(Text(message, style="dim"))
             if should_exit:
@@ -412,7 +466,7 @@ def _handle_command(
     arg = parts[1].strip() if len(parts) > 1 else ""
 
     if cmd in ("/help", "/?"):
-        return "用法: /plan /model /config /init /save /memory /hitl /clear /cancel /exit", False
+        return "用法: /plan /model /config /mcp /init /save /memory /hitl /clear /cancel /exit", False
     if cmd in ("/exit", "/quit"):
         return "再见。", True
     if cmd == "/clear":
@@ -428,7 +482,10 @@ def _handle_command(
         return _cmd_memory_sync(agent, cmd, arg), False
     if cmd == "/memory":
         return _cmd_memory_sync(agent, cmd, arg), False
-    return f"未知命令: {cmd}。可用: /plan /model /config /init /save /memory /hitl /clear /exit", False
+    if cmd == "/mcp":
+        mcp = getattr(agent, "mcp_manager", None)
+        return (mcp.format_status() if mcp is not None else "MCP 未初始化。"), False
+    return f"未知命令: {cmd}。可用: /plan /model /config /mcp /init /save /memory /hitl /clear /exit", False
 
 
 def _memory_manager(agent: ReActAgent) -> MemoryManager | None:
@@ -719,7 +776,7 @@ def main(argv: list[str] | None = None) -> None:
         console.print(Panel(Text("缺少模型配置（XG_MODEL 或 provider 默认模型）。"), style="red"))
         sys.exit(1)
 
-    agent = build_agent(settings)
+    agent = build_agent(settings, config_manager=manager)
     try:
         _run_tui_or_inline(agent, settings, manager, args)
     except KeyboardInterrupt:

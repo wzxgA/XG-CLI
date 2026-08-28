@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import AsyncIterator, Literal
+from typing import TYPE_CHECKING, AsyncIterator, Literal
 
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient, LlmError
@@ -18,6 +18,9 @@ from xg.memory.context import ConversationContext
 from xg.memory.manager import MemoryManager
 from xg.safety.hitl import ApprovalDecision, HITLPolicy
 from xg.tool.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from xg.mcp.manager import McpManager
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是 XG，一个终端里的编程助手。你可以调用工具完成文件读写、搜索和命令执行等任务。"
@@ -70,6 +73,7 @@ class ReActAgent:
         approval_policy: HITLPolicy | None = None,
         audit=None,
         memory_manager: MemoryManager | None = None,
+        mcp_manager: "McpManager | None" = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -77,12 +81,14 @@ class ReActAgent:
         self.approval_policy = approval_policy
         self.audit = audit
         self.memory_manager = memory_manager
+        self.mcp_manager = mcp_manager
         self.context = ConversationContext(
             system_prompt,
             settings,
             shared_provider=memory_manager.shared_sections if memory_manager else None,
         )
         self._reported_memory_warnings: set[str] = set()
+        self._reported_mcp_warnings: set[str] = set()
         # 保持前四期公开属性兼容：外部追加 messages 会直接进入短期历史。
         self.messages = self.context.history
 
@@ -95,6 +101,17 @@ class ReActAgent:
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """执行一轮 ReAct 循环。"""
+        if self.mcp_manager is not None:
+            try:
+                await self.mcp_manager.ensure_started()
+                user_input = await self.mcp_manager.expand_references(user_input)
+            except Exception as exc:
+                yield AgentEvent(kind="error", text=f"MCP resource 处理失败: {exc}")
+                return
+            for warning in self.mcp_manager.config_errors:
+                if warning not in self._reported_mcp_warnings:
+                    self._reported_mcp_warnings.add(warning)
+                    yield AgentEvent(kind="context_warning", text=warning)
         self.context.append(Message(role="user", content=user_input))
 
         for _step in range(self.settings.tool_steps):

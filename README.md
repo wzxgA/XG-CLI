@@ -71,6 +71,8 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `/config list` | provider 能力表 |
 | `/config get <key>` | 查看配置项 |
 | `/config set <key> <value>` | 设置并持久化到 `~/.xg/config.json` |
+| `/mcp status` | 查看 MCP Server、工具和 resources 状态 |
+| `/mcp restart|logs|enable|disable|resources` | 管理 MCP Server |
 | `/hitl` | 查看 HITL 审批状态 |
 | `/hitl on\|off` | 开启 / 关闭危险操作审批 |
 | `/clear` | 清空当前对话上下文 |
@@ -96,6 +98,36 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 - **审计日志**：所有工具调用/审批/拒绝记录到 `.xg/audit.log`（JSONL，敏感字段脱敏）
 
 内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command`。
+
+## MCP 外部能力
+
+XG 可以通过 MCP 接入外部工具和 resources，支持本地 `stdio` 子进程与 `Streamable HTTP`。用户级配置位于 `~/.xg/mcp.json`，项目级配置位于 `.xg/mcp.json`；同名 Server 由项目配置覆盖，敏感值使用 `${VAR}` 从环境变量或 `.env` 展开。
+
+```json
+{
+  "servers": {
+    "local_docs": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "my_docs_mcp"],
+      "env": {"DOCS_TOKEN": "${DOCS_TOKEN}"}
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+    }
+  }
+}
+```
+
+Server 工具会动态注册为 `mcp__{server}__{tool}`，默认经过 HITL 确认并写入 `.xg/audit.log`。resources 可由 Agent 通过虚拟 list/read 工具读取，也可以在输入中显式引用：
+
+```text
+根据 @local_docs:file:///specs/api.md 检查当前实现
+```
+
+常用管理命令：`/mcp status`、`/mcp restart <server>`、`/mcp logs <server>`、`/mcp enable <server>`、`/mcp disable <server>`、`/mcp resources [server]`。MCP Server 是外部代码/服务，只应启用可信配置；不要把真实 token 直接写入 `mcp.json`。
 
 ## 记忆与上下文
 
@@ -140,6 +172,13 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 | `XG_PLAN_MAX_SUBTASKS` | 计划模式子任务数上限（默认 12，超出截断） |
 | `XG_PLAN_SUBTASK_STEPS` | 计划模式单个子任务最大工具步数（默认 10） |
 | `XG_PLAN_MAX_FAILURES` | 计划级允许失败数（默认 3，超出终止剩余轮次） |
+| `XG_MCP_ENABLED` | MCP 总开关（on 默认） |
+| `XG_MCP_STARTUP_TIMEOUT` | MCP Server 初始化超时秒数（默认 15） |
+| `XG_MCP_REQUEST_TIMEOUT` | MCP 单请求超时秒数（默认 120） |
+| `XG_MCP_MAX_SERVERS` | MCP Server 数量上限（默认 32） |
+| `XG_MCP_MAX_TOOLS` | 每个 Server 工具数上限（默认 256） |
+| `XG_MCP_MAX_RESOURCES` | 每个 Server resource 数上限（默认 512） |
+| `XG_MCP_RESOURCE_MAX_CHARS` | 单 resource 文本上限（默认 32000） |
 
 API Key 只从环境变量 / .env 读取，不写入配置文件；`/config` 显示时脱敏。
 
@@ -151,4 +190,4 @@ uv run pytest                 # 全量测试
 uv run xg                     # 手工验收
 ```
 
-项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（工具注册表 + 内置工具）、`xg/memory`（项目/长期记忆 + 上下文压缩）、`xg/tui`（Textual 全屏交互层）、`xg/cli`（入口与 inline fallback）、`xg/config`（provider 注册表 / 配置合并 / 运行时快照）。
+项目分层：`xg/agent`（ReAct 循环 + 计划模式）、`xg/llm`（客户端抽象 + OpenAI 兼容实现 + 工厂）、`xg/tool`（统一工具注册表 + 内置工具）、`xg/mcp`（协议、transport、动态工具和 resources）、`xg/memory`（项目/长期记忆 + 上下文压缩）、`xg/tui`（Textual 全屏交互层）、`xg/cli`（入口与 inline fallback）、`xg/config`（provider/MCP 配置与运行时快照）。

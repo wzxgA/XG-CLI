@@ -363,18 +363,18 @@ async def test_tui_command_suggestions_filter_complete_and_escape(tmp_path):
         composer.value = "/m"
         await pilot.pause()
         assert suggestions.display is True
-        assert [spec.name for spec in suggestions.visible_specs] == ["/model", "/memory"]
+        assert [spec.name for spec in suggestions.visible_specs] == ["/model", "/mcp", "/memory"]
         assert suggestions.highlighted == 0
 
         await pilot.press("down")
         assert suggestions.highlighted == 1
         await pilot.press("tab")
         await pilot.pause()
-        assert composer.value == "/memory"
+        assert composer.value == "/mcp"
         assert app.controller.state.transcript == []
 
         await pilot.press("escape")
-        assert composer.value == "/memory"
+        assert composer.value == "/mcp"
         assert suggestions.display is False
 
 
@@ -390,7 +390,7 @@ async def test_tui_command_suggestion_mouse_selection_keeps_composer_focus(tmp_p
 
         assert await pilot.click(suggestions, offset=(4, 2))
         await pilot.pause()
-        assert composer.value == "/memory"
+        assert composer.value == "/mcp"
         assert composer.has_focus
         assert app.controller.state.transcript == []
 

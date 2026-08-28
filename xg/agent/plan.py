@@ -14,7 +14,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import AsyncIterator, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Literal
 
 from xg.agent.react import AgentEvent, DEFAULT_SYSTEM_PROMPT, ReActAgent
 from xg.config.settings import Settings
@@ -24,6 +24,9 @@ from xg.memory.context import ConversationContext
 from xg.memory.manager import MemoryManager
 from xg.safety.hitl import HITLPolicy
 from xg.tool.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from xg.mcp.manager import McpManager
 
 # 依赖结果摘要注入上限（字符）
 DEP_RESULT_LIMIT = 2000
@@ -246,6 +249,7 @@ class PlanExecutor:
         approval_policy: HITLPolicy | None = None,
         audit=None,
         memory_manager: MemoryManager | None = None,
+        mcp_manager: "McpManager | None" = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -254,11 +258,19 @@ class PlanExecutor:
         self.approval_policy = approval_policy
         self.audit = audit
         self.memory_manager = memory_manager
+        self.mcp_manager = mcp_manager
         self._planner_context_event: AgentEvent | None = None
         self._planner_usage: Usage | None = None
 
     async def run(self, goal: str) -> AsyncIterator[PlanEvent]:
         """执行完整流程：拆解 → 审阅（可循环重规划）→ 按批次执行 → 汇总。"""
+        if self.mcp_manager is not None:
+            try:
+                await self.mcp_manager.ensure_started()
+                goal = await self.mcp_manager.expand_references(goal)
+            except Exception as exc:
+                yield PlanEvent(kind="plan_failed", message=f"MCP resource 处理失败: {exc}")
+                return
         feedback = ""
         previous: Plan | None = None
 
@@ -489,6 +501,7 @@ class PlanExecutor:
             approval_policy=self.approval_policy,
             audit=self.audit,
             memory_manager=self.memory_manager,
+            mcp_manager=self.mcp_manager,
         )
         async for event in agent.run(self._subtask_user_prompt(task)):
             if event.kind in (

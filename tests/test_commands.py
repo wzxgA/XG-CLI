@@ -200,9 +200,9 @@ class TestOtherCommands:
 
 def test_slash_command_catalog_is_stable_and_prefix_filtered():
     assert [spec.name for spec in filter_slash_commands("/")][:4] == [
-        "/plan", "/model", "/config", "/memory"
+        "/plan", "/model", "/config", "/mcp"
     ]
-    assert [spec.name for spec in filter_slash_commands("/m")] == ["/model", "/memory"]
+    assert [spec.name for spec in filter_slash_commands("/m")] == ["/model", "/mcp", "/memory"]
     assert [spec.name for spec in filter_slash_commands("/PL")] == ["/plan"]
     assert [spec.name for spec in filter_slash_commands("/c")] == ["/cancel"]
     assert filter_slash_commands("查看 /model") == ()

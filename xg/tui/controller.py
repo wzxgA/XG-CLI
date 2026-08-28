@@ -94,6 +94,9 @@ class SessionController:
         self._review_future: asyncio.Future[ReviewDecision] | None = None
         self._confirmation: ConfirmationRequest | None = None
         self._confirmation_future: asyncio.Future[bool] | None = None
+        mcp_manager = getattr(agent, "mcp_manager", None)
+        if mcp_manager is not None:
+            mcp_manager.add_listener(self._on_mcp_event)
         if agent.approval_policy is not None:
             agent.approval_policy.requester = self._request_approval
 
@@ -164,6 +167,34 @@ class SessionController:
     def _set_state(self, state: TuiState) -> None:
         self.state = state
         self._publish()
+
+    async def _on_mcp_event(self, event) -> None:
+        """Expose MCP lifecycle/resource events without coupling MCP to Textual."""
+        if self._shutting_down:
+            return
+        if event.kind == "mcp_server_unavailable":
+            self._append_item(TranscriptItem(
+                id=f"mcp-{event.server}-{len(self.state.transcript)}",
+                kind="error",
+                text=f"MCP Server {event.server} 不可用：{event.text}",
+            ))
+        elif event.kind == "mcp_resource_read":
+            self._append_item(TranscriptItem(
+                id=f"mcp-resource-{len(self.state.transcript)}",
+                kind="context",
+                text=f"已读取 MCP resource：{event.server}:{event.text}",
+                collapsible=True,
+                collapsed=True,
+            ))
+        elif event.kind == "mcp_server_ready":
+            self._set_state(replace(
+                self.state,
+                notification=(
+                    f"MCP Server {event.server} 已连接"
+                    f"（{event.tool_count or 0} tools / {event.resource_count or 0} resources）"
+                ),
+                notification_level="info",
+            ))
 
     def _begin_turn(self) -> str | None:
         # The queue worker may be alive while it is starting the next turn;
@@ -266,6 +297,11 @@ class SessionController:
                 notification_level="info",
             ))
             return False
+        if self.busy and self._is_readonly_mcp_command(text):
+            result = await self.execute_command(text)
+            if result.message:
+                self._append_system(result.message)
+            return result.ok
         if self.busy or self._queue:
             return self._enqueue(text)
         try:
@@ -328,6 +364,7 @@ class SessionController:
             approval_policy=self.agent.approval_policy,
             audit=self.agent.audit,
             memory_manager=self.agent.memory_manager,
+            mcp_manager=getattr(self.agent, "mcp_manager", None),
         )
         async for event in executor.run(goal):
             self._set_state(reduce_plan_event(self.state, event, turn_id))
@@ -475,7 +512,7 @@ class SessionController:
 
     async def execute_command(self, raw: str) -> CommandResult:
         current = asyncio.current_task()
-        if self.busy and self._active_task is not current:
+        if self.busy and self._active_task is not current and not self._is_readonly_mcp_command(raw):
             return CommandResult(ok=False, message="当前任务正在运行，请通过输入提交命令以加入队列")
         if raw.strip().lower() in ("/cancel", "/c"):
             await self.cancel()
@@ -563,6 +600,15 @@ class SessionController:
         ))
         return result
 
+    @staticmethod
+    def _is_readonly_mcp_command(raw: str) -> bool:
+        parts = raw.strip().lower().split()
+        return bool(
+            parts
+            and parts[0] == "/mcp"
+            and (len(parts) == 1 or parts[1] in {"status", "logs", "resources"})
+        )
+
     async def confirm_command(self, confirmed: bool) -> None:
         request = self._confirmation
         self._confirmation = None
@@ -617,6 +663,26 @@ class SessionController:
                 pass
         self._queue.clear()
         self._publish_queue()
+        mcp_manager = getattr(self.agent, "mcp_manager", None)
+        if mcp_manager is not None:
+            await mcp_manager.close()
+
+    async def startup(self) -> None:
+        """Start configured MCP servers without blocking TUI construction."""
+        mcp_manager = getattr(self.agent, "mcp_manager", None)
+        if mcp_manager is None:
+            return
+        await mcp_manager.ensure_started()
+        for error in mcp_manager.config_errors:
+            self._append_system(f"MCP 配置提示：{error}")
+        snapshots = mcp_manager.snapshots()
+        if snapshots:
+            ready = sum(item.status == "ready" for item in snapshots)
+            self._set_state(replace(
+                self.state,
+                notification=f"MCP: {ready}/{len(snapshots)} 个 Server 可用",
+                notification_level="info" if ready == len(snapshots) else "warning",
+            ))
 
     def _append_item(self, item: TranscriptItem) -> None:
         state = replace(self.state, transcript=[*self.state.transcript, item])
