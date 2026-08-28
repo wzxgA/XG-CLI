@@ -47,6 +47,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/model", usage="/model [provider] [model]", description="查看或切换 provider / 模型", category="config"),
     SlashCommandSpec("/config", usage="/config get|set ...", description="查看或修改配置", category="config"),
     SlashCommandSpec("/mcp", usage="/mcp status|restart|logs|enable|disable|resources", description="管理 MCP Server", category="config"),
+    SlashCommandSpec("/web", usage="/web status|providers|search|fetch", description="查看或使用只读联网能力", category="config"),
     SlashCommandSpec("/memory", usage="/memory list|search|delete|clear", description="管理长期记忆", category="memory"),
     SlashCommandSpec("/help", aliases=("/?",), usage="/help", description="查看命令帮助", category="general"),
     SlashCommandSpec("/init", usage="/init", description="初始化项目记忆", category="memory"),
@@ -113,6 +114,9 @@ class CommandService:
         if raw.split(maxsplit=1)[0].lower() == "/mcp":
             message, ok = await execute_mcp_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
+        if raw.split(maxsplit=1)[0].lower() == "/web":
+            message, ok = await execute_web_command(self.context.agent, raw)
+            return CommandResult(ok=ok, message=message)
 
         # Lazy import avoids a cycle: app.py still owns the legacy renderer
         # and its command helpers are kept as the public compatibility API.
@@ -166,3 +170,45 @@ async def execute_mcp_command(agent: Any, raw: str) -> tuple[str, bool]:
         action = "启用" if enabled else "禁用"
         return (f"MCP Server {name} 已{action}。" if ok else f"MCP Server {name} {action}失败或不存在。"), ok
     return "用法: /mcp status|restart <server>|logs <server>|enable <server>|disable <server>|resources [server]", False
+
+
+async def execute_web_command(agent: Any, raw: str) -> tuple[str, bool]:
+    """Shared read-only Web command semantics for inline and TUI."""
+    config = getattr(agent, "web_config", None)
+    parts = raw.split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else "status"
+    if config is None:
+        return "Web 能力未初始化。", False
+    if sub in {"status", ""}:
+        search = config.search
+        configured = bool(search.api_base and (search.api_key or search.provider == "searxng"))
+        return (f"Web: {'启用' if config.enabled else '关闭'}\n"
+                f"search provider: {search.provider}（{'已配置' if configured else '未配置'}）\n"
+                f"fetch: timeout={config.fetch.timeout}s, max={config.fetch.max_response_bytes} bytes, "
+                f"chars={config.fetch.max_chars}, redirects={config.fetch.max_redirects}"), True
+    if sub == "providers":
+        lines = []
+        for name in ("zhipu", "serpapi", "searxng"):
+            data = config.providers.get(name, {})
+            active = name == config.search.provider
+            has_key = bool((config.search.api_key if active else None) or data.get("api_key"))
+            has_url = bool((config.search.api_base if active else None) or data.get("api_base") or data.get("url"))
+            lines.append(f"{name}: {'已配置' if has_url and (has_key or name == 'searxng') else '未配置'}")
+        return "\n".join(lines), True
+    if sub == "search":
+        if len(parts) < 3 or not parts[2].strip():
+            return "用法: /web search <query>", False
+        service = getattr(agent, "web_search", None)
+        if service is None:
+            return "Web 搜索未启用或未配置 provider。", False
+        ok, output = await service.search_tool({"query": parts[2].strip()})
+        return output, ok
+    if sub == "fetch":
+        if len(parts) < 3 or not parts[2].strip():
+            return "用法: /web fetch <url>", False
+        service = getattr(agent, "web_fetch", None)
+        if service is None:
+            return "Web 抓取未启用。", False
+        ok, output = await service.fetch_tool({"url": parts[2].strip()})
+        return output, ok
+    return "用法: /web status|providers|search <query>|fetch <url>", False

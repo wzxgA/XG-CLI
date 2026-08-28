@@ -72,6 +72,7 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | `/config get <key>` | 查看配置项 |
 | `/config set <key> <value>` | 设置并持久化到 `~/.xg/config.json` |
 | `/mcp status` | 查看 MCP Server、工具和 resources 状态 |
+| `/web status|providers|search|fetch` | 查看状态、搜索公开互联网或抓取公开网页 |
 | `/mcp restart|logs|enable|disable|resources` | 管理 MCP Server |
 | `/hitl` | 查看 HITL 审批状态 |
 | `/hitl on\|off` | 开启 / 关闭危险操作审批 |
@@ -97,7 +98,13 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 - **策略层**：路径越界（PathGuard，含 symlink 逃逸）与黑名单命令（CommandGuard）直接拒绝，**不可被审批绕过**
 - **审计日志**：所有工具调用/审批/拒绝记录到 `.xg/audit.log`（JSONL，敏感字段脱敏）
 
-内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command`。
+内置工具：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `web_search` / `web_fetch`。
+
+## Web 只读联网能力
+
+提供 `web_search` 和 `web_fetch` 两个异步内置工具。搜索支持智谱、SerpAPI、SearXNG 三种 provider；抓取只允许公开 HTTP(S) 网页，逐跳校验 DNS 和重定向，拒绝 localhost、内网/保留 IP、非文本资源、超大响应和登录/动态页面。网页内容会标记为外部不可信资料，不会获得新的工具权限。
+
+默认不启用搜索 provider，但 XG 仍可启动；抓取不依赖搜索配置。可通过环境变量或 `.xg/web.json` 配置，常用变量见 `.env.example`。命令行中使用 `/web status`、`/web providers`、`/web search <query>` 和 `/web fetch <url>`。
 
 ## MCP 外部能力
 
@@ -179,6 +186,13 @@ Server 工具会动态注册为 `mcp__{server}__{tool}`，默认经过 HITL 确�
 | `XG_MCP_MAX_TOOLS` | 每个 Server 工具数上限（默认 256） |
 | `XG_MCP_MAX_RESOURCES` | 每个 Server resource 数上限（默认 512） |
 | `XG_MCP_RESOURCE_MAX_CHARS` | 单 resource 文本上限（默认 32000） |
+| `XG_WEB_ENABLED` | Web 工具总开关（默认 on） |
+| `XG_WEB_SEARCH_PROVIDER` | 搜索 provider：none / zhipu / serpapi / searxng |
+| `XG_WEB_TIMEOUT` | 搜索/抓取超时秒数（默认 15） |
+| `XG_WEB_MAX_RESPONSE_BYTES` | 单网页响应字节上限（默认 2 MiB） |
+| `XG_WEB_FETCH_MAX_CHARS` | 单网页正文字符上限（默认 32000） |
+| `XG_WEB_MAX_REDIRECTS` | 最大重定向次数（默认 5） |
+| `XG_WEB_RATE_LIMIT_PER_MINUTE` | 每类 Web 调用每分钟上限（默认 30） |
 
 API Key 只从环境变量 / .env 读取，不写入配置文件；`/config` 显示时脱敏。
 

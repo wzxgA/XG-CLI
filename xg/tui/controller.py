@@ -666,6 +666,10 @@ class SessionController:
         mcp_manager = getattr(self.agent, "mcp_manager", None)
         if mcp_manager is not None:
             await mcp_manager.close()
+        for service_name in ("web_search", "web_fetch"):
+            service = getattr(self.agent, service_name, None)
+            if service is not None:
+                await service.close()
 
     async def startup(self) -> None:
         """Start configured MCP servers without blocking TUI construction."""

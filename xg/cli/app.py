@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -24,6 +25,7 @@ from xg.agent.react import AgentEvent, ReActAgent
 from xg.config.manager import ConfigManager, mask_key
 from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
+from xg.config.web import WebConfigManager
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
 from xg.memory.manager import MemoryManager, MemoryUnavailableError
@@ -32,6 +34,8 @@ from xg.safety.audit import AuditLogger
 from xg.safety.guards import guard_tool_call
 from xg.safety.hitl import ApprovalDecision, HITLPolicy
 from xg.tool.builtin import build_registry
+from xg.web.fetch import WebFetchService
+from xg.web.search import WebSearchService
 
 console = Console()
 
@@ -39,7 +43,7 @@ BANNER = """\
 [XG] Agent CLI v0.1.0
 输入任务开始对话；/plan 先拆解计划再执行，/model 切换 provider 或模型，
 /config 查看/设置配置，/init 初始化项目记忆，/save 保存记忆，
-/memory 管理记忆，/mcp 管理外部能力，/hitl 审批开关，/clear 清空上下文，/exit 退出。
+/memory 管理记忆，/mcp 管理外部能力，/web 查看联网能力，/hitl 审批开关，/clear 清空上下文，/exit 退出。
 """
 
 
@@ -52,11 +56,23 @@ def build_agent(
     client = create_client(settings.api_base, settings.api_key, settings.model)
     audit = AuditLogger(base / ".xg" / "audit.log")
     guard = lambda name, args: guard_tool_call(base, name, args)  # noqa: E731
+    config_manager = config_manager or ConfigManager(project_dir=base / ".xg")
+    web_config_manager = WebConfigManager(
+        user_dir=config_manager.user_dir, project_root=base, env=config_manager.env
+    )
+    web_config = web_config_manager.load()
+    if not settings.web_enabled:
+        web_config = replace(web_config, enabled=False)
+    web_search = WebSearchService(web_config, audit=audit) if web_config.enabled else None
+    web_fetch = WebFetchService(web_config, audit=audit) if web_config.enabled else None
     tools = build_registry(
         base_dir=base,
         max_output_chars=settings.max_tool_output_chars,
         guard=guard,
         audit=audit,
+        web_config=web_config,
+        web_search=web_search,
+        web_fetch=web_fetch,
     )
     hitl = HITLPolicy(enabled=settings.hitl)
     memory_manager = MemoryManager(
@@ -64,7 +80,6 @@ def build_agent(
         project_memory_max_chars=settings.project_memory_max_chars,
         memory_prompt_max_chars=settings.memory_prompt_max_chars,
     )
-    config_manager = config_manager or ConfigManager(project_dir=base / ".xg")
     mcp_config = McpConfigManager(
         user_dir=config_manager.user_dir,
         project_root=base,
@@ -90,7 +105,7 @@ def build_agent(
         max_servers=settings.mcp_max_servers,
         resource_total_chars=settings.mcp_resource_total_chars,
     )
-    return ReActAgent(
+    agent = ReActAgent(
         llm=client,
         tools=tools,
         settings=settings,
@@ -99,6 +114,11 @@ def build_agent(
         memory_manager=memory_manager,
         mcp_manager=mcp_manager,
     )
+    agent.web_config = web_config
+    agent.web_config_manager = web_config_manager
+    agent.web_search = web_search
+    agent.web_fetch = web_fetch
+    return agent
 
 
 class ApprovalUI:
@@ -394,6 +414,10 @@ async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager
     finally:
         if mcp_manager is not None:
             await mcp_manager.close()
+        for service_name in ("web_search", "web_fetch"):
+            service = getattr(agent, service_name, None)
+            if service is not None:
+                await service.close()
 
 
 async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigManager) -> None:
@@ -441,6 +465,10 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
 
                 message, _ = await execute_mcp_command(agent, user_input)
                 should_exit = False
+            elif user_input.split(maxsplit=1)[0].lower() == "/web":
+                from xg.cli.commands import execute_web_command
+
+                message, should_exit = await execute_web_command(agent, user_input)
             else:
                 message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:

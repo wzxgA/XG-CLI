@@ -59,6 +59,15 @@ class Settings:
     mcp_resource_max_chars: int = 32_000
     mcp_resource_total_chars: int = 64_000
     mcp_log_lines: int = 200
+    # 第 8 期：只读 Web 能力限制
+    web_enabled: bool = True
+    web_search_provider: str = "none"
+    web_timeout: float = 15.0
+    web_max_results: int = 5
+    web_max_response_bytes: int = 2_097_152
+    web_fetch_max_chars: int = 32_000
+    web_max_redirects: int = 5
+    web_rate_limit_per_minute: int = 30
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -108,6 +117,14 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         mcp_resource_max_chars=max(256, _get_int(manager.env, "XG_MCP_RESOURCE_MAX_CHARS", 32_000)),
         mcp_resource_total_chars=max(256, _get_int(manager.env, "XG_MCP_RESOURCE_TOTAL_CHARS", 64_000)),
         mcp_log_lines=max(10, _get_int(manager.env, "XG_MCP_LOG_LINES", 200)),
+        web_enabled=manager.env.get("XG_WEB_ENABLED", "on").lower() not in ("off", "0", "false"),
+        web_search_provider=manager.env.get("XG_WEB_SEARCH_PROVIDER", "none").lower() or "none",
+        web_timeout=max(0.1, _get_float(manager.env, "XG_WEB_TIMEOUT", 15.0)),
+        web_max_results=max(1, min(10, _get_int(manager.env, "XG_WEB_MAX_RESULTS", 5))),
+        web_max_response_bytes=max(1024, _get_int(manager.env, "XG_WEB_MAX_RESPONSE_BYTES", 2_097_152)),
+        web_fetch_max_chars=max(256, _get_int(manager.env, "XG_WEB_FETCH_MAX_CHARS", 32_000)),
+        web_max_redirects=max(0, _get_int(manager.env, "XG_WEB_MAX_REDIRECTS", 5)),
+        web_rate_limit_per_minute=max(1, _get_int(manager.env, "XG_WEB_RATE_LIMIT_PER_MINUTE", 30)),
     )
 
 

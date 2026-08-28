@@ -16,6 +16,8 @@ DEFAULT_APPROVAL_LEVELS = {
     "grep_code": "never",
     "write_file": "confirm",
     "execute_command": "always",
+    "web_search": "never",
+    "web_fetch": "never",
 }
 
 

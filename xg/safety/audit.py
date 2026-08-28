@@ -10,6 +10,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 _SENSITIVE_KEY_RE = re.compile(r"^(api_key|apikey|token|authorization|password|secret|private_key)$", re.I)
@@ -20,6 +21,21 @@ _SECRET_ASSIGN_RE = re.compile(
     re.I,
 )
 _REDACTED = "***"
+
+
+def _web_audit_value(key: str, value: Any) -> Any:
+    """Keep Web audit useful without retaining query tokens or full prompts."""
+    if key == "query" and isinstance(value, str):
+        return redact_text(value[:120])
+    if key in {"requested_url", "final_url", "url"} and isinstance(value, str):
+        try:
+            parts = urlsplit(value)
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        except ValueError:
+            return value[:200]
+    if key in {"headers", "header", "authorization", "cookie", "set-cookie"}:
+        return _REDACTED
+    return value
 
 
 def redact_text(value: str) -> str:
@@ -53,7 +69,7 @@ class AuditLogger:
             "session": self.session_id,
             "action": action,
         }
-        entry.update({k: redact(v) for k, v in fields.items()})
+        entry.update({k: redact(_web_audit_value(k, v) if action.startswith("web_") else v) for k, v in fields.items()})
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as f:
@@ -62,6 +78,8 @@ class AuditLogger:
             pass
 
     def tool_call(self, tool: str, args: dict, ok: bool, duration_ms: int, approved: bool = True) -> None:
+        if tool.startswith("web_"):
+            args = {key: _web_audit_value(key, value) for key, value in args.items()}
         self.record(
             "tool_call",
             tool=tool,
