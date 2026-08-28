@@ -38,3 +38,27 @@ for line in sys.stdin:
     await transport.close()
     assert transport.process is None
 
+
+async def test_stdio_disconnect_is_notified_once_when_process_exits():
+    script = r'''
+import sys, time
+time.sleep(0.05)
+sys.exit(7)
+'''
+    config = McpServerConfig(
+        "stdio-exit",
+        "stdio",
+        command=sys.executable,
+        args=("-u", "-c", script),
+        request_timeout=1,
+        shutdown_timeout=1,
+    )
+    transport = StdioTransport(config)
+    disconnects = []
+    transport.set_disconnect_handler(lambda error: disconnects.append(error))
+
+    await transport.connect()
+    await asyncio.sleep(0.2)
+
+    assert len(disconnects) == 1
+    await transport.close()

@@ -25,6 +25,7 @@ class StdioTransport(McpTransport):
         self._next_id = 1
         self._write_lock = asyncio.Lock()
         self._closing = False
+        self._disconnect_notified = False
 
     async def connect(self) -> None:
         if self.process is not None and self.process.returncode is None:
@@ -47,6 +48,7 @@ class StdioTransport(McpTransport):
         except (OSError, ValueError) as exc:
             raise McpUnavailableError(f"无法启动 stdio Server: {exc}") from exc
         self._closing = False
+        self._disconnect_notified = False
         self._reader_task = asyncio.create_task(self._read_stdout(), name=f"mcp-{self.config.name}-stdout")
         self._stderr_task = asyncio.create_task(self._read_stderr(), name=f"mcp-{self.config.name}-stderr")
         self._wait_task = asyncio.create_task(self._watch_process(), name=f"mcp-{self.config.name}-wait")
@@ -133,8 +135,7 @@ class StdioTransport(McpTransport):
         finally:
             if not self._closing:
                 error = McpUnavailableError("MCP stdio 连接已关闭")
-                self._fail_pending(error)
-                await self.dispatch_disconnect(error)
+                await self._notify_disconnect(error)
 
     async def _read_stderr(self) -> None:
         process = self.process
@@ -157,8 +158,20 @@ class StdioTransport(McpTransport):
         if not self._closing:
             self.log(f"process exited with code {code}")
             error = McpUnavailableError(f"MCP Server 已退出（code={code}）")
-            self._fail_pending(error)
-            await self.dispatch_disconnect(error)
+            await self._notify_disconnect(error)
+
+    async def _notify_disconnect(self, error: Exception) -> None:
+        """Notify the owner once when the child connection is lost.
+
+        Both stdout EOF and process.wait() observe the same child exit. The
+        first observer owns failure propagation; the other observer must not
+        emit a duplicate lifecycle event.
+        """
+        if self._closing or self._disconnect_notified:
+            return
+        self._disconnect_notified = True
+        self._fail_pending(error)
+        await self.dispatch_disconnect(error)
 
     def _fail_pending(self, error: Exception) -> None:
         for future in list(self._pending.values()):

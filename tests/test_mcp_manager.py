@@ -67,6 +67,15 @@ class FakeTransport(McpTransport):
         self.closed = True
 
 
+class DisconnectingTransport(FakeTransport):
+    async def request(self, method, params=None):
+        if method == "initialize":
+            error = McpUnavailableError("fixture connection closed")
+            await self.dispatch_disconnect(error)
+            raise error
+        return await super().request(method, params)
+
+
 def _write_config(tmp_path, servers):
     path = tmp_path / ".xg" / "mcp.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +169,29 @@ async def test_one_server_failure_does_not_break_healthy_server(tmp_path):
     assert states == {"bad": "unavailable", "good": "ready"}
     assert "mcp__good__echo_value" in registry.names()
     assert "mcp__bad__echo_value" not in registry.names()
+    await manager.close()
+
+
+async def test_startup_disconnect_is_reported_once(tmp_path):
+    _write_config(tmp_path, {"demo": {"transport": "stdio", "command": "fake"}})
+    registry = ToolRegistry()
+    events = []
+
+    def factory(config):
+        return DisconnectingTransport(config)
+
+    manager = McpManager(
+        registry,
+        McpConfigManager(user_dir=tmp_path / "user", project_root=tmp_path, env={}),
+        transport_factory=factory,
+    )
+    manager.add_listener(lambda event: events.append(event))
+
+    await manager.start_all()
+
+    unavailable = [event for event in events if event.kind == "mcp_server_unavailable"]
+    assert len(unavailable) == 1
+    assert manager.snapshots()[0].status == "unavailable"
     await manager.close()
 
 

@@ -172,22 +172,10 @@ class McpManager:
                     runtime.transport = None
                 raise
             except Exception as exc:
-                runtime.status = "unavailable"
-                runtime.last_error = self._safe_error(exc)
-                self.registry.unregister_source(self._source(name))
-                self._clear_hitl(name)
-                try:
-                    await transport.close()
-                except Exception:
-                    pass
-                runtime.transport = None
-                self._audit(
-                    "mcp_server_unavailable",
-                    server=name,
-                    transport=runtime.config.transport,
-                    error=runtime.last_error,
-                )
-                await self._emit(McpEvent("mcp_server_unavailable", name, runtime.last_error))
+                # A transport can report the same failure while initialize()
+                # is waiting. Route this path through the shared handler so
+                # the disconnect callback and startup exception are deduped.
+                await self._mark_unavailable(runtime, exc)
                 return False
             runtime.status = "ready"
             runtime.started_at = datetime.now()
