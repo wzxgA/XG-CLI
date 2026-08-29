@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 
 TEAM_MAX_RETRIES = 2
+TEAM_MAX_RECOVERIES = 1
+TEAM_RECOVERY_STEPS = 10
 TEAM_RESULT_LIMIT = 2000
 TEAM_ARTIFACT_LIMIT = 4000
 TEAM_REVIEW_LIMIT = 4000
@@ -129,6 +131,7 @@ class Artifact:
     checksum: str = ""
     producer_agent_id: str = ""
     version: int = 1
+    attempt: int = 1
     parent_artifacts: list[str] = field(default_factory=list)
     verification_records: list[str] = field(default_factory=list)
 
@@ -162,6 +165,7 @@ class TeamTask:
     artifacts: list[str] = field(default_factory=list)
     failure_category: str = ""
     blocked_by: list[str] = field(default_factory=list)
+    recovery_attempts: int = 0
 
 
 @dataclass
@@ -183,6 +187,7 @@ class TeamEvent:
         "replanned", "batch_started", "task_started", "task_done",
         "task_failed", "agent_started", "agent_done", "agent_failed",
         "task_blocked",
+        "task_retry_started",
         "subtask_event", "artifact_produced", "task_review_started",
         "task_review_done", "repair_requested", "team_done", "team_failed",
         "cancelled",
@@ -198,6 +203,13 @@ class TeamEvent:
     agent_event: AgentEvent | None = None
     message: str = ""
     usage: Usage | None = None
+    attempt: int = 0
+    effective_steps: int = 0
+    failure_category: str = ""
+    retryable: bool = False
+    previous_steps: int = 0
+    retry_steps: int = 0
+    preserved_artifacts: list[str] = field(default_factory=list)
 
 
 class Planner(Protocol):
@@ -391,35 +403,41 @@ def default_profiles() -> dict[str, AgentProfile]:
             name="coder",
             system_prompt="你是一名谨慎的代码实现 Agent。只处理当前任务，先阅读相关代码，再实现并验证；不要处理其他任务。",
             allowed_tools=writable,
+            max_steps=12,
             can_write=True,
         ),
         "researcher": AgentProfile(
             name="researcher",
             system_prompt="你是一名研究 Agent。只读取和分析资料，输出有来源的结论，不修改项目文件。",
             allowed_tools=readonly,
+            max_steps=20,
         ),
         "tester": AgentProfile(
             name="tester",
             system_prompt="你是一名测试 Agent。负责编写或执行当前任务的测试，并准确报告测试命令和结果。",
             allowed_tools=writable,
+            max_steps=12,
             can_write=True,
         ),
         "reviewer": AgentProfile(
             name="reviewer",
             system_prompt=TEAM_REVIEWER_PROMPT,
             allowed_tools=readonly,
+            max_steps=10,
             is_reviewer=True,
         ),
         "repairer": AgentProfile(
             name="repairer",
             system_prompt="你是一名定向修复 Agent。只修复 Reviewer 列出的 required_fixes，不扩大任务范围。",
             allowed_tools=writable,
+            max_steps=12,
             can_write=True,
         ),
         "synthesizer": AgentProfile(
             name="synthesizer",
             system_prompt="你是一名结果汇总 Agent。只汇总已经验证的任务产物，不修改项目文件。",
             allowed_tools=all_tools,
+            max_steps=8,
         ),
     }
 
@@ -820,20 +838,65 @@ class TeamExecutor:
         task.status = "running"
         self._audit("team_task_started", team_id=self.team_id, task_id=task.id, role=task.owner_role)
         queue.put_nowait(TeamEvent(kind="task_started", team_id=self.team_id, plan=plan, task=task, role=task.owner_role))
-        result, artifacts, agent_id, error = await self._execute_worker(plan, task, queue)
+        profile = self.profiles.get(task.owner_role) or self.profiles["coder"]
+        result, artifacts, agent_id, error, failure_category = await self._execute_worker(
+            plan, task, queue, attempt=1
+        )
+        first_agent_id = agent_id
         if error:
+            queue.put_nowait(TeamEvent(
+                kind="agent_failed", team_id=self.team_id, plan=plan, task=task,
+                agent_id=agent_id, role=task.owner_role, attempt=1,
+                failure_category=failure_category, message=error,
+            ))
+        max_recoveries = max(0, getattr(self.settings, "team_max_recoveries", TEAM_MAX_RECOVERIES))
+        if error and task.recovery_attempts < max_recoveries and self._should_recover(task, profile, failure_category):
+            recovery_steps = self._recovery_steps()
+            task.recovery_attempts += 1
+            preserved_ids = [artifact.id for artifact in artifacts]
+            await self._publish_artifacts(plan, task, artifacts, agent_id, queue, attempt=1)
+            queue.put_nowait(TeamEvent(
+                kind="task_retry_started", team_id=self.team_id, plan=plan, task=task,
+                role=task.owner_role, attempt=task.recovery_attempts + 1,
+                failure_category=failure_category, retryable=True,
+                previous_steps=self._effective_steps(profile), retry_steps=recovery_steps,
+                preserved_artifacts=preserved_ids,
+                message="只读任务达到步数上限，使用已有证据进行一次受控恢复",
+            ))
+            recovery_summary = self._recovery_summary(task, artifacts)
+            result, recovery_artifacts, recovery_agent_id, recovery_error, recovery_category = await self._execute_worker(
+                plan, task, queue, attempt=task.recovery_attempts + 1,
+                steps_override=recovery_steps, recovery_summary=recovery_summary,
+            )
+            artifacts.extend(recovery_artifacts)
+            agent_id = recovery_agent_id
+            if recovery_error:
+                error = f"{error}；恢复执行仍失败：{recovery_error}"
+                failure_category = recovery_category or failure_category
+            else:
+                error = ""
+                failure_category = ""
+        if error:
+            await self._publish_artifacts(plan, task, artifacts, agent_id, queue, attempt=task.recovery_attempts + 1)
             task.status = "failed"
             task.result = error[:TEAM_RESULT_LIMIT]
-            task.failure_category = "execution_failed"
+            task.failure_category = failure_category or "execution_failed"
             self._audit("team_task_failed", team_id=self.team_id, task_id=task.id, role=task.owner_role, error=task.result)
-            queue.put_nowait(TeamEvent(kind="agent_failed", team_id=self.team_id, plan=plan, task=task, agent_id=agent_id, role=task.owner_role, message=task.result))
-            queue.put_nowait(TeamEvent(kind="task_failed", team_id=self.team_id, plan=plan, task=task, message=task.result))
+            if agent_id != first_agent_id:
+                queue.put_nowait(TeamEvent(
+                    kind="agent_failed", team_id=self.team_id, plan=plan, task=task,
+                    agent_id=agent_id, role=task.owner_role,
+                    attempt=task.recovery_attempts + 1,
+                    failure_category=task.failure_category, message=task.result,
+                ))
+            queue.put_nowait(TeamEvent(
+                kind="task_failed", team_id=self.team_id, plan=plan, task=task,
+                agent_id=agent_id, role=task.owner_role, failure_category=task.failure_category,
+                attempt=task.recovery_attempts + 1, retryable=False, message=task.result,
+            ))
             return
         task.result = result[:TEAM_RESULT_LIMIT]
-        for artifact in artifacts:
-            await self.artifacts.publish(artifact)
-            task.artifacts.append(artifact.id)
-            queue.put_nowait(TeamEvent(kind="artifact_produced", team_id=self.team_id, plan=plan, task=task, agent_id=agent_id, role=task.owner_role, artifact=artifact))
+        await self._publish_artifacts(plan, task, artifacts, agent_id, queue, attempt=task.recovery_attempts + 1)
         try:
             review = await self._review(plan, task, artifacts, queue)
         except Exception as exc:
@@ -861,14 +924,16 @@ class TeamExecutor:
                 blocked_by=[],
             )
             queue.put_nowait(TeamEvent(kind="repair_requested", team_id=self.team_id, plan=plan, task=repair, role="repairer", message=repair.description))
-            repair_result, repair_artifacts, repair_agent_id, repair_error = await self._execute_worker(plan, repair, queue)
+            repair_result, repair_artifacts, repair_agent_id, repair_error, repair_category = await self._execute_worker(plan, repair, queue, attempt=attempt)
             if repair_error:
+                queue.put_nowait(TeamEvent(
+                    kind="agent_failed", team_id=self.team_id, plan=plan, task=repair,
+                    agent_id=repair_agent_id, role="repairer", attempt=attempt,
+                    failure_category=repair_category or "execution_failed", message=repair_error,
+                ))
                 review = ReviewResult(task.id, "fail", [repair_error], [repair_error], [])
             else:
-                for artifact in repair_artifacts:
-                    await self.artifacts.publish(artifact)
-                    task.artifacts.append(artifact.id)
-                    queue.put_nowait(TeamEvent(kind="artifact_produced", team_id=self.team_id, plan=plan, task=repair, agent_id=repair_agent_id, role="repairer", artifact=artifact))
+                await self._publish_artifacts(plan, repair, repair_artifacts, repair_agent_id, queue, attempt=attempt)
                 task.result = repair_result[:TEAM_RESULT_LIMIT]
                 try:
                     review = await self._review(plan, task, repair_artifacts, queue)
@@ -879,19 +944,94 @@ class TeamExecutor:
                 queue.put_nowait(TeamEvent(kind="task_done", team_id=self.team_id, plan=plan, task=task, message=f"修复后通过：{task.result}"))
                 return
         task.status = "failed"
+        task.failure_category = "review_failed"
         task.result = "; ".join(review.findings or review.required_fixes)[:TEAM_RESULT_LIMIT] or "审查未通过且修复次数已用尽"
         self._audit("team_task_failed", team_id=self.team_id, task_id=task.id, role=task.owner_role, error=task.result)
         queue.put_nowait(TeamEvent(kind="task_failed", team_id=self.team_id, plan=plan, task=task, review=review, message=task.result))
 
+    def _effective_steps(self, profile: AgentProfile) -> int:
+        configured = getattr(self.settings, f"team_{profile.name}_steps", None)
+        candidate = configured or profile.max_steps or self.settings.plan_subtask_steps
+        maximum = max(1, getattr(self.settings, "team_max_steps", 40))
+        return max(1, min(int(candidate), maximum))
+
+    def _recovery_steps(self) -> int:
+        maximum = max(1, getattr(self.settings, "team_max_steps", 40))
+        configured = max(1, getattr(self.settings, "team_recovery_steps", TEAM_RECOVERY_STEPS))
+        return min(configured, maximum)
+
+    @staticmethod
+    def _should_recover(task: TeamTask, profile: AgentProfile, failure_category: str) -> bool:
+        if failure_category != "step_limit" or profile.name not in READ_DISCOVERY_ROLES:
+            return False
+        if profile.can_write or "write_file" in profile.allowed_tools or "execute_command" in profile.allowed_tools:
+            return False
+        if any(claim.access == "write" for claim in task.resource_claims):
+            return False
+        if task.resource_scope_mode not in {"targeted", "read_discovery"}:
+            return False
+        if task.allowed_tools and any(tool not in READ_DISCOVERY_TOOLS for tool in task.allowed_tools):
+            return False
+        return True
+
+    @staticmethod
+    def _recovery_summary(task: TeamTask, artifacts: list[Artifact]) -> str:
+        evidence = "\n".join(
+            f"- {artifact.id}: {artifact.uri} — {artifact.summary[:600]}"
+            for artifact in artifacts
+        ) or "- 暂无可复用 Artifact"
+        criteria = "\n".join(f"- {item}" for item in task.acceptance_criteria) or "- 未提供验收标准"
+        return (
+            "上一次只读执行已达到步数上限。请复用以下已有证据，只补齐未完成的验收项，"
+            "不要重复扫描已经确认的内容，也不要修改项目文件。\n"
+            f"任务验收标准：\n{criteria}\n已有证据：\n{evidence}"
+        )
+
+    async def _publish_artifacts(
+        self,
+        plan: TeamPlan,
+        task: TeamTask,
+        artifacts: list[Artifact],
+        agent_id: str,
+        queue: asyncio.Queue[TeamEvent | None],
+        *,
+        attempt: int,
+    ) -> None:
+        existing = set(task.artifacts)
+        for artifact in artifacts:
+            if artifact.id in existing:
+                continue
+            artifact.attempt = attempt
+            await self.artifacts.publish(artifact)
+            task.artifacts.append(artifact.id)
+            existing.add(artifact.id)
+            queue.put_nowait(TeamEvent(
+                kind="artifact_produced", team_id=self.team_id, plan=plan, task=task,
+                agent_id=agent_id, role=task.owner_role, artifact=artifact, attempt=attempt,
+            ))
+
     async def _execute_worker(
-        self, plan: TeamPlan, task: TeamTask, queue: asyncio.Queue[TeamEvent | None]
-    ) -> tuple[str, list[Artifact], str, str]:
+        self,
+        plan: TeamPlan,
+        task: TeamTask,
+        queue: asyncio.Queue[TeamEvent | None],
+        *,
+        attempt: int = 1,
+        steps_override: int | None = None,
+        recovery_summary: str = "",
+    ) -> tuple[str, list[Artifact], str, str, str]:
         profile = self.profiles.get(task.owner_role) or self.profiles["coder"]
         agent_id = f"agent-{uuid.uuid4().hex[:8]}"
-        queue.put_nowait(TeamEvent(kind="agent_started", team_id=self.team_id, plan=plan, task=task, agent_id=agent_id, role=profile.name))
+        effective_steps = steps_override or self._effective_steps(profile)
+        queue.put_nowait(TeamEvent(
+            kind="agent_started", team_id=self.team_id, plan=plan, task=task,
+            agent_id=agent_id, role=profile.name, attempt=attempt,
+            effective_steps=effective_steps,
+            message=f"预算 {effective_steps} 步" if attempt == 1 else f"恢复预算 {effective_steps} 步",
+        ))
         sub_settings = replace(
             self.settings,
-            tool_steps=profile.max_steps or self.settings.plan_subtask_steps,
+            tool_steps=effective_steps,
         )
         scoped_tools = ScopedToolRegistry(self.tools, task, self.project_root, profile)
         prompt = self._worker_system_prompt(plan, task, profile)
@@ -910,7 +1050,7 @@ class TeamExecutor:
             )
         artifacts: list[Artifact] = []
         try:
-            async for event in agent.run(self._worker_user_prompt(task)):
+            async for event in agent.run(self._worker_user_prompt(task, recovery_summary=recovery_summary)):
                 if event.kind in {
                     "thinking", "content", "tool_call", "approval", "tool_result",
                     "context_compacted", "context_warning", "context_usage", "usage",
@@ -927,14 +1067,19 @@ class TeamExecutor:
                             verification_records=["tool_result:ok" if result.ok else "tool_result:failed"],
                         ))
                 elif event.kind == "error":
+                    return "", artifacts, agent_id, event.text or "Worker 执行失败", "execution_failed"
                     return "", artifacts, agent_id, event.text or "Worker 执行失败"
                 elif event.kind == "step_limit":
+                    return "", artifacts, agent_id, f"达到 Worker 步数上限（{sub_settings.tool_steps}）", "step_limit"
                     return "", artifacts, agent_id, f"达到 Worker 步数上限（{sub_settings.tool_steps}）"
                 elif event.kind in {"budget_exceeded", "context_overflow"}:
+                    category = "context_overflow" if event.kind == "context_overflow" else "budget_exceeded"
+                    return "", artifacts, agent_id, event.text or "Worker 上下文或预算超限", category
                     return "", artifacts, agent_id, event.text or "Worker 上下文超限"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            return "", artifacts, agent_id, f"{type(exc).__name__}: {exc}", "worker_exception"
             return "", artifacts, agent_id, f"{type(exc).__name__}: {exc}"
         final = next((message.content for message in reversed(agent.messages) if message.role == "assistant" and message.content.strip()), "")
         artifacts.append(Artifact(
@@ -942,7 +1087,7 @@ class TeamExecutor:
             summary=final[:TEAM_ARTIFACT_LIMIT], producer_agent_id=agent_id,
         ))
         queue.put_nowait(TeamEvent(kind="agent_done", team_id=self.team_id, plan=plan, task=task, agent_id=agent_id, role=profile.name, message=final[:TEAM_RESULT_LIMIT]))
-        return final, artifacts, agent_id, ""
+        return final, artifacts, agent_id, "", ""
 
     async def _review(
         self, plan: TeamPlan, task: TeamTask, artifacts: list[Artifact], queue: asyncio.Queue[TeamEvent | None]
@@ -1004,8 +1149,9 @@ class TeamExecutor:
         return "\n".join(parts)
 
     @staticmethod
-    def _worker_user_prompt(task: TeamTask) -> str:
-        return f"请执行任务 {task.id}（{task.title}）：\n{task.description}\n完成后简要汇报结果和验证证据，只处理这个任务。"
+    def _worker_user_prompt(task: TeamTask, *, recovery_summary: str = "") -> str:
+        prompt = f"请执行任务 {task.id}（{task.title}）：\n{task.description}\n完成后简要汇报结果和验证证据，只处理这个任务。"
+        return f"{prompt}\n\n{recovery_summary}" if recovery_summary else prompt
 
     async def _llm_text(self, messages: list[Message]) -> str:
         parts: list[str] = []

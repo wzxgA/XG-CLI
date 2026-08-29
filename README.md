@@ -205,6 +205,15 @@ Server 工具会动态注册为 `mcp__{server}__{tool}`，默认经过 HITL 确�
 | `XG_PLAN_MAX_FAILURES` | 计划级允许失败数（默认 3，超出终止剩余轮次） |
 | `XG_TEAM_MAX_AGENTS` | `/team` 同时运行的 Agent 数量上限（默认 4） |
 | `XG_TEAM_MAX_REPAIRS` | `/team` 单个任务的定向修复次数上限（默认 2） |
+| `XG_TEAM_RESEARCHER_STEPS` | `/team` researcher 步数覆盖值（默认使用角色值 20） |
+| `XG_TEAM_REVIEWER_STEPS` | `/team` reviewer 步数覆盖值（默认使用角色值 10） |
+| `XG_TEAM_CODER_STEPS` | `/team` coder 步数覆盖值（默认使用角色值 12） |
+| `XG_TEAM_TESTER_STEPS` | `/team` tester 步数覆盖值（默认使用角色值 12） |
+| `XG_TEAM_REPAIRER_STEPS` | `/team` repairer 步数覆盖值（默认使用角色值 12） |
+| `XG_TEAM_SYNTHESIZER_STEPS` | `/team` synthesizer 步数覆盖值（默认使用角色值 8） |
+| `XG_TEAM_MAX_STEPS` | `/team` 单个 Agent 的步数硬上限（默认 40） |
+| `XG_TEAM_RECOVERY_STEPS` | `/team` 只读任务恢复执行的步数（默认 10） |
+| `XG_TEAM_MAX_RECOVERIES` | `/team` 只读任务自动恢复次数（默认 1） |
 | `XG_TEAM_REVIEW` | `/team` 任务级证据审查开关（on 默认） |
 | `XG_MCP_ENABLED` | MCP 总开关（on 默认） |
 | `XG_MCP_STARTUP_TIMEOUT` | MCP Server 初始化超时秒数（默认 15） |

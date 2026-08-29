@@ -21,7 +21,7 @@ from xg.agent.team import (
     parse_team_tasks,
 )
 from xg.llm.client import LlmClient
-from xg.llm.types import StreamEvent, ToolCall, ToolResult
+from xg.llm.types import Message, StreamEvent, ToolCall, ToolResult
 from xg.tool.builtin import build_registry
 from xg.tui.reducer import reduce_team_event
 from xg.tui.plan_renderables import PlanReviewCard
@@ -462,3 +462,107 @@ def test_agent_group_card_starts_collapsed_and_uses_group_identity():
     from rich.console import Console
     Console(file=output, width=120).print(agent_group_renderable(group))
     assert "coder/t1" in output.getvalue()
+
+
+async def test_readonly_step_limit_recovers_once_with_preserved_artifacts(tmp_path, settings):
+    plan_json = json.dumps({"tasks": [{
+        "id": "t1", "title": "调研项目", "description": "读取项目结构",
+        "deps": [], "owner_role": "researcher", "allowed_tools": ["list_dir"],
+        "resource_scope_mode": "read_discovery",
+        "acceptance_criteria": ["输出项目结构"],
+    }]}, ensure_ascii=False)
+
+    class PlannerClient(LlmClient):
+        async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+            if messages and "团队任务规划器" in messages[0].content:
+                yield StreamEvent(kind="content", text=plan_json)
+                yield StreamEvent(kind="done")
+
+    class StepAgent:
+        def __init__(self, recovery: bool):
+            self.recovery = recovery
+            self.messages = [Message(role="assistant", content="恢复后的调研结果" if recovery else "部分结果")]
+
+        async def run(self, prompt):
+            if not self.recovery:
+                yield AgentEvent(kind="tool_result", tool_result=ToolResult(
+                    tool_call_id="call-t1-list", name="list_dir", ok=True, output="[dir] src"
+                ))
+                yield AgentEvent(kind="step_limit")
+                return
+            yield AgentEvent(kind="content", text="补齐验收项")
+            yield AgentEvent(kind="done")
+
+    class Factory:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, profile, task):
+            self.calls += 1
+            return StepAgent(recovery=self.calls == 2)
+
+    async def review(task: TeamTask, artifacts):
+        return ReviewResult(task.id, "pass", [], [], ["已有证据"])
+
+    settings.team_recovery_steps = 3
+    settings.team_max_recoveries = 1
+    factory = Factory()
+    executor = TeamExecutor(
+        llm=PlannerClient(), tools=build_registry(base_dir=tmp_path), settings=settings,
+        reviewer=approve_team, task_reviewer=review, agent_factory=factory,
+        project_root=tmp_path,
+    )
+
+    events = await collect(executor, "调研项目")
+
+    task = next(event.plan.task_by_id("t1") for event in events if event.kind == "team_done")
+    retry = next(event for event in events if event.kind == "task_retry_started")
+    starts = [event for event in events if event.kind == "agent_started"]
+    assert task.status == "done"
+    assert factory.calls == 2
+    assert [event.attempt for event in starts] == [1, 2]
+    assert [event.effective_steps for event in starts] == [20, 3]
+    assert retry.preserved_artifacts
+    assert len(task.artifacts) >= 1
+    assert not any(event.kind == "task_failed" for event in events)
+
+
+async def test_writable_step_limit_is_not_automatically_retried(tmp_path, settings):
+    plan_json = json.dumps({"tasks": [{
+        "id": "t1", "title": "实现功能", "description": "修改项目",
+        "deps": [], "owner_role": "coder", "allowed_tools": ["write_file"],
+        "resource_claims": [{"pattern": "src/**", "access": "write"}],
+        "acceptance_criteria": ["完成修改"],
+    }]}, ensure_ascii=False)
+
+    class PlannerClient(LlmClient):
+        async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+            if messages and "团队任务规划器" in messages[0].content:
+                yield StreamEvent(kind="content", text=plan_json)
+                yield StreamEvent(kind="done")
+
+    class FailingAgent:
+        messages = []
+
+        async def run(self, prompt):
+            yield AgentEvent(kind="step_limit")
+
+    class Factory:
+        calls = 0
+
+        def create(self, profile, task):
+            self.calls += 1
+            return FailingAgent()
+
+    factory = Factory()
+    executor = TeamExecutor(
+        llm=PlannerClient(), tools=build_registry(base_dir=tmp_path), settings=settings,
+        reviewer=approve_team, agent_factory=factory, project_root=tmp_path,
+    )
+
+    events = await collect(executor, "实现功能")
+
+    failed = next(event for event in events if event.kind == "task_failed")
+    assert factory.calls == 1
+    assert failed.failure_category == "step_limit"
+    assert not any(event.kind == "task_retry_started" for event in events)

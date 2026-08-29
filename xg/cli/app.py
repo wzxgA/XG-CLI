@@ -430,6 +430,12 @@ def _render_team_event(event: TeamEvent) -> None:
         console.print(Text(f"按反馈重新规划团队：{event.message}", style="dim"))
     elif event.kind == "batch_started":
         console.print(Text(f"── {event.message}: {', '.join(event.batch)}", style="cyan"))
+    elif event.kind == "task_retry_started" and task:
+        console.print(Text(
+            f"RETRY [{event.role or task.owner_role}/{task.id}] 第 {event.attempt} 次："
+            f"预算 {event.retry_steps} 步，保留 Artifact {len(event.preserved_artifacts)} 个",
+            style="yellow",
+        ))
     elif event.kind in {"task_started", "agent_started"} and task:
         console.print(Text(f"▶ [{event.role}/{task.id}] {task.title}", style="dim"))
     elif event.kind == "subtask_event" and task and event.agent_event:
@@ -450,7 +456,8 @@ def _render_team_event(event: TeamEvent) -> None:
     elif event.kind == "task_done" and task:
         console.print(Text(f"OK [{task.owner_role}/{task.id}]: {event.message[:200]}", style="green"))
     elif event.kind in {"task_failed", "agent_failed"} and task:
-        console.print(Text(f"FAIL [{event.role or task.owner_role}/{task.id}]: {event.message[:240]}", style="red"))
+        category = f" ({event.failure_category})" if event.failure_category else ""
+        console.print(Text(f"FAIL [{event.role or task.owner_role}/{task.id}]{category}: {event.message[:240]}", style="red"))
     elif event.kind == "team_done":
         console.print(Panel(Text(event.message), title="team_done", border_style="green"))
     elif event.kind == "team_failed":

@@ -50,6 +50,16 @@ class Settings:
     # 第 10 期：Team 协作限制
     team_max_agents: int = 4
     team_max_repairs: int = 2
+    # Team Worker role-specific execution budgets. None keeps the legacy fallback.
+    team_researcher_steps: int | None = None
+    team_reviewer_steps: int | None = None
+    team_coder_steps: int | None = None
+    team_tester_steps: int | None = None
+    team_repairer_steps: int | None = None
+    team_synthesizer_steps: int | None = None
+    team_max_steps: int = 40
+    team_recovery_steps: int = 10
+    team_max_recoveries: int = 1
     team_review: bool = True
     # Textual TUI 最大刷新频率（第 6 期）
     tui_refresh_fps: int = 20
@@ -133,6 +143,15 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
         team_max_agents=max(1, _get_int(manager.env, "XG_TEAM_MAX_AGENTS", 4)),
         team_max_repairs=max(0, _get_int(manager.env, "XG_TEAM_MAX_REPAIRS", 2)),
+        team_researcher_steps=_get_optional_positive_int(manager.env, "XG_TEAM_RESEARCHER_STEPS"),
+        team_reviewer_steps=_get_optional_positive_int(manager.env, "XG_TEAM_REVIEWER_STEPS"),
+        team_coder_steps=_get_optional_positive_int(manager.env, "XG_TEAM_CODER_STEPS"),
+        team_tester_steps=_get_optional_positive_int(manager.env, "XG_TEAM_TESTER_STEPS"),
+        team_repairer_steps=_get_optional_positive_int(manager.env, "XG_TEAM_REPAIRER_STEPS"),
+        team_synthesizer_steps=_get_optional_positive_int(manager.env, "XG_TEAM_SYNTHESIZER_STEPS"),
+        team_max_steps=max(1, _get_int(manager.env, "XG_TEAM_MAX_STEPS", 40)),
+        team_recovery_steps=max(1, _get_int(manager.env, "XG_TEAM_RECOVERY_STEPS", 10)),
+        team_max_recoveries=max(0, _get_int(manager.env, "XG_TEAM_MAX_RECOVERIES", 1)),
         team_review=manager.env.get("XG_TEAM_REVIEW", "on").lower() not in ("off", "0", "false"),
         tui_refresh_fps=max(5, min(60, _get_int(manager.env, "XG_TUI_REFRESH_FPS", 20))),
         ui_language=normalize_language(manager.get_ui_language()),
@@ -183,6 +202,17 @@ def _get_int(env: dict[str, str], name: str, default: int) -> int:
         return int(raw) if raw else default
     except ValueError:
         return default
+
+
+def _get_optional_positive_int(env: dict[str, str], name: str) -> int | None:
+    raw = env.get(name, "")
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def _clamp_float(value: float, low: float, high: float) -> float:

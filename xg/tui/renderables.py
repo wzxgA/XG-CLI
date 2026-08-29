@@ -102,6 +102,12 @@ def agent_group_renderable(group: AgentGroupState):
     identity = f"{group.role}/{group.task_id}" if group.task_id else group.role
     stats = f"工具 {group.tool_count} · Artifact {group.artifact_count}"
     header = f"{marker} [{identity}] {group.task_title} · {_agent_group_status(group.status)} · {group.resource_scope_mode} · {stats}"
+    if group.effective_steps:
+        header += f" · 预算 {group.effective_steps} 步"
+    if group.attempt > 1:
+        header += f" · 第 {group.attempt} 次"
+    if group.failure_category:
+        header += f" · {group.failure_category}"
     if group.repair_attempt:
         header += f" · 修复 {group.repair_attempt}"
     latest = group.latest_error or group.latest_summary

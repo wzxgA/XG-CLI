@@ -83,6 +83,9 @@ def _ensure_agent_group(
         task_id=task_id,
         task_title=task_title or task_id or group_role,
         resource_scope_mode=getattr(task, "resource_scope_mode", "targeted"),
+        attempt=event.attempt,
+        effective_steps=event.effective_steps,
+        failure_category=event.failure_category,
     )
     state.agent_groups[key] = group
     state.agent_group_order.append(key)
@@ -727,6 +730,19 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
                 ),
             )
         return out
+    if kind == "task_retry_started" and event.task:
+        _append(out, TranscriptItem(
+            id=f"team-task-retry-{len(out.transcript)}", kind="system",
+            text=(
+                f"[{event.role or event.task.owner_role}/{event.task.id}] 恢复执行："
+                f"第 {event.attempt} 次，预算 {event.retry_steps} 步；"
+                f"已保留 Artifact {len(event.preserved_artifacts)} 个"
+            ),
+            turn_id=turn_id, trace_id=f"{turn_id}:{event.task.id}:retry",
+        ))
+        out.notification = event.message
+        out.notification_level = "warning"
+        return out
     if kind in {"task_started", "task_done", "task_failed", "task_blocked"} and event.task:
         task_status = {
             "task_started": "running",
@@ -773,6 +789,9 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
         out.agent_groups[group_id] = replace(
             group,
             status="repairing" if event.role == "repairer" else "running",
+            attempt=event.attempt or group.attempt,
+            effective_steps=event.effective_steps or group.effective_steps,
+            failure_category=event.failure_category or group.failure_category,
             latest_summary="Agent 已启动",
         )
         return out
@@ -793,6 +812,9 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
         out.agent_groups[group_id] = replace(
             group,
             status="failed",
+            attempt=event.attempt or group.attempt,
+            effective_steps=event.effective_steps or group.effective_steps,
+            failure_category=event.failure_category or group.failure_category,
             latest_error=event.message[:240] or "Agent 执行失败",
         )
         return out

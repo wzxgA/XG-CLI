@@ -66,6 +66,9 @@ class AgentGroupState:
     tool_count: int = 0
     artifact_count: int = 0
     repair_attempt: int = 0
+    attempt: int = 0
+    effective_steps: int = 0
+    failure_category: str = ""
     latest_summary: str = ""
     latest_error: str = ""
     entries: list[TranscriptItem] = field(default_factory=list)
