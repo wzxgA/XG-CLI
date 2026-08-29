@@ -90,6 +90,13 @@ def _task_summary_renderable(plan: Plan | TeamPlan, ordered_ids: tuple[str, ...]
                 Text(f"  描述：{task.description or '暂无描述'}", style="dim"),
                 Text(f"  依赖：{deps}", style="dim"),
             ])
+            mode = getattr(task, "resource_scope_mode", "")
+            if mode:
+                renderables.append(Text(f"  资源模式：{mode}", style="dim"))
+            for claim in getattr(task, "resource_claims", ()):
+                renderables.append(
+                    Text(f"  资源声明：{claim.access} {claim.pattern}", style="dim")
+                )
     return Group(*renderables)
 
 

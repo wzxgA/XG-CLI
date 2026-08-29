@@ -28,6 +28,8 @@ def _trace_status(item: TranscriptItem) -> str:
         "running": "执行中",
         "success": "成功",
         "failed": "失败",
+        "blocked": "已阻塞",
+        "skipped": "已跳过",
         "cancelled": "已取消",
         "done": "已完成",
     }.get(item.status, item.status)
@@ -72,6 +74,8 @@ def trace_renderable(item: TranscriptItem):
         "running": "yellow",
         "success": "green",
         "failed": "red",
+        "blocked": "yellow",
+        "skipped": "cyan",
         "cancelled": "yellow",
     }.get(item.status, "cyan")
     title = f"{marker} {label} · {_trace_status(item)}"
@@ -86,6 +90,8 @@ def _agent_group_status(status: str) -> str:
         "repairing": "修复中",
         "done": "已完成",
         "failed": "失败",
+        "blocked": "已阻塞",
+        "skipped": "已跳过",
         "cancelled": "已取消",
     }.get(status, status or "未知")
 
@@ -95,7 +101,7 @@ def agent_group_renderable(group: AgentGroupState):
     marker = "▶" if group.collapsed else "▼"
     identity = f"{group.role}/{group.task_id}" if group.task_id else group.role
     stats = f"工具 {group.tool_count} · Artifact {group.artifact_count}"
-    header = f"{marker} [{identity}] {group.task_title} · {_agent_group_status(group.status)} · {stats}"
+    header = f"{marker} [{identity}] {group.task_title} · {_agent_group_status(group.status)} · {group.resource_scope_mode} · {stats}"
     if group.repair_attempt:
         header += f" · 修复 {group.repair_attempt}"
     latest = group.latest_error or group.latest_summary
@@ -113,6 +119,8 @@ def agent_group_renderable(group: AgentGroupState):
         "repairing": "magenta",
         "done": "green",
         "failed": "red",
+        "blocked": "yellow",
+        "skipped": "cyan",
         "cancelled": "yellow",
     }.get(group.status, "cyan")
     return Panel(Group(*parts), title="Agent", border_style=style)
@@ -223,6 +231,11 @@ def render_item(item: TranscriptItem):
                 if not item.collapsed:
                     deps = f"（依赖：{', '.join(task.deps)}）" if task.deps else ""
                     lines.append(f"      {task.description}{deps}")
+                    mode = getattr(task, "resource_scope_mode", "")
+                    if mode:
+                        lines.append(f"      资源模式：{mode}")
+                    for claim in getattr(task, "resource_claims", ()):
+                        lines.append(f"      资源声明：{claim.access} {claim.pattern}")
         lines.append("")
         lines.append("Enter 执行 · d 展开/折叠详情 · r 重规划 · Esc 取消")
         return Panel(Text("\n".join(lines)), title="计划审阅", border_style="magenta")

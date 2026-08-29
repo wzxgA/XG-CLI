@@ -82,6 +82,7 @@ def _ensure_agent_group(
         role=group_role,
         task_id=task_id,
         task_title=task_title or task_id or group_role,
+        resource_scope_mode=getattr(task, "resource_scope_mode", "targeted"),
     )
     state.agent_groups[key] = group
     state.agent_group_order.append(key)
@@ -726,11 +727,12 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
                 ),
             )
         return out
-    if kind in {"task_started", "task_done", "task_failed"} and event.task:
+    if kind in {"task_started", "task_done", "task_failed", "task_blocked"} and event.task:
         task_status = {
             "task_started": "running",
             "task_done": "done",
             "task_failed": "failed",
+            "task_blocked": "blocked",
         }[kind]
         out.plan_tasks[event.task.id] = task_status
         tasks = list(out.inspector.plan.tasks)
@@ -752,6 +754,13 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
                 id=f"team-task-{len(out.transcript)}", kind="system",
                 text=f"[{event.role or event.task.owner_role}/{event.task.id}] 开始：{event.task.title}",
                 turn_id=turn_id, trace_id=f"{turn_id}:{event.task.id}",
+            ))
+        elif kind == "task_blocked":
+            _append(out, TranscriptItem(
+                id=f"team-task-blocked-{len(out.transcript)}", kind="system",
+                text=f"[{event.role or event.task.owner_role}/{event.task.id}] 阻塞：{event.message or event.task.result}",
+                turn_id=turn_id, trace_id=f"{turn_id}:{event.task.id}",
+                status="cancelled",
             ))
         else:
             next_status = "done" if kind == "task_done" else "failed"

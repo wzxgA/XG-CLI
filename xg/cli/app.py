@@ -405,6 +405,9 @@ def _print_team_panel(plan: TeamPlan, note: str = "") -> None:
             assert task is not None
             deps = f"（依赖 {', '.join(task.deps)}）" if task.deps else ""
             table.add_row("", f"{task.id} [{task.owner_role}] {task.title}{deps}")
+            table.add_row("", Text(f"    资源模式：{task.resource_scope_mode}", style="dim"))
+            for claim in task.resource_claims:
+                table.add_row("", Text(f"    资源声明：{claim.access} {claim.pattern}", style="dim"))
             criteria = "；".join(task.acceptance_criteria[:2])
             if criteria:
                 table.add_row("", Text(f"    验收：{criteria}", style="dim"))
@@ -442,6 +445,8 @@ def _render_team_event(event: TeamEvent) -> None:
         console.print(Text(f"  [reviewer/{task.id}] {event.review.verdict}: {detail[:240]}", style=style))
     elif event.kind == "repair_requested" and task:
         console.print(Text(f"  [repairer/{task.id}] {event.message[:240]}", style="yellow"))
+    elif event.kind == "task_blocked" and task:
+        console.print(Text(f"BLOCKED [{event.role or task.owner_role}/{task.id}]: {event.message[:240]}", style="yellow"))
     elif event.kind == "task_done" and task:
         console.print(Text(f"OK [{task.owner_role}/{task.id}]: {event.message[:200]}", style="green"))
     elif event.kind in {"task_failed", "agent_failed"} and task:

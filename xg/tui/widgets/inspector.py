@@ -64,6 +64,8 @@ STATUS_STYLES = {
     "off": ("!", "warning"),
     "yes": ("!", "warning"),
     "cancelled": ("×", "warning"),
+    "blocked": ("!", "warning"),
+    "skipped": ("→", "empty"),
     "inactive": ("!", "warning"),
     "unavailable": ("×", "error"),
     "not found": ("-", "empty"),

@@ -148,6 +148,8 @@ STATUS_ZH: dict[str, str] = {
     "inactive": "未生效 (inactive)",
     "unavailable": "不可用 (unavailable)",
     "not found": "未找到 (not found)",
+    "blocked": "已阻塞 (blocked)",
+    "skipped": "已跳过 (skipped)",
 }
 
 

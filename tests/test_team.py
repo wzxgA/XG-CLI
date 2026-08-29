@@ -12,9 +12,12 @@ from xg.agent.react import AgentEvent
 from xg.agent.team import (
     AgentProfile,
     ReviewResult,
+    ResourceClaim,
+    ScopedToolRegistry,
     TeamExecutor,
     TeamTask,
     conflict_safe_batches,
+    default_profiles,
     parse_team_tasks,
 )
 from xg.llm.client import LlmClient
@@ -193,6 +196,125 @@ def test_team_parser_and_resource_conflict_scheduling():
 def test_profile_tool_intersection_is_explicit():
     profile = AgentProfile("reviewer", "", ("read_file",), is_reviewer=True)
     assert profile.allowed_tools == ("read_file",)
+
+
+def test_team_resource_scope_supports_read_only_discovery_and_normalized_root(tmp_path):
+    profile = default_profiles()["researcher"]
+    task = TeamTask(
+        "t1", "调研", "调研项目", [], owner_role="researcher",
+        resource_scope_mode="read_discovery",
+    )
+    scoped = ScopedToolRegistry(build_registry(base_dir=tmp_path), task, tmp_path, profile)
+
+    assert scoped._resource_allowed(ToolCall("list", "list_dir", json.dumps({"path": "."})))
+    assert scoped._resource_allowed(ToolCall("list-default", "list_dir", "{}"))
+    assert scoped._resource_allowed(ToolCall("read", "read_file", json.dumps({"path": "README.md"})))
+    assert not scoped._resource_allowed(ToolCall("secret", "read_file", json.dumps({"path": ".env"})))
+    assert not scoped._resource_allowed(ToolCall("outside", "list_dir", json.dumps({"path": ".."})))
+
+
+async def test_read_discovery_filters_sensitive_paths_from_directory_results(tmp_path):
+    (tmp_path / "README.md").write_text("ok", encoding="utf-8")
+    (tmp_path / ".env").write_text("TOKEN=secret", encoding="utf-8")
+    task = TeamTask(
+        "t1", "调研", "调研项目", [], owner_role="researcher",
+        resource_scope_mode="read_discovery",
+    )
+    scoped = ScopedToolRegistry(build_registry(base_dir=tmp_path), task, tmp_path, default_profiles()["researcher"])
+
+    results = await scoped.aexecute_calls([
+        ToolCall("list", "list_dir", json.dumps({"path": "."})),
+    ])
+
+    assert results[0].ok
+    assert "README.md" in results[0].output
+    assert ".env" not in results[0].output
+
+
+async def test_team_stops_after_worker_failure_and_blocks_dependents(tmp_path, settings):
+    plan_json = json.dumps({"tasks": [
+        {
+            "id": "t1", "title": "根任务", "description": "执行根任务", "deps": [],
+            "owner_role": "coder", "acceptance_criteria": ["成功"],
+        },
+        {
+            "id": "t2", "title": "依赖任务", "description": "执行依赖任务", "deps": ["t1"],
+            "owner_role": "coder", "acceptance_criteria": ["成功"],
+        },
+    ]}, ensure_ascii=False)
+
+    class PlannerClient(LlmClient):
+        async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+            if messages and "团队任务规划器" in messages[0].content:
+                yield StreamEvent(kind="content", text=plan_json)
+                yield StreamEvent(kind="done")
+
+    class FailingAgent:
+        messages: list = []
+
+        async def run(self, prompt):
+            yield AgentEvent(kind="error", text="模拟 Worker 失败")
+
+    class Factory:
+        def create(self, profile, task):
+            return FailingAgent()
+
+    executor = TeamExecutor(
+        llm=PlannerClient(),
+        tools=build_registry(base_dir=tmp_path),
+        settings=settings,
+        reviewer=approve_team,
+        agent_factory=Factory(),
+        project_root=tmp_path,
+    )
+    events = await collect(executor, "测试失败传播")
+
+    assert [event.kind for event in events].count("batch_started") == 1
+    blocked = [event for event in events if event.kind == "task_blocked"]
+    assert len(blocked) == 1 and blocked[0].task.id == "t2"
+    assert blocked[0].task.status == "blocked"
+    assert not any(event.kind == "agent_started" and event.task.id == "t2" for event in events)
+    assert "1 个任务失败" in events[-1].message
+
+
+def test_targeted_scope_does_not_allow_unclaimed_or_omitted_paths(tmp_path):
+    task = TeamTask(
+        "t1", "实现", "实现功能", [], owner_role="coder",
+        resource_claims=[ResourceClaim("src/**", "read")],
+    )
+    scoped = ScopedToolRegistry(build_registry(base_dir=tmp_path), task, tmp_path, default_profiles()["coder"])
+
+    assert scoped._resource_allowed(ToolCall("read", "read_file", json.dumps({"path": "src/app.py"})))
+    assert not scoped._resource_allowed(ToolCall("root", "list_dir", "{}"))
+    assert not scoped._resource_allowed(ToolCall("other", "read_file", json.dumps({"path": "README.md"})))
+
+
+def test_parser_defaults_read_only_research_tasks_to_discovery_mode():
+    tasks, warnings = parse_team_tasks(json.dumps({"tasks": [{
+        "id": "t1", "title": "调研", "description": "读取项目", "deps": [],
+        "owner_role": "researcher", "allowed_tools": ["list_dir"],
+        "acceptance_criteria": ["完成调研"],
+    }]}))
+
+    assert not warnings
+    assert tasks[0].resource_scope_mode == "read_discovery"
+
+
+def test_failed_task_marks_downstream_as_blocked_not_failed():
+    from xg.agent.team import TeamPlan
+
+    t1 = TeamTask("t1", "根任务", "", [], status="failed")
+    t2 = TeamTask("t2", "直接依赖", "", ["t1"])
+    t3 = TeamTask("t3", "间接依赖", "", ["t2"])
+    t4 = TeamTask("t4", "独立任务", "", [])
+    plan = TeamPlan("测试", [t1, t2, t3, t4], [["t1"], ["t2"], ["t3", "t4"]])
+
+    blocked = TeamExecutor._block_dependents(plan, {"t1"})
+
+    assert [task.id for task in blocked] == ["t2", "t3"]
+    assert t2.status == "blocked" and t2.blocked_by == ["t1"]
+    assert t3.status == "blocked" and t3.blocked_by == ["t2"]
+    assert t4.status == "pending"
 
 
 def test_team_events_keep_role_and_task_progress_in_tui_state():

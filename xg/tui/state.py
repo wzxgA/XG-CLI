@@ -58,6 +58,7 @@ class AgentGroupState:
     role: str
     task_id: str
     task_title: str
+    resource_scope_mode: str = "targeted"
     status: str = "pending"
     collapsed: bool = True
     user_toggled: bool = False

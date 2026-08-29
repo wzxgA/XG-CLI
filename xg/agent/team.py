@@ -18,7 +18,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Literal, Protocol
 
 from xg.agent.plan import PlanError, ReviewDecision, build_batches
@@ -40,6 +40,20 @@ TEAM_RESULT_LIMIT = 2000
 TEAM_ARTIFACT_LIMIT = 4000
 TEAM_REVIEW_LIMIT = 4000
 TEAM_PLAN_MAX_RETRIES = 2
+RESOURCE_SCOPED_TOOLS = {"read_file", "write_file", "list_dir", "glob_files", "grep_code"}
+READ_DISCOVERY_TOOLS = {"read_file", "list_dir", "glob_files", "grep_code"}
+READ_DISCOVERY_ROLES = {"researcher", "reviewer"}
+DEFAULT_RESOURCE_DENY_PATTERNS = (
+    ".env",
+    ".env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*secret*",
+    "**/*credential*",
+    "**/*password*",
+    ".xg/memory.db",
+    ".xg/audit.log",
+)
 
 
 TEAM_PLANNER_PROMPT = (
@@ -50,6 +64,7 @@ TEAM_PLANNER_PROMPT = (
     "\"description\": \"执行说明\", \"deps\": [], "
     "\"owner_role\": \"coder\", "
     "\"allowed_tools\": [\"read_file\", \"write_file\"], "
+    "\"resource_scope_mode\": \"targeted\", "
     "\"resource_claims\": [{\"pattern\": \"src/*\", "
     "\"access\": \"write\", \"exclusive\": false}], "
     "\"acceptance_criteria\": [\"可验证条件\"]}]}\n"
@@ -58,6 +73,9 @@ TEAM_PLANNER_PROMPT = (
     "- 依赖必须是无环 DAG；\n"
     "- owner_role 使用 coder、researcher、tester、reviewer 或 repairer；\n"
     "- 只读任务不得声明 write 工具；\n"
+    "- researcher/reviewer 需要先探索项目结构时使用 resource_scope_mode=read_discovery；\n"
+    "- coder/tester/repairer 使用 resource_scope_mode=targeted，写入范围必须声明；\n"
+    "- read_discovery 只允许项目根目录内的只读工具，不得声明 write 资源；\n"
     "- 无法判断命令副作用时使用 exclusive=true；\n"
     "- 每个任务必须有至少一条 acceptance_criteria。"
 )
@@ -80,7 +98,10 @@ class ResourceClaim:
     exclusive: bool = False
 
     def normalized(self) -> str:
-        return self.pattern.replace("\\", "/").lstrip("./") or "**"
+        pattern = self.pattern.replace("\\", "/").strip()
+        while pattern.startswith("./"):
+            pattern = pattern[2:]
+        return pattern or "**"
 
 
 @dataclass
@@ -130,6 +151,8 @@ class TeamTask:
     owner_role: str = "coder"
     allowed_tools: list[str] = field(default_factory=list)
     resource_claims: list[ResourceClaim] = field(default_factory=list)
+    resource_scope_mode: Literal["targeted", "read_discovery"] = "targeted"
+    resource_deny_patterns: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     input_artifacts: list[str] = field(default_factory=list)
     output_artifacts: list[str] = field(default_factory=list)
@@ -137,6 +160,8 @@ class TeamTask:
     attempts: int = 0
     result: str = ""
     artifacts: list[str] = field(default_factory=list)
+    failure_category: str = ""
+    blocked_by: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -157,6 +182,7 @@ class TeamEvent:
         "team_started", "team_plan_generated", "team_review", "approved",
         "replanned", "batch_started", "task_started", "task_done",
         "task_failed", "agent_started", "agent_done", "agent_failed",
+        "task_blocked",
         "subtask_event", "artifact_produced", "task_review_started",
         "task_review_done", "repair_requested", "team_done", "team_failed",
         "cancelled",
@@ -243,18 +269,28 @@ class ScopedToolRegistry:
                 )
                 continue
             if not self._resource_allowed(call):
+                path = call.parsed_arguments().get("path", "<项目根目录>")
                 rejected[call.id] = ToolResult(
                     tool_call_id=call.id, name=call.name, ok=False,
-                    error=f"任务资源范围拒绝工具调用: {call.name}",
+                    error=(
+                        f"任务资源范围拒绝工具调用: {call.name} "
+                        f"(path={path}, mode={self._task.resource_scope_mode})"
+                    ),
                 )
                 continue
             executable.append(call)
         results = await self._base.aexecute_calls(executable, concurrency=concurrency, timeout=timeout)
         by_id = {result.tool_call_id: result for result in results}
         by_id.update(rejected)
-        return [by_id.get(call.id) or ToolResult(
-            tool_call_id=call.id, name=call.name, ok=False, error="工具未执行"
-        ) for call in calls]
+        output: list[ToolResult] = []
+        for call in calls:
+            result = by_id.get(call.id) or ToolResult(
+                tool_call_id=call.id, name=call.name, ok=False, error="工具未执行"
+            )
+            if result.ok and self._task.resource_scope_mode == "read_discovery":
+                result = self._filter_discovery_result(call, result)
+            output.append(result)
+        return output
 
     def _allowed_tools(self) -> set[str]:
         profile_tools = set(self._profile.allowed_tools)
@@ -265,27 +301,82 @@ class ScopedToolRegistry:
 
     def _resource_allowed(self, call: ToolCall) -> bool:
         claims = self._task.resource_claims
-        if not claims or call.name not in {"read_file", "write_file", "list_dir", "glob_files", "grep_code"}:
+        if call.name not in RESOURCE_SCOPED_TOOLS:
             return True
         args = call.parsed_arguments()
-        raw = str(args.get("path", ""))
-        if not raw:
-            return True
-        path = Path(raw)
-        if path.is_absolute():
-            try:
-                relative = path.resolve().relative_to(self._project_root).as_posix()
-            except ValueError:
-                return False
-        else:
-            relative = PurePosixPath(raw.replace("\\", "/")).as_posix().lstrip("./")
+        relative = self._normalize_target(args.get("path"))
+        if relative is None:
+            return False
+        if self._task.resource_scope_mode == "read_discovery":
+            return (
+                self._profile.name in READ_DISCOVERY_ROLES
+                and not self._profile.can_write
+                and call.name in READ_DISCOVERY_TOOLS
+                and not self._is_denied(relative)
+            )
+        if not claims:
+            return False
         wants_write = call.name == "write_file"
         for claim in claims:
             pattern = claim.normalized()
-            matches = fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(relative, pattern.rstrip("/*") + "/**")
+            matches = self._claim_matches(relative, pattern)
             if matches and (not wants_write or claim.access == "write"):
                 return True
         return False
+
+    def _normalize_target(self, raw_value: object) -> str | None:
+        """Normalize an optional tool path relative to the project root."""
+        raw = "" if raw_value is None else str(raw_value).strip()
+        if not raw or raw in {".", "./", ".\\"}:
+            return ""
+        path = Path(raw)
+        try:
+            resolved = path.resolve() if path.is_absolute() else (self._project_root / path).resolve()
+            return resolved.relative_to(self._project_root).as_posix()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _claim_matches(relative: str, pattern: str) -> bool:
+        if not relative:
+            return pattern in {"*", "**"}
+        if fnmatch.fnmatch(relative, pattern) or (
+            pattern.startswith("**/") and fnmatch.fnmatch(relative, pattern[3:])
+        ):
+            return True
+        prefix = pattern.rstrip("/*").rstrip("/")
+        if prefix and (relative == prefix or relative.startswith(prefix + "/")):
+            return True
+        return fnmatch.fnmatch(relative, pattern.rstrip("/") + "/**")
+
+    def _is_denied(self, relative: str) -> bool:
+        patterns = (*DEFAULT_RESOURCE_DENY_PATTERNS, *self._task.resource_deny_patterns)
+        return any(
+            self._claim_matches(relative, pattern.replace("\\", "/"))
+            for pattern in patterns
+        )
+
+    def _filter_discovery_result(self, call: ToolCall, result: ToolResult) -> ToolResult:
+        """Remove sensitive paths from discovery tool output before refeeding it."""
+        if call.name == "list_dir":
+            root = self._normalize_target(call.parsed_arguments().get("path"))
+            lines = []
+            for line in result.output.splitlines():
+                name = line.removeprefix("[dir] ").strip()
+                candidate = f"{root}/{name}" if root else name
+                if not self._is_denied(candidate):
+                    lines.append(line)
+            return replace(result, output="\n".join(lines) or "(结果已按安全策略过滤)")
+        if call.name in {"glob_files", "grep_code"}:
+            lines = []
+            for line in result.output.splitlines():
+                candidate = line
+                if call.name == "grep_code" and ":" in line:
+                    candidate = line.split(":", 1)[0]
+                if not self._is_denied(candidate.replace("\\", "/").strip()):
+                    lines.append(line)
+            return replace(result, output="\n".join(lines) or "(结果已按安全策略过滤)")
+        return result
 
     def __getattr__(self, name: str):
         return getattr(self._base, name)
@@ -385,6 +476,28 @@ def parse_team_tasks(
                 access = str(claim.get("access", "read")).strip().lower()
                 if pattern and access in {"read", "write"}:
                     claims.append(ResourceClaim(pattern, access, bool(claim.get("exclusive", False))))
+        mode_raw = str(item.get("resource_scope_mode", "")).strip().lower()
+        if mode_raw not in {"targeted", "read_discovery"}:
+            if mode_raw:
+                warnings.append(f"任务 {task_id} 使用未知资源模式 {mode_raw}，已回退为 targeted")
+            mode = (
+                "read_discovery"
+                if role in READ_DISCOVERY_ROLES and not any(claim.access == "write" for claim in claims)
+                else "targeted"
+            )
+        else:
+            mode = mode_raw
+        if mode == "read_discovery" and (
+            role not in READ_DISCOVERY_ROLES
+            or any(claim.access == "write" for claim in claims)
+        ):
+            warnings.append(f"任务 {task_id} 的 read_discovery 与角色或写入声明冲突，已回退为 targeted")
+            mode = "targeted"
+        deny_raw = item.get("resource_deny_patterns", [])
+        deny_patterns = (
+            [str(pattern).strip() for pattern in deny_raw if str(pattern).strip()]
+            if isinstance(deny_raw, list) else []
+        )
         criteria_raw = item.get("acceptance_criteria", [])
         criteria = [str(value).strip() for value in criteria_raw if str(value).strip()] if isinstance(criteria_raw, list) else []
         if not criteria:
@@ -399,6 +512,8 @@ def parse_team_tasks(
             owner_role=role,
             allowed_tools=allowed,
             resource_claims=claims,
+            resource_scope_mode=mode,  # type: ignore[arg-type]
+            resource_deny_patterns=deny_patterns,
             acceptance_criteria=criteria,
             input_artifacts=[str(value) for value in item.get("input_artifacts", []) if str(value)] if isinstance(item.get("input_artifacts", []), list) else [],
             output_artifacts=[str(value) for value in item.get("output_artifacts", []) if str(value)] if isinstance(item.get("output_artifacts", []), list) else [],
@@ -565,10 +680,30 @@ class TeamExecutor:
             async for event in self._run_batch(plan, batch):
                 yield event
             failed = [task for task in plan.tasks if task.status == "failed"]
-            if len(failed) > self.settings.plan_max_failures:
+            if failed:
+                blocked = self._block_dependents(plan, {task.id for task in failed})
+                for task in blocked:
+                    yield TeamEvent(
+                        kind="task_blocked",
+                        team_id=self.team_id,
+                        plan=plan,
+                        task=task,
+                        role=task.owner_role,
+                        message=task.result,
+                    )
+                if len(failed) > self.settings.plan_max_failures:
+                    message = (
+                        f"失败任务数 {len(failed)} 超过上限 "
+                        f"{self.settings.plan_max_failures}；阻塞任务数 {len(blocked)}"
+                    )
+                else:
+                    message = (
+                        f"Team 因 {len(failed)} 个任务失败而停止；"
+                        f"阻塞任务数 {len(blocked)}"
+                    )
                 yield TeamEvent(
                     kind="team_failed", team_id=self.team_id, plan=plan,
-                    message=f"失败任务数 {len(failed)} 超过上限 {self.settings.plan_max_failures}",
+                    message=message,
                 )
                 return
 
@@ -638,15 +773,48 @@ class TeamExecutor:
                 yield item
         await asyncio.gather(*jobs, return_exceptions=True)
 
+    @staticmethod
+    def _block_dependents(plan: TeamPlan, failed_ids: set[str]) -> list[TeamTask]:
+        """Mark only downstream tasks as blocked; they were never executed."""
+        blocked: list[TeamTask] = []
+        changed = True
+        while changed:
+            changed = False
+            for task in plan.tasks:
+                if task.status != "pending" or not any(
+                    dep in failed_ids or dep in {item.id for item in blocked}
+                    for dep in task.deps
+                ):
+                    continue
+                blockers = [
+                    dep for dep in task.deps
+                    if dep in failed_ids or any(item.id == dep for item in blocked)
+                ]
+                task.status = "blocked"
+                task.blocked_by = blockers
+                task.result = f"依赖任务未通过，未执行：{', '.join(blockers)}"
+                task.failure_category = "dependency_blocked"
+                blocked.append(task)
+                changed = True
+        return blocked
+
     async def _run_task(self, plan: TeamPlan, task_id: str, queue: asyncio.Queue[TeamEvent | None]) -> None:
         task = plan.task_by_id(task_id)
         if task is None:
             return
         dependencies = [plan.task_by_id(dep) for dep in task.deps]
         if any(dep is None or dep.status != "done" for dep in dependencies):
-            task.status = "failed"
-            task.result = "依赖任务未通过审查，未执行"
-            queue.put_nowait(TeamEvent(kind="task_failed", team_id=self.team_id, plan=plan, task=task, message=task.result))
+            task.status = "blocked"
+            task.blocked_by = [
+                dep_id for dep_id, dep in zip(task.deps, dependencies)
+                if dep is None or dep.status != "done"
+            ]
+            task.result = f"依赖任务未通过，未执行：{', '.join(task.blocked_by)}"
+            task.failure_category = "dependency_blocked"
+            queue.put_nowait(TeamEvent(
+                kind="task_blocked", team_id=self.team_id, plan=plan,
+                task=task, role=task.owner_role, message=task.result,
+            ))
             return
 
         task.status = "running"
@@ -656,6 +824,7 @@ class TeamExecutor:
         if error:
             task.status = "failed"
             task.result = error[:TEAM_RESULT_LIMIT]
+            task.failure_category = "execution_failed"
             self._audit("team_task_failed", team_id=self.team_id, task_id=task.id, role=task.owner_role, error=task.result)
             queue.put_nowait(TeamEvent(kind="agent_failed", team_id=self.team_id, plan=plan, task=task, agent_id=agent_id, role=task.owner_role, message=task.result))
             queue.put_nowait(TeamEvent(kind="task_failed", team_id=self.team_id, plan=plan, task=task, message=task.result))
@@ -688,6 +857,8 @@ class TeamExecutor:
                 status="pending",
                 result="",
                 artifacts=[],
+                failure_category="",
+                blocked_by=[],
             )
             queue.put_nowait(TeamEvent(kind="repair_requested", team_id=self.team_id, plan=plan, task=repair, role="repairer", message=repair.description))
             repair_result, repair_artifacts, repair_agent_id, repair_error = await self._execute_worker(plan, repair, queue)
@@ -818,8 +989,11 @@ class TeamExecutor:
 
     def _worker_system_prompt(self, plan: TeamPlan, task: TeamTask, profile: AgentProfile) -> str:
         parts = [DEFAULT_SYSTEM_PROMPT, "", f"# 你的角色：{profile.name}", profile.system_prompt, "", f"# Team 总目标\n{plan.goal}", f"# 当前任务\n{task.title}\n{task.description}", "# 验收标准\n- " + "\n- ".join(task.acceptance_criteria)]
+        parts.append(f"# 资源策略\n模式：{task.resource_scope_mode}")
         if task.resource_claims:
             parts.append("# 资源范围\n" + "\n".join(f"- {claim.access}: {claim.pattern}" for claim in task.resource_claims))
+        if task.resource_scope_mode == "read_discovery":
+            parts.append("# 探索规则\n允许在项目根目录内使用只读发现工具；不要写文件、执行命令或读取敏感文件。")
         dependencies: list[str] = []
         for dep_id in task.deps:
             dep = plan.task_by_id(dep_id)
