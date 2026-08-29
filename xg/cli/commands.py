@@ -29,6 +29,15 @@ class CommandResult:
 
 
 @dataclass(frozen=True)
+class SlashSubcommandSpec:
+    """Help metadata for one command mode or subcommand."""
+
+    name: str
+    usage: str
+    description: str
+
+
+@dataclass(frozen=True)
 class SlashCommandSpec:
     """Read-only metadata shared by command help and TUI suggestions."""
 
@@ -37,27 +46,203 @@ class SlashCommandSpec:
     usage: str = ""
     description: str = ""
     category: str = "general"
+    details: tuple[str, ...] = ()
+    subcommands: tuple[SlashSubcommandSpec, ...] = ()
+    examples: tuple[str, ...] = ()
 
 
 # Keep this tuple in presentation order.  It is intentionally metadata only;
 # command execution remains in CommandService and the legacy compatibility
 # helpers in xg.cli.app.
 SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
-    SlashCommandSpec("/plan", usage="/plan <任务>", description="生成、审阅并执行计划", category="workflow"),
-    SlashCommandSpec("/model", usage="/model [provider] [model]", description="查看或切换 provider / 模型", category="config"),
-    SlashCommandSpec("/config", usage="/config get|set ...", description="查看或修改配置", category="config"),
-    SlashCommandSpec("/mcp", usage="/mcp status|restart|logs|enable|disable|resources", description="管理 MCP Server", category="config"),
-    SlashCommandSpec("/web", usage="/web status|providers|search|fetch", description="查看或使用只读联网能力", category="config"),
-    SlashCommandSpec("/skill", usage="/skill list|load|enable|disable", description="管理任务 Skill", category="config"),
-    SlashCommandSpec("/history", usage="/history status|clear", description="查看或清理输入历史", category="session"),
-    SlashCommandSpec("/memory", usage="/memory list|search|delete|clear", description="管理长期记忆", category="memory"),
+    SlashCommandSpec(
+        "/plan",
+        usage="/plan <任务>",
+        description="生成、审阅并执行计划",
+        category="workflow",
+        details=("先生成任务依赖图，审阅通过后再按依赖轮次执行。",),
+        examples=("/plan 检查项目配置并修复测试",),
+    ),
+    SlashCommandSpec(
+        "/model",
+        usage="/model [provider] [model]",
+        description="查看或切换 provider / 模型",
+        category="config",
+        details=(
+            "不带参数时查看当前模型和可用 provider。",
+            "可以只切换 provider、切换 provider 与模型，或只切换当前 provider 内的模型。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("list", "/model", "查看当前模型和可用 provider"),
+            SlashSubcommandSpec("provider", "/model <provider>", "切换到 provider 的默认模型"),
+            SlashSubcommandSpec("provider/model", "/model <provider>/<model>", "切换 provider 和指定模型"),
+            SlashSubcommandSpec("model", "/model <model>", "在当前 provider 内切换模型"),
+        ),
+        examples=(
+            "/model",
+            "/model deepseek",
+            "/model deepseek/deepseek-chat",
+            "/model gpt-4o",
+        ),
+    ),
+    SlashCommandSpec(
+        "/config",
+        usage="/config get|set ...",
+        description="查看或修改配置",
+        category="config",
+        details=(
+            "不带参数时查看当前生效配置，API Key 会脱敏。",
+            "`set` 的 value 当前按单个空格分隔参数解析。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("overview", "/config", "查看当前生效配置"),
+            SlashSubcommandSpec("list", "/config list", "查看 provider 能力列表"),
+            SlashSubcommandSpec("get", "/config get <key>", "查看指定配置项"),
+            SlashSubcommandSpec("set", "/config set <key> <value>", "修改并持久化配置"),
+        ),
+        examples=(
+            "/config",
+            "/config list",
+            "/config get active_provider",
+            "/config set active_model gpt-4o",
+        ),
+    ),
+    SlashCommandSpec(
+        "/mcp",
+        usage="/mcp status|restart|logs|enable|disable|resources",
+        description="管理 MCP Server",
+        category="config",
+        details=("省略子命令时默认查看 Server 状态。",),
+        subcommands=(
+            SlashSubcommandSpec("status", "/mcp status", "查看 Server、工具和资源状态"),
+            SlashSubcommandSpec("restart", "/mcp restart <server>", "重启并重新发现指定 Server"),
+            SlashSubcommandSpec("logs", "/mcp logs <server>", "查看指定 Server 的脱敏日志"),
+            SlashSubcommandSpec("enable", "/mcp enable <server>", "启用指定 Server"),
+            SlashSubcommandSpec("disable", "/mcp disable <server>", "禁用指定 Server"),
+            SlashSubcommandSpec("resources", "/mcp resources [server]", "查看全部或指定 Server 的 resources"),
+        ),
+        examples=(
+            "/mcp status",
+            "/mcp restart local",
+            "/mcp logs local",
+            "/mcp resources",
+        ),
+    ),
+    SlashCommandSpec(
+        "/web",
+        usage="/web status|providers|search|fetch",
+        description="查看或使用只读联网能力",
+        category="config",
+        details=(
+            "搜索和抓取均为只读能力；搜索需要配置 provider，抓取接受公开 HTTP(S) URL。",
+            "`search` 和 `fetch` 的参数分别作为 query 和 URL 传递。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("status", "/web status", "查看联网开关、provider 和抓取限制"),
+            SlashSubcommandSpec("providers", "/web providers", "查看搜索 provider 配置状态"),
+            SlashSubcommandSpec("search", "/web search <query>", "搜索公开互联网"),
+            SlashSubcommandSpec("fetch", "/web fetch <url>", "抓取公开网页正文"),
+        ),
+        examples=(
+            "/web status",
+            "/web providers",
+            "/web search Python 3.13 新特性",
+            "/web fetch https://www.example.com/",
+        ),
+    ),
+    SlashCommandSpec(
+        "/skill",
+        usage="/skill list|load|enable|disable",
+        description="管理任务 Skill",
+        category="config",
+        details=(
+            "Skill 是本地任务规范；加载 Skill 不会新增工具权限，也不能覆盖系统提示和安全策略。",
+            "`reference` 为可选的指定参考资料路径或名称。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("list", "/skill list", "查看可用 Skill 元信息"),
+            SlashSubcommandSpec("load", "/skill load <name> [reference ...]", "按需加载 Skill 和参考资料"),
+            SlashSubcommandSpec("enable", "/skill enable <name>", "启用指定 Skill"),
+            SlashSubcommandSpec("disable", "/skill disable <name>", "禁用指定 Skill"),
+        ),
+        examples=(
+            "/skill list",
+            "/skill load code-review",
+            "/skill load code-review references/style.md",
+            "/skill disable code-review",
+        ),
+    ),
+    SlashCommandSpec(
+        "/history",
+        usage="/history status|clear",
+        description="查看或清理输入历史",
+        category="session",
+        details=("命令只管理本地输入历史，不显示历史全文，也不影响 Agent 对话和长期记忆。",),
+        subcommands=(
+            SlashSubcommandSpec("status", "/history status", "查看输入历史状态和数量"),
+            SlashSubcommandSpec("clear", "/history clear", "清理当前项目的输入历史"),
+        ),
+        examples=("/history status", "/history clear"),
+    ),
+    SlashCommandSpec(
+        "/memory",
+        usage="/memory list|search|delete|clear",
+        description="管理长期记忆",
+        category="memory",
+        details=(
+            "长期记忆按当前项目隔离保存；普通对话不会自动写入长期记忆。",
+            "`clear` 会要求确认，`delete` 需要使用记忆条目的数字 ID。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("list", "/memory list [limit]", "列出长期记忆，可选限制条数"),
+            SlashSubcommandSpec("search", "/memory search <关键词>", "按关键词搜索长期记忆"),
+            SlashSubcommandSpec("delete", "/memory delete <id>", "删除指定 ID 的长期记忆"),
+            SlashSubcommandSpec("clear", "/memory clear", "清空全部长期记忆并请求确认"),
+        ),
+        examples=(
+            "/memory list",
+            "/memory list 10",
+            "/memory search 发布流程",
+            "/memory delete 3",
+            "/memory clear",
+        ),
+    ),
     SlashCommandSpec("/help", aliases=("/?",), usage="/help", description="查看命令帮助", category="general"),
-    SlashCommandSpec("/init", usage="/init", description="初始化项目记忆", category="memory"),
-    SlashCommandSpec("/save", usage="/save <内容>", description="保存长期记忆", category="memory"),
-    SlashCommandSpec("/hitl", usage="/hitl on|off|reset", description="管理人工审批开关", category="safety"),
-    SlashCommandSpec("/clear", usage="/clear", description="清空当前上下文", category="session"),
-    SlashCommandSpec("/cancel", aliases=("/c",), usage="/cancel", description="取消当前任务", category="control"),
-    SlashCommandSpec("/exit", aliases=("/quit",), usage="/exit", description="退出程序", category="control"),
+    SlashCommandSpec(
+        "/init",
+        usage="/init",
+        description="初始化项目记忆",
+        category="memory",
+        details=("分析当前项目并生成 XG.md 草稿；写入前会请求确认，已有文件不会直接覆盖。",),
+        examples=("/init",),
+    ),
+    SlashCommandSpec(
+        "/save",
+        usage="/save <内容>",
+        description="保存长期记忆",
+        category="memory",
+        details=("只保存用户明确提供的内容；敏感片段会按现有记忆策略脱敏。",),
+        examples=("/save 项目使用 Python 3.13，测试命令是 uv run pytest",),
+    ),
+    SlashCommandSpec(
+        "/hitl",
+        usage="/hitl on|off|reset",
+        description="管理人工审批开关",
+        category="safety",
+        details=(
+            "HITL 用于危险工具调用的人工审批。关闭后危险操作不再弹出审批，属于高风险模式。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("status", "/hitl", "查看当前审批开关和本会话放行状态"),
+            SlashSubcommandSpec("on", "/hitl on", "开启危险操作审批"),
+            SlashSubcommandSpec("off", "/hitl off", "关闭危险操作审批并重置放行状态"),
+            SlashSubcommandSpec("reset", "/hitl reset", "清除本会话全部放行状态"),
+        ),
+        examples=("/hitl", "/hitl on", "/hitl reset"),
+    ),
+    SlashCommandSpec("/clear", usage="/clear", description="清空当前上下文", category="session", examples=("/clear",)),
+    SlashCommandSpec("/cancel", aliases=("/c",), usage="/cancel", description="取消当前任务", category="control", examples=("/cancel",)),
+    SlashCommandSpec("/exit", aliases=("/quit",), usage="/exit", description="退出程序", category="control", examples=("/exit",)),
 )
 
 

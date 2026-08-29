@@ -196,10 +196,25 @@ class TestOtherCommands:
     def test_help_alias_and_single_command_details(self, tmp_path):
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/? mcp")
-        assert output == (
-            "/mcp — 管理 MCP Server\n"
-            "用法：/mcp status|restart|logs|enable|disable|resources"
-        )
+        assert output.startswith("/mcp — 管理 MCP Server\n")
+        assert "子命令" in output
+        assert "/mcp restart <server>" in output
+        assert "示例" in output
+        assert "/mcp resources" in output
+
+    def test_help_details_cover_command_modes_and_examples(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/help memory")
+        assert "/memory — 管理长期记忆" in output
+        assert "/memory list [limit]" in output
+        assert "/memory search <关键词>" in output
+        assert "/memory delete <id>" in output
+        assert "/memory clear" in output
+        assert "/memory list 10" in output
+
+        output = run_cmd(agent, settings, manager, "/help model")
+        assert "/model <provider>/<model>" in output
+        assert "/model deepseek/deepseek-chat" in output
 
     def test_help_unknown_command_is_actionable(self, tmp_path):
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})

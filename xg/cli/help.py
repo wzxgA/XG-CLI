@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from xg.cli.commands import SLASH_COMMANDS, SlashCommandSpec
+from xg.cli.commands import SLASH_COMMANDS, SlashCommandSpec, SlashSubcommandSpec
 
 
 CATEGORY_LABELS: dict[str, str] = {
@@ -141,7 +141,25 @@ def format_command_help(
     lines = [f"{spec.name} — {spec.description}", f"用法：{spec.usage}"]
     if spec.aliases:
         lines.append(f"别名：{'、'.join(spec.aliases)}")
+    if spec.details:
+        lines.extend(["", *spec.details])
+    if spec.subcommands:
+        lines.extend(["", "子命令"])
+        lines.extend(_subcommand_lines(spec.subcommands))
+    if spec.examples:
+        lines.extend(["", "示例"])
+        lines.extend(f"  {example}" for example in spec.examples)
     return "\n".join(lines)
+
+
+def _subcommand_lines(subcommands: Sequence[SlashSubcommandSpec]) -> list[str]:
+    """Format detailed command modes with stable aligned columns."""
+
+    usage_width = max(len(item.usage) for item in subcommands)
+    return [
+        f"  {item.usage.ljust(usage_width)}  {item.description}"
+        for item in subcommands
+    ]
 
 
 def find_command(
