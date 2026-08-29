@@ -21,6 +21,7 @@ from xg.input_history import HistoryConfig, InputHistory
 from xg.safety.hitl import ApprovalDecision
 from xg.tui.controller import SessionController
 from xg.tui.messages import (
+    AgentGroupToggled,
     CommandSuggestionSelected,
     InspectorViewSelected,
     StateChanged,
@@ -211,6 +212,9 @@ class XgTuiApp(App[None]):
 
     def on_trace_card_toggled(self, message: TraceCardToggled) -> None:
         self.controller.toggle_trace_item(message.item_id)
+
+    def on_agent_group_toggled(self, message: AgentGroupToggled) -> None:
+        self.controller.toggle_agent_group(message.group_id)
 
     def on_inspector_view_selected(self, message: InspectorViewSelected) -> None:
         self.controller.set_inspector_view(message.view)

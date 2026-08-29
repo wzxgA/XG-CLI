@@ -10,7 +10,7 @@ from xg.tui.i18n import UiLanguage
 
 TranscriptKind = Literal[
     "user", "assistant", "thinking", "tool_call", "tool_result", "approval",
-    "context", "plan", "help", "error", "system", "progress",
+    "context", "plan", "help", "error", "system", "progress", "agent_group",
 ]
 TranscriptStatus = Literal[
     "streaming", "running", "success", "failed", "cancelled", "done",
@@ -45,6 +45,29 @@ class TranscriptItem:
     parent_call_id: str = ""
     status: TranscriptStatus = "done"
     elapsed_ms: int | None = None
+    agent_group_id: str = ""
+
+
+@dataclass
+class AgentGroupState:
+    """One logical AgentRun rendered inside the shared Team transcript."""
+
+    group_id: str
+    team_id: str
+    agent_id: str
+    role: str
+    task_id: str
+    task_title: str
+    status: str = "pending"
+    collapsed: bool = True
+    user_toggled: bool = False
+    event_count: int = 0
+    tool_count: int = 0
+    artifact_count: int = 0
+    repair_attempt: int = 0
+    latest_summary: str = ""
+    latest_error: str = ""
+    entries: list[TranscriptItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -159,6 +182,8 @@ class TuiState:
     notification: str = ""
     notification_level: Literal["info", "warning", "error"] = "info"
     plan_tasks: dict[str, str] = field(default_factory=dict)
+    agent_groups: dict[str, AgentGroupState] = field(default_factory=dict)
+    agent_group_order: list[str] = field(default_factory=list)
     queue: list[QueueItem] = field(default_factory=list)
     # UI preference only; never serialized into Agent messages or memory.
     ui_language: UiLanguage = "en"

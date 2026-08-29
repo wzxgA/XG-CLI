@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+from io import StringIO
 from typing import AsyncIterator
 
 from xg.agent.plan import ReviewDecision
+from xg.agent.react import AgentEvent
 from xg.agent.team import (
     AgentProfile,
     ReviewResult,
@@ -16,10 +18,12 @@ from xg.agent.team import (
     parse_team_tasks,
 )
 from xg.llm.client import LlmClient
-from xg.llm.types import StreamEvent, ToolCall
+from xg.llm.types import StreamEvent, ToolCall, ToolResult
 from xg.tool.builtin import build_registry
 from xg.tui.reducer import reduce_team_event
-from xg.tui.state import TuiState
+from xg.tui.renderables import agent_group_renderable
+from xg.tui.state import AgentGroupState, TuiState
+from xg.tui.widgets.agent_group_card import AgentGroupCard
 
 
 TEAM_PLAN = json.dumps({"tasks": [
@@ -204,3 +208,108 @@ def test_team_events_keep_role_and_task_progress_in_tui_state():
     state = reduce_team_event(state, TeamEvent("task_started", team_id="team-1", plan=plan, task=tasks[0], role="coder"), "turn-1")
     assert state.plan_tasks["t1"] == "running"
     assert any("coder/t1" in item.text for item in state.transcript)
+
+
+def test_team_agent_events_are_isolated_in_default_collapsed_groups():
+    from xg.agent.team import TeamEvent, TeamPlan
+
+    tasks, _ = parse_team_tasks(json.dumps({"tasks": [
+        {"id": "t1", "title": "实现 A", "description": "实现 A", "deps": []},
+        {"id": "t2", "title": "实现 B", "description": "实现 B", "deps": []},
+    ]}))
+    plan = TeamPlan("demo", tasks, [["t1", "t2"]])
+    state = TuiState(active_turn_id="turn-1")
+
+    state = reduce_team_event(
+        state, TeamEvent("team_plan_generated", team_id="team-1", plan=plan), "turn-1"
+    )
+    for task, agent_id in zip(tasks, ("agent-a", "agent-b")):
+        state = reduce_team_event(
+            state,
+            TeamEvent("agent_started", team_id="team-1", plan=plan, task=task,
+                      agent_id=agent_id, role="coder"),
+            "turn-1",
+        )
+        state = reduce_team_event(
+            state,
+            TeamEvent(
+                "subtask_event", team_id="team-1", plan=plan, task=task,
+                agent_id=agent_id, role="coder",
+                agent_event=AgentEvent(kind="thinking", text=f"检查 {task.id}"),
+            ),
+            "turn-1",
+        )
+
+    assert state.agent_group_order == ["team-1:agent-a", "team-1:agent-b"]
+    assert all(group.collapsed for group in state.agent_groups.values())
+    assert state.agent_groups["team-1:agent-a"].entries[0].text == "检查 t1"
+    assert state.agent_groups["team-1:agent-b"].entries[0].text == "检查 t2"
+    assert [item.kind for item in state.transcript].count("agent_group") == 2
+
+
+def test_team_repair_and_review_have_separate_group_identities():
+    from xg.agent.team import TeamEvent, TeamPlan
+
+    tasks, _ = parse_team_tasks(json.dumps({"tasks": [{
+        "id": "t1", "title": "实现登录", "description": "实现登录", "deps": [],
+    }]}))
+    plan = TeamPlan("demo", tasks, [["t1"]])
+    repair = TeamTask("t1-repair-1", "修复登录", "修复问题", [], owner_role="repairer")
+    state = TuiState(active_turn_id="turn-1")
+
+    state = reduce_team_event(
+        state,
+        TeamEvent("task_review_started", team_id="team-1", plan=plan, task=tasks[0], role="reviewer"),
+        "turn-1",
+    )
+    state = reduce_team_event(
+        state,
+        TeamEvent(
+            "task_review_done", team_id="team-1", plan=plan, task=tasks[0], role="reviewer",
+            review=ReviewResult("t1", "fail", ["需要修复"], ["修复"], []),
+        ),
+        "turn-1",
+    )
+    state = reduce_team_event(
+        state,
+        TeamEvent("repair_requested", team_id="team-1", plan=plan, task=repair, role="repairer", message="修复"),
+        "turn-1",
+    )
+    state = reduce_team_event(
+        state,
+        TeamEvent("agent_started", team_id="team-1", plan=plan, task=repair,
+                  agent_id="agent-repair", role="repairer"),
+        "turn-1",
+    )
+    state = reduce_team_event(
+        state,
+        TeamEvent(
+            "subtask_event", team_id="team-1", plan=plan, task=repair,
+            agent_id="agent-repair", role="repairer",
+            agent_event=AgentEvent(kind="tool_result", tool_result=ToolResult(
+                tool_call_id="call-1", name="read_file", ok=True, output="ok"
+            )),
+        ),
+        "turn-1",
+    )
+
+    assert "team-1:reviewer:t1" in state.agent_groups
+    assert "team-1:agent-repair" in state.agent_groups
+    assert state.agent_groups["team-1:agent-repair"].task_id == "t1-repair-1"
+    assert state.agent_groups["team-1:reviewer:t1"].status == "failed"
+    assert any(item.kind == "agent_group" for item in state.transcript)
+
+
+def test_agent_group_card_starts_collapsed_and_uses_group_identity():
+    group = AgentGroupState(
+        group_id="team-1:agent-a", team_id="team-1", agent_id="agent-a",
+        role="coder", task_id="t1", task_title="实现登录", status="running",
+    )
+    card = AgentGroupCard(group)
+
+    assert card.group_id == "team-1:agent-a"
+    assert card.group.collapsed is True
+    output = StringIO()
+    from rich.console import Console
+    Console(file=output, width=120).print(agent_group_renderable(group))
+    assert "coder/t1" in output.getvalue()

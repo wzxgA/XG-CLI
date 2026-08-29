@@ -6,6 +6,7 @@ dependency has not been installed yet.
 """
 
 from xg.tui.state import (
+    AgentGroupState,
     InspectorState,
     InspectorView,
     MemoryInspectorSnapshot,
@@ -19,6 +20,7 @@ from xg.tui.state import (
 )
 
 __all__ = [
+    "AgentGroupState",
     "InspectorState",
     "InspectorView",
     "MemoryInspectorSnapshot",

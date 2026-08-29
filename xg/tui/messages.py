@@ -21,6 +21,14 @@ class TraceCardToggled(Message):
         self.item_id = item_id
 
 
+class AgentGroupToggled(Message):
+    """A user expanded or collapsed one Team Agent conversation group."""
+
+    def __init__(self, group_id: str) -> None:
+        super().__init__()
+        self.group_id = group_id
+
+
 class CommandSuggestionSelected(Message):
     """A local command suggestion was selected without being submitted."""
 

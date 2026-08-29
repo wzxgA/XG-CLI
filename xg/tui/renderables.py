@@ -11,7 +11,7 @@ from rich.text import Text
 
 from xg.tui.diagrams import FlowchartModel, FlowchartParseError, parse_flowchart, render_flowchart, split_mermaid_blocks
 from xg.tui.plan_renderables import PlanReviewCard
-from xg.tui.state import TranscriptItem
+from xg.tui.state import AgentGroupState, TranscriptItem
 
 
 def _truncate(value: str, limit: int = 20_000) -> str:
@@ -76,6 +76,46 @@ def trace_renderable(item: TranscriptItem):
     }.get(item.status, "cyan")
     title = f"{marker} {label} · {_trace_status(item)}"
     return Panel(Text(body), title=title, border_style=style)
+
+
+def _agent_group_status(status: str) -> str:
+    return {
+        "pending": "待执行",
+        "running": "执行中",
+        "reviewing": "审查中",
+        "repairing": "修复中",
+        "done": "已完成",
+        "failed": "失败",
+        "cancelled": "已取消",
+    }.get(status, status or "未知")
+
+
+def agent_group_renderable(group: AgentGroupState):
+    """Render one AgentRun as a collapsible group in the shared transcript."""
+    marker = "▶" if group.collapsed else "▼"
+    identity = f"{group.role}/{group.task_id}" if group.task_id else group.role
+    stats = f"工具 {group.tool_count} · Artifact {group.artifact_count}"
+    header = f"{marker} [{identity}] {group.task_title} · {_agent_group_status(group.status)} · {stats}"
+    if group.repair_attempt:
+        header += f" · 修复 {group.repair_attempt}"
+    latest = group.latest_error or group.latest_summary
+    if group.collapsed and latest:
+        header += f"\n  {latest.replace(chr(10), ' ')[:180]}"
+    parts: list[object] = [Text(header)]
+    if not group.collapsed:
+        if group.entries:
+            parts.append(Group(*(render_item(item) for item in group.entries)))
+        else:
+            parts.append(Text("（尚无事件）", style="dim"))
+    style = {
+        "running": "yellow",
+        "reviewing": "yellow",
+        "repairing": "magenta",
+        "done": "green",
+        "failed": "red",
+        "cancelled": "yellow",
+    }.get(group.status, "cyan")
+    return Panel(Group(*parts), title="Agent", border_style=style)
 
 
 class DiagramCard:

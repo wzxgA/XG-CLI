@@ -6,6 +6,7 @@ from textual.widgets import Static
 from xg.tui.renderables import render_item
 from xg.tui.state import TuiState
 from xg.tui.widgets.collapsible_card import CollapsibleCard
+from xg.tui.widgets.agent_group_card import AgentGroupCard
 from xg.tui.widgets.action_card import InlineApprovalCard, InlineConfirmationCard
 
 
@@ -35,6 +36,11 @@ class TranscriptView(VerticalScroll):
             )
         else:
             for item in state.transcript:
+                if item.kind == "agent_group" and item.agent_group_id:
+                    group = state.agent_groups.get(item.agent_group_id)
+                    if group is not None:
+                        widgets.append(AgentGroupCard(group))
+                    continue
                 if item.collapsible and item.kind in ("thinking", "tool_call", "tool_result", "approval"):
                     widgets.append(CollapsibleCard(item))
                 else:

@@ -7,6 +7,7 @@ That makes event ordering and stale-event handling straightforward to test.
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from typing import Any
 
 from xg.agent.plan import PlanEvent
@@ -14,6 +15,7 @@ from xg.agent.react import AgentEvent
 from xg.agent.team import TeamEvent
 from xg.llm.types import Usage
 from xg.tui.state import (
+    AgentGroupState,
     PlanInspectorSnapshot,
     PlanTaskSnapshot,
     SafetyInspectorSnapshot,
@@ -28,6 +30,11 @@ def _copy(state: TuiState) -> TuiState:
         state,
         transcript=[replace(item) for item in state.transcript],
         plan_tasks=dict(state.plan_tasks),
+        agent_groups={
+            key: replace(group, entries=[replace(item) for item in group.entries])
+            for key, group in state.agent_groups.items()
+        },
+        agent_group_order=list(state.agent_group_order),
         inspector=replace(
             state.inspector,
             session=replace(state.inspector.session),
@@ -40,6 +47,120 @@ def _copy(state: TuiState) -> TuiState:
 
 def _append(state: TuiState, item: TranscriptItem) -> None:
     state.transcript.append(item)
+
+
+def _team_group_key(event: TeamEvent) -> str:
+    """Return a stable UI identity for one logical Team AgentRun."""
+    if event.agent_id:
+        return f"{event.team_id}:{event.agent_id}"
+    task_id = event.task.id if event.task is not None else "unknown"
+    role = event.role or ("reviewer" if event.kind.startswith("task_review") else "agent")
+    return f"{event.team_id}:{role}:{task_id}"
+
+
+def _ensure_agent_group(
+    state: TuiState,
+    event: TeamEvent,
+    *,
+    group_id: str | None = None,
+    role: str | None = None,
+    task=None,
+) -> tuple[AgentGroupState, str]:
+    task = task or event.task
+    key = group_id or _team_group_key(event)
+    group = state.agent_groups.get(key)
+    if group is not None:
+        return group, key
+    task_id = task.id if task is not None else ""
+    task_title = task.title if task is not None else ""
+    group_role = role or event.role or "agent"
+    agent_id = event.agent_id or key.rsplit(":", 1)[-1]
+    group = AgentGroupState(
+        group_id=key,
+        team_id=event.team_id,
+        agent_id=agent_id,
+        role=group_role,
+        task_id=task_id,
+        task_title=task_title or task_id or group_role,
+    )
+    state.agent_groups[key] = group
+    state.agent_group_order.append(key)
+    state.transcript.append(TranscriptItem(
+        id=f"agent-group-{len(state.transcript)}",
+        kind="agent_group",
+        text=group.task_title,
+        agent_group_id=key,
+        turn_id=state.active_turn_id,
+        trace_id=f"{state.active_turn_id}:{key}",
+        collapsible=True,
+        collapsed=True,
+    ))
+    return group, key
+
+
+def _update_agent_group(state: TuiState, group_id: str, **changes) -> None:
+    group = state.agent_groups[group_id]
+    state.agent_groups[group_id] = replace(group, **changes)
+
+
+def _append_group_entry(
+    state: TuiState,
+    group_id: str,
+    item: TranscriptItem,
+    *,
+    summary: str = "",
+    error: str = "",
+    tool: bool = False,
+    artifact: bool = False,
+) -> None:
+    group = state.agent_groups[group_id]
+    item.agent_group_id = group_id
+    group.entries.append(item)
+    state.agent_groups[group_id] = replace(
+        group,
+        event_count=group.event_count + 1,
+        tool_count=group.tool_count + (1 if tool else 0),
+        artifact_count=group.artifact_count + (1 if artifact else 0),
+        latest_summary=summary[:240] if summary else group.latest_summary,
+        latest_error=error[:240] if error else group.latest_error,
+    )
+
+
+def _reduce_agent_event_in_group(
+    state: TuiState,
+    group_id: str,
+    event: AgentEvent,
+    turn_id: str,
+    trace_id: str,
+) -> TuiState:
+    """Reuse the Agent reducer against a group's private entry list."""
+    group = state.agent_groups[group_id]
+    sandbox = replace(state, transcript=[replace(item) for item in group.entries])
+    reduced = reduce_agent_event(sandbox, event, turn_id, trace_id)
+    out = _copy(state)
+    entries = [replace(item, agent_group_id=group_id) for item in reduced.transcript]
+    out.agent_groups[group_id] = replace(
+        out.agent_groups[group_id],
+        entries=entries,
+        event_count=out.agent_groups[group_id].event_count + 1,
+        tool_count=out.agent_groups[group_id].tool_count + (1 if event.kind == "tool_call" else 0),
+        latest_summary=(event.text or out.agent_groups[group_id].latest_summary)[:240],
+        latest_error=(event.text if event.kind == "error" else out.agent_groups[group_id].latest_error)[:240],
+    )
+    out.inspector = reduced.inspector
+    out.pending_approval = reduced.pending_approval
+    out.pending_confirmation = reduced.pending_confirmation
+    out.notification = reduced.notification
+    out.notification_level = reduced.notification_level
+    if event.kind not in {"error", "context_overflow", "budget_exceeded"}:
+        out.phase = "running"
+    return out
+
+
+def _finish_agent_groups(state: TuiState, status: str) -> None:
+    for key, group in state.agent_groups.items():
+        if group.status in {"pending", "running", "reviewing", "repairing"}:
+            state.agent_groups[key] = replace(group, status=status)
 
 
 def _remove_progress(state: TuiState, turn_id: str) -> None:
@@ -632,53 +753,103 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
                 text=f"[{event.role or event.task.owner_role}/{event.task.id}] 开始：{event.task.title}",
                 turn_id=turn_id, trace_id=f"{turn_id}:{event.task.id}",
             ))
+        else:
+            next_status = "done" if kind == "task_done" else "failed"
+            for group_id, group in list(out.agent_groups.items()):
+                if group.task_id == event.task.id and group.role not in {"reviewer", "repairer"}:
+                    out.agent_groups[group_id] = replace(group, status=next_status)
         return out
     if kind == "agent_started" and event.task:
-        # 普通任务已有 task_started；Repair task 没有进入原始 DAG，仍需在 TUI 显示其身份。
-        if event.task.id not in out.plan_tasks:
-            _append(out, TranscriptItem(
-                id=f"team-agent-{len(out.transcript)}", kind="system",
-                text=f"[{event.role}/{event.task.id}] Agent 已启动",
-                turn_id=turn_id, trace_id=f"{turn_id}:{event.agent_id}",
-            ))
+        group, group_id = _ensure_agent_group(out, event)
+        out.agent_groups[group_id] = replace(
+            group,
+            status="repairing" if event.role == "repairer" else "running",
+            latest_summary="Agent 已启动",
+        )
         return out
     if kind == "subtask_event" and event.agent_event:
-        trace = f"{turn_id}:{event.agent_id or (event.task.id if event.task else 'agent')}"
-        nested = reduce_agent_event(out, event.agent_event, turn_id, trace)
-        if event.agent_event.kind not in {"error", "context_overflow", "budget_exceeded"}:
-            nested.phase = "running"
-        return nested
+        group, group_id = _ensure_agent_group(out, event)
+        trace = f"{turn_id}:{group_id}"
+        return _reduce_agent_event_in_group(out, group_id, event.agent_event, turn_id, trace)
+    if kind == "agent_done" and event.task:
+        group, group_id = _ensure_agent_group(out, event)
+        out.agent_groups[group_id] = replace(
+            group,
+            status="done",
+            latest_summary=event.message[:240] or "Agent 已完成",
+        )
+        return out
+    if kind == "agent_failed" and event.task:
+        group, group_id = _ensure_agent_group(out, event)
+        out.agent_groups[group_id] = replace(
+            group,
+            status="failed",
+            latest_error=event.message[:240] or "Agent 执行失败",
+        )
+        return out
     if kind == "artifact_produced" and event.artifact:
+        group, group_id = _ensure_agent_group(out, event)
         summary = event.artifact.summary.replace("\n", " ")[:240]
-        _append(out, TranscriptItem(
-            id=f"team-artifact-{len(out.transcript)}", kind="context",
-            text=f"[{event.role}/{event.task.id if event.task else ''}] Artifact {event.artifact.kind}: {summary}",
-            turn_id=turn_id, trace_id=f"{turn_id}:artifacts", collapsible=True, collapsed=True,
-        ))
+        _append_group_entry(
+            out,
+            group_id,
+            TranscriptItem(
+                id=f"team-artifact-{group.event_count}", kind="context",
+                text=f"Artifact {event.artifact.kind}: {summary}",
+                turn_id=turn_id, trace_id=f"{turn_id}:{group_id}:artifact",
+                collapsible=True, collapsed=True,
+            ),
+            summary=summary,
+            artifact=True,
+        )
         return out
     if kind == "task_review_started" and event.task:
-        _append(out, TranscriptItem(
-            id=f"team-review-{len(out.transcript)}", kind="system",
-            text=f"[reviewer/{event.task.id}] 正在审查任务证据", turn_id=turn_id,
-        ))
+        group, group_id = _ensure_agent_group(
+            out, event, group_id=f"{event.team_id}:reviewer:{event.task.id}", role="reviewer"
+        )
+        out.agent_groups[group_id] = replace(
+            group, status="reviewing", latest_summary="正在审查任务证据"
+        )
         return out
     if kind == "task_review_done" and event.task and event.review:
         detail = "；".join(event.review.findings) or "验收通过"
-        _append(out, TranscriptItem(
-            id=f"team-review-result-{len(out.transcript)}", kind="context",
-            text=f"[reviewer/{event.task.id}] {event.review.verdict}: {detail[:320]}",
-            turn_id=turn_id, trace_id=f"{turn_id}:review", collapsible=True, collapsed=True,
-            status="success" if event.review.verdict == "pass" else "failed",
-        ))
+        group, group_id = _ensure_agent_group(
+            out, event, group_id=f"{event.team_id}:reviewer:{event.task.id}", role="reviewer"
+        )
+        _append_group_entry(
+            out,
+            group_id,
+            TranscriptItem(
+                id=f"team-review-result-{group.event_count}", kind="context",
+                text=f"{event.review.verdict}: {detail[:320]}",
+                turn_id=turn_id, trace_id=f"{turn_id}:{group_id}:review",
+                collapsible=True, collapsed=True,
+                status="success" if event.review.verdict == "pass" else "failed",
+            ),
+            summary=f"{event.review.verdict}: {detail}",
+            error=detail if event.review.verdict != "pass" else "",
+        )
+        out.agent_groups[group_id] = replace(
+            out.agent_groups[group_id],
+            status="done" if event.review.verdict == "pass" else "failed",
+        )
         return out
     if kind == "repair_requested" and event.task:
-        _append(out, TranscriptItem(
-            id=f"team-repair-{len(out.transcript)}", kind="system",
-            text=f"[repairer/{event.task.id}] {event.message[:320]}", turn_id=turn_id,
-        ))
+        group, group_id = _ensure_agent_group(out, event, role="repairer")
+        repair_attempt = 0
+        match = re.search(r"-repair-(\d+)$", event.task.id)
+        if match:
+            repair_attempt = int(match.group(1))
+        out.agent_groups[group_id] = replace(
+            group,
+            status="repairing",
+            repair_attempt=repair_attempt,
+            latest_summary=event.message[:240] or "等待 Repairer 启动",
+        )
         return out
     if kind in {"team_done", "cancelled"}:
         _collapse_turn(out, turn_id, status="cancelled" if kind == "cancelled" else "done")
+        _finish_agent_groups(out, "cancelled" if kind == "cancelled" else "done")
         out.phase = "idle"
         out.pending_plan = None
         final_status = "done" if kind == "team_done" else "cancelled"
@@ -693,6 +864,7 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
         return out
     if kind == "team_failed":
         _collapse_turn(out, turn_id, status="failed")
+        _finish_agent_groups(out, "failed")
         out.phase = "error"
         out.pending_plan = None
         out.inspector = replace(

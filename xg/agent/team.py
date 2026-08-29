@@ -689,7 +689,7 @@ class TeamExecutor:
                 result="",
                 artifacts=[],
             )
-            queue.put_nowait(TeamEvent(kind="repair_requested", team_id=self.team_id, plan=plan, task=task, role="repairer", message=repair.description))
+            queue.put_nowait(TeamEvent(kind="repair_requested", team_id=self.team_id, plan=plan, task=repair, role="repairer", message=repair.description))
             repair_result, repair_artifacts, repair_agent_id, repair_error = await self._execute_worker(plan, repair, queue)
             if repair_error:
                 review = ReviewResult(task.id, "fail", [repair_error], [repair_error], [])
@@ -697,7 +697,7 @@ class TeamExecutor:
                 for artifact in repair_artifacts:
                     await self.artifacts.publish(artifact)
                     task.artifacts.append(artifact.id)
-                    queue.put_nowait(TeamEvent(kind="artifact_produced", team_id=self.team_id, plan=plan, task=task, agent_id=repair_agent_id, role="repairer", artifact=artifact))
+                    queue.put_nowait(TeamEvent(kind="artifact_produced", team_id=self.team_id, plan=plan, task=repair, agent_id=repair_agent_id, role="repairer", artifact=artifact))
                 task.result = repair_result[:TEAM_RESULT_LIMIT]
                 try:
                     review = await self._review(plan, task, repair_artifacts, queue)

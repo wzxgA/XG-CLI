@@ -549,6 +549,19 @@ class SessionController:
         ]
         self._set_state(replace(self.state, transcript=items))
 
+    def toggle_agent_group(self, group_id: str) -> None:
+        """Toggle one Team Agent conversation without affecting its siblings."""
+        group = self.state.agent_groups.get(group_id)
+        if group is None:
+            return
+        groups = dict(self.state.agent_groups)
+        groups[group_id] = replace(
+            group,
+            collapsed=not group.collapsed,
+            user_toggled=True,
+        )
+        self._set_state(replace(self.state, agent_groups=groups))
+
     def refresh_diagrams(self) -> None:
         """Republish state so renderables recalculate their terminal layout."""
         self._publish()
