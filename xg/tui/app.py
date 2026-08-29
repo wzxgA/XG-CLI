@@ -60,7 +60,6 @@ class XgTuiApp(App[None]):
         ("ctrl+4", "inspector_safety", "Inspector Safety"),
         ("ctrl+tab", "inspector_next", "下一个 Inspector 视图"),
         ("ctrl+shift+tab", "inspector_previous", "上一个 Inspector 视图"),
-        ("f1", "show_help", "帮助"),
     ]
 
     def __init__(self, agent, settings: Settings, manager: ConfigManager) -> None:
@@ -565,12 +564,6 @@ class XgTuiApp(App[None]):
 
     def action_inspector_previous(self) -> None:
         self.controller.cycle_inspector_view(-1)
-
-    def action_show_help(self) -> None:
-        self._state = TuiState(
-            **{**self._state.__dict__, "notification": "Enter 发送 · Ctrl+C 取消 · /plan 计划 · /model 切换模型 · /mcp 外部能力", "notification_level": "info"}
-        )
-        self._render_state_immediately(self._state)
 
     async def on_unmount(self) -> None:
         self._stop_progress_timer()

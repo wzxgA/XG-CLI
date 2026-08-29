@@ -27,6 +27,7 @@ from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.config.web import WebConfigManager
 from xg.config.skills import SkillConfigManager
+from xg.cli.help import format_command_help, format_help
 from xg.input_history import HistoryConfig, InputHistory, PromptToolkitHistory
 from xg.llm.client import LlmClient, LlmError
 from xg.llm.factory import create_client
@@ -545,7 +546,7 @@ def _handle_command(
     arg = parts[1].strip() if len(parts) > 1 else ""
 
     if cmd in ("/help", "/?"):
-        return "用法: /plan /model /config /mcp /web /skill /history /init /save /memory /hitl /clear /cancel /exit", False
+        return format_command_help(arg) if arg else format_help(), False
     if cmd in ("/exit", "/quit"):
         return "再见。", True
     if cmd == "/clear":

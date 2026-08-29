@@ -113,16 +113,26 @@ class CommandService:
         if raw.lower() in ("/cancel", "/c"):
             return CommandResult(ok=True, message="已请求取消当前任务")
 
-        if raw.split(maxsplit=1)[0].lower() == "/mcp":
+        parts = raw.split(maxsplit=1)
+        if parts[0].lower() in ("/help", "/?"):
+            from xg.cli.help import format_command_help, format_help
+
+            query = parts[1].strip() if len(parts) > 1 else ""
+            return CommandResult(
+                ok=True,
+                message=format_command_help(query) if query else format_help(),
+            )
+
+        if parts[0].lower() == "/mcp":
             message, ok = await execute_mcp_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
-        if raw.split(maxsplit=1)[0].lower() == "/web":
+        if parts[0].lower() == "/web":
             message, ok = await execute_web_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
-        if raw.split(maxsplit=1)[0].lower() == "/skill":
+        if parts[0].lower() == "/skill":
             message, ok = await execute_skill_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
-        if raw.split(maxsplit=1)[0].lower() == "/history":
+        if parts[0].lower() == "/history":
             message, ok = await execute_history_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
 

@@ -10,7 +10,8 @@ import pytest
 
 from xg.agent.react import ReActAgent
 from xg.cli.app import _handle_command
-from xg.cli.commands import SLASH_COMMANDS, filter_slash_commands
+from xg.cli.commands import CommandContext, CommandService, SLASH_COMMANDS, filter_slash_commands
+from xg.cli.help import format_command_help, format_help
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient
@@ -180,6 +181,32 @@ class TestConfigCommand:
 
 
 class TestOtherCommands:
+    def test_help_lists_command_metadata_and_shortcuts(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/help")
+        assert output.startswith("XG 命令帮助\n")
+        assert "配置与能力" in output
+        assert "/mcp status|restart|logs|enable|disable|resources" in output
+        assert "管理 MCP Server" in output
+        assert "/? = /help" in output
+        assert "Ctrl+C" in output
+        assert "f1" not in output.lower()
+        assert len(agent.messages) == 1
+
+    def test_help_alias_and_single_command_details(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/? mcp")
+        assert output == (
+            "/mcp — 管理 MCP Server\n"
+            "用法：/mcp status|restart|logs|enable|disable|resources"
+        )
+
+    def test_help_unknown_command_is_actionable(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/help missing")
+        assert "未找到命令帮助" in output
+        assert "/help 查看全部命令" in output
+
     def test_unknown_command(self, tmp_path):
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         message, should_exit = _handle_command(agent, settings, manager, "/foo")
@@ -209,3 +236,26 @@ def test_slash_command_catalog_is_stable_and_prefix_filtered():
     assert filter_slash_commands("/memory list") == ()
     assert len({spec.name for spec in SLASH_COMMANDS}) == len(SLASH_COMMANDS)
     assert all(spec.name.startswith("/") for spec in SLASH_COMMANDS)
+
+
+def test_help_formatting_is_catalog_driven_and_can_omit_shortcuts():
+    output = format_help(include_shortcuts=False)
+    for spec in SLASH_COMMANDS:
+        assert spec.usage in output
+        assert spec.description in output
+    assert "TUI 快捷键" not in output
+    assert "f1" not in output.lower()
+
+
+def test_command_help_accepts_name_or_alias():
+    assert format_command_help("cancel").startswith("/cancel —")
+    assert format_command_help("/c").startswith("/cancel —")
+
+
+@pytest.mark.asyncio
+async def test_command_service_uses_shared_help_formatter(tmp_path):
+    agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+    result = await CommandService(CommandContext(agent, settings, manager)).execute("/help model")
+    assert result.ok is True
+    assert result.message.startswith("/model —")
+    assert "用法：/model [provider] [model]" in result.message

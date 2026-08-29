@@ -225,6 +225,20 @@ async def test_controller_submit_returns_to_idle(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_controller_help_is_system_output_without_llm_turn(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    controller = SessionController(agent, settings, manager)
+
+    assert await controller.submit("/help") is True
+
+    assert controller.state.phase == "idle"
+    assert [item.kind for item in controller.state.transcript] == ["system"]
+    assert controller.state.transcript[0].text.startswith("XG 命令帮助")
+    assert "/mcp status|restart|logs|enable|disable|resources" in controller.state.transcript[0].text
+    assert len(agent.messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_controller_shows_progress_before_first_agent_event(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
