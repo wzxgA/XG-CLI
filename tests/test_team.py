@@ -21,6 +21,7 @@ from xg.llm.client import LlmClient
 from xg.llm.types import StreamEvent, ToolCall, ToolResult
 from xg.tool.builtin import build_registry
 from xg.tui.reducer import reduce_team_event
+from xg.tui.plan_renderables import PlanReviewCard
 from xg.tui.renderables import agent_group_renderable
 from xg.tui.state import AgentGroupState, TuiState
 from xg.tui.widgets.agent_group_card import AgentGroupCard
@@ -208,6 +209,32 @@ def test_team_events_keep_role_and_task_progress_in_tui_state():
     state = reduce_team_event(state, TeamEvent("task_started", team_id="team-1", plan=plan, task=tasks[0], role="coder"), "turn-1")
     assert state.plan_tasks["t1"] == "running"
     assert any("coder/t1" in item.text for item in state.transcript)
+
+
+def test_team_plan_review_card_shows_full_plan_before_execution():
+    from rich.console import Console
+    from xg.agent.team import TeamEvent, TeamPlan
+
+    tasks, _ = parse_team_tasks(json.dumps({"tasks": [
+        {"id": "t1", "title": "读取项目结构", "description": "检查目录和配置", "deps": []},
+        {"id": "t2", "title": "汇总调研结果", "description": "整理调研结论", "deps": ["t1"]},
+    ]}))
+    plan = TeamPlan("调研项目", tasks, [["t1"], ["t2"]])
+    state = reduce_team_event(
+        TuiState(active_turn_id="turn-1"),
+        TeamEvent("team_plan_generated", team_id="team-1", plan=plan),
+        "turn-1",
+    )
+
+    output = StringIO()
+    Console(file=output, width=120).print(PlanReviewCard(state.transcript[-1]))
+    rendered = output.getvalue()
+
+    assert "共 2 轮" in rendered
+    assert "第 1 轮：t1" in rendered
+    assert "第 2 轮：t2" in rendered
+    assert "t1 读取项目结构" in rendered
+    assert "t2 汇总调研结果" in rendered
 
 
 def test_team_agent_events_are_isolated_in_default_collapsed_groups():

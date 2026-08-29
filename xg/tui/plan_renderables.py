@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from xg.agent.plan import Plan, PlanTask
+from xg.agent.team import TeamPlan
 from xg.tui.diagrams.model import FlowchartEdge, FlowchartModel, FlowchartNode
 from xg.tui.diagrams.renderer import render_flowchart
 from xg.tui.state import TranscriptItem
@@ -21,7 +22,7 @@ class PlanFlowchartData:
     ordered_ids: tuple[str, ...]
 
 
-def plan_to_flowchart(plan: Plan) -> PlanFlowchartData:
+def plan_to_flowchart(plan: Plan | TeamPlan) -> PlanFlowchartData:
     """Adapt an already validated Plan DAG to the text flowchart model."""
     tasks = {task.id: task for task in plan.tasks}
     ordered_ids: list[str] = []
@@ -71,7 +72,7 @@ def _task_title_text(task: PlanTask) -> Text:
     return line
 
 
-def _task_summary_renderable(plan: Plan, ordered_ids: tuple[str, ...], detailed: bool) -> Group:
+def _task_summary_renderable(plan: Plan | TeamPlan, ordered_ids: tuple[str, ...], detailed: bool) -> Group:
     """Render the task heading, keyboard hint, and task content separately."""
     tasks = {task.id: task for task in plan.tasks}
     renderables: list[object] = [
@@ -100,7 +101,9 @@ class PlanReviewCard:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         plan = self.item.plan
-        if not isinstance(plan, Plan):
+        # /plan uses Plan while /team uses TeamPlan. Both expose the same
+        # validated task/batch shape needed by this read-only renderer.
+        if not isinstance(plan, (Plan, TeamPlan)):
             yield Panel(Text(self.item.text or "计划不可用"), title="计划审阅", border_style="magenta")
             return
         data = plan_to_flowchart(plan)
