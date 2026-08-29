@@ -258,3 +258,35 @@ class ConfigManager:
         if isinstance(node, (str, int, float, bool)):
             return str(node)
         return json.dumps(node, ensure_ascii=False)
+
+    # ---------- UI 偏好 ----------
+
+    def get_ui_language(self) -> str:
+        """读取 Inspector language；非法值回退到 English。"""
+        value = self.get_config_value("ui_language")
+        return value.strip().lower() if value and value.strip().lower() in {"en", "zh"} else "en"
+
+    def ui_language_source(self) -> str:
+        """返回 Inspector language 的配置来源，便于 /lang 展示。"""
+        project = self._read_config(self.project_config_path)
+        if str(project.get("ui_language", "")).strip().lower() in {"en", "zh"}:
+            return "project config"
+        user = self._read_config(self.user_config_path)
+        if str(user.get("ui_language", "")).strip().lower() in {"en", "zh"}:
+            return "user config"
+        return "default"
+
+    def set_ui_language(self, language: str) -> None:
+        """Persist a validated Inspector language in the user config."""
+        normalized = language.strip().lower()
+        if normalized not in {"en", "zh"}:
+            raise ValueError("ui_language must be en or zh")
+        self.set_config_value("ui_language", normalized)
+
+    def reset_ui_language(self) -> None:
+        """Remove the user override for Inspector language."""
+        user = self._read_config(self.user_config_path)
+        if "ui_language" not in user:
+            return
+        user.pop("ui_language")
+        self._write_config(self.user_config_path, user)

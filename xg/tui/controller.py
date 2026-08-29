@@ -64,6 +64,7 @@ class SessionController:
         policy = agent.approval_policy
         memory_snapshot = self._read_memory_snapshot(agent.memory_manager)
         self.state = TuiState(
+            ui_language=settings.ui_language,
             inspector=replace(
                 TuiState().inspector,
                 session=SessionInspectorSnapshot(
@@ -296,14 +297,14 @@ class SessionController:
             self._queue.clear()
             self._publish_queue(notification="正在退出，已清理等待队列")
             return True
-        if self.state.phase == "awaiting_plan_review":
+        if self.state.phase == "awaiting_plan_review" and not self._is_language_command(text):
             self._set_state(replace(
                 self.state,
                 notification="当前处于计划审阅，请按 Enter 执行、r 重规划或 Esc 取消",
                 notification_level="info",
             ))
             return False
-        if self.busy and self._is_readonly_mcp_command(text):
+        if self.busy and (self._is_readonly_mcp_command(text) or self._is_language_command(text)):
             result = await self.execute_command(text)
             if result.message:
                 self._append_system(result.message)
@@ -534,7 +535,8 @@ class SessionController:
     async def execute_command(self, raw: str) -> CommandResult:
         current = asyncio.current_task()
         is_help = parse_help_command(raw) is not None
-        if self.busy and self._active_task is not current and not self._is_readonly_mcp_command(raw) and not is_help:
+        is_language = self._is_language_command(raw)
+        if self.busy and self._active_task is not current and not self._is_readonly_mcp_command(raw) and not is_help and not is_language:
             return CommandResult(ok=False, message="当前任务正在运行，请通过输入提交命令以加入队列")
         if raw.strip().lower() in ("/cancel", "/c"):
             await self.cancel()
@@ -598,6 +600,7 @@ class SessionController:
         policy = self.agent.approval_policy
         self._set_state(replace(
             self.state,
+            ui_language=self.settings.ui_language,
             transcript=[] if cleared else self.state.transcript,
             inspector=replace(
                 self.state.inspector,
@@ -621,6 +624,11 @@ class SessionController:
             ),
         ))
         return result
+
+    @staticmethod
+    def _is_language_command(raw: str) -> bool:
+        parts = raw.strip().lower().split()
+        return bool(parts and parts[0] in {"/lang", "/language"})
 
     @staticmethod
     def _is_readonly_mcp_command(raw: str) -> bool:

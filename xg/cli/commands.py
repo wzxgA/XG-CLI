@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from xg.tui.i18n import normalize_language
+
 
 @dataclass
 class CommandContext:
@@ -207,6 +209,18 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
             "/memory clear",
         ),
     ),
+    SlashCommandSpec(
+        "/lang",
+        aliases=("/language",),
+        usage="/lang [en|zh|reset]",
+        description="查看或切换 Inspector language",
+        category="session",
+        details=(
+            "默认语言为 English；切换只影响 TUI 右侧 Inspector，不影响 Agent 对话。",
+            "reset 会清除用户级语言偏好并恢复 English。",
+        ),
+        examples=("/lang", "/lang zh", "/lang en", "/lang reset"),
+    ),
     SlashCommandSpec("/help", aliases=("/?",), usage="/help", description="查看命令帮助", category="general"),
     SlashCommandSpec(
         "/init",
@@ -308,6 +322,9 @@ class CommandService:
                 message=format_command_help(query) if query else format_help(),
             )
 
+        if parts[0].lower() in ("/lang", "/language"):
+            return _execute_language_command(self.context.settings, self.context.manager, raw)
+
         if parts[0].lower() == "/mcp":
             message, ok = await execute_mcp_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
@@ -341,6 +358,55 @@ class CommandService:
             self.context.agent, self.context.settings, self.context.manager, raw
         )
         return CommandResult(ok=not (message and message.startswith("未知命令")), message=message or "", should_exit=should_exit)
+
+
+def _execute_language_command(settings: Any, manager: Any, raw: str) -> CommandResult:
+    """Handle the UI-only language preference without touching the Agent."""
+    parts = raw.split()
+    current = normalize_language(getattr(settings, "ui_language", "en"))
+    if len(parts) == 1:
+        source = "default"
+        if hasattr(manager, "ui_language_source"):
+            source = manager.ui_language_source()
+        return CommandResult(
+            ok=True,
+            message=(
+                f"Inspector language: {current} (source: {source})\n"
+                "Available: en, zh\n"
+                "Usage: /lang en|zh|reset"
+            ),
+            data={"ui_language": current, "persisted": True},
+        )
+    if len(parts) != 2 or parts[1].lower() not in {"en", "zh", "reset"}:
+        return CommandResult(
+            ok=False,
+            message="Usage: /lang [en|zh|reset]",
+            data={"ui_language": current, "persisted": False},
+        )
+
+    requested = parts[1].lower()
+    language = "en" if requested == "reset" else requested
+    persisted = True
+    try:
+        if requested == "reset":
+            manager.reset_ui_language()
+        else:
+            manager.set_ui_language(language)
+    except (AttributeError, OSError, ValueError) as exc:
+        # A read-only or broken config directory must not prevent a session
+        # from changing its presentation language.
+        persisted = False
+        warning = f" (session only; could not persist: {exc})"
+    else:
+        warning = ""
+
+    settings.ui_language = language
+    action = "reset to English" if requested == "reset" else f"changed to {language}"
+    return CommandResult(
+        ok=True,
+        message=f"Inspector language {action}.{warning}",
+        data={"ui_language": language, "persisted": persisted},
+    )
 
 
 async def execute_mcp_command(agent: Any, raw: str) -> tuple[str, bool]:

@@ -552,6 +552,11 @@ def _handle_command(
     if cmd == "/clear":
         agent.clear()
         return "上下文已清空。", False
+    if cmd in ("/lang", "/language"):
+        from xg.cli.commands import _execute_language_command
+
+        result = _execute_language_command(settings, manager, raw)
+        return result.message, False
     if cmd == "/model":
         return _cmd_model(agent, settings, manager, arg), False
     if cmd == "/config":

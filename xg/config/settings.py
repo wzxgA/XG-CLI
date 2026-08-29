@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from xg.config.manager import ConfigManager
 from xg.config.skills import SkillConfigManager
+from xg.tui.i18n import UiLanguage, normalize_language
 
 
 @dataclass
@@ -83,6 +84,8 @@ class Settings:
     input_history_max_chars: int = 8_000
     input_history_max_bytes: int = 1_048_576
     extra: dict[str, str] = field(default_factory=dict)
+    # Inspector UI language; this does not affect Agent prompts or responses.
+    ui_language: UiLanguage = "en"
 
     @property
     def token_budget(self) -> int:
@@ -125,6 +128,7 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         plan_subtask_steps=_get_int(manager.env, "XG_PLAN_SUBTASK_STEPS", 10),
         plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
         tui_refresh_fps=max(5, min(60, _get_int(manager.env, "XG_TUI_REFRESH_FPS", 20))),
+        ui_language=normalize_language(manager.get_ui_language()),
         mcp_enabled=manager.env.get("XG_MCP_ENABLED", "on").lower() not in ("off", "0", "false"),
         mcp_startup_timeout=max(0.1, _get_float(manager.env, "XG_MCP_STARTUP_TIMEOUT", 15.0)),
         mcp_request_timeout=max(0.1, _get_float(manager.env, "XG_MCP_REQUEST_TIMEOUT", 120.0)),

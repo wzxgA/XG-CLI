@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from xg.tui.i18n import UiLanguage
+
 
 TranscriptKind = Literal[
     "user", "assistant", "thinking", "tool_call", "tool_result", "approval",
@@ -158,6 +160,8 @@ class TuiState:
     notification_level: Literal["info", "warning", "error"] = "info"
     plan_tasks: dict[str, str] = field(default_factory=dict)
     queue: list[QueueItem] = field(default_factory=list)
+    # UI preference only; never serialized into Agent messages or memory.
+    ui_language: UiLanguage = "en"
 
 
 @dataclass(frozen=True)
