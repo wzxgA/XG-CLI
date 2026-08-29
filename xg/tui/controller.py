@@ -11,6 +11,7 @@ from typing import Awaitable, Callable
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, ReviewDecision
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.cli.commands import CommandContext, CommandResult, CommandService
+from xg.cli.help import parse_help_command
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.safety.hitl import ApprovalDecision
@@ -281,6 +282,11 @@ class SessionController:
         if not text:
             return False
         lowered = text.lower()
+        if parse_help_command(text) is not None:
+            result = await self.execute_command(text)
+            if result.message:
+                self._append_help(result.message)
+            return result.ok
         if lowered in ("/cancel", "/c"):
             await self.cancel()
             return True
@@ -527,7 +533,8 @@ class SessionController:
 
     async def execute_command(self, raw: str) -> CommandResult:
         current = asyncio.current_task()
-        if self.busy and self._active_task is not current and not self._is_readonly_mcp_command(raw):
+        is_help = parse_help_command(raw) is not None
+        if self.busy and self._active_task is not current and not self._is_readonly_mcp_command(raw) and not is_help:
             return CommandResult(ok=False, message="当前任务正在运行，请通过输入提交命令以加入队列")
         if raw.strip().lower() in ("/cancel", "/c"):
             await self.cancel()
@@ -710,6 +717,10 @@ class SessionController:
     def _append_system(self, message: str) -> None:
         if message:
             self._append_item(TranscriptItem(id=f"system-{len(self.state.transcript)}", kind="system", text=message))
+
+    def _append_help(self, message: str) -> None:
+        if message:
+            self._append_item(TranscriptItem(id=f"help-{len(self.state.transcript)}", kind="help", text=message))
 
     def _remove_progress(self, turn_id: str) -> None:
         """Remove the local waiting indicator for one active turn."""

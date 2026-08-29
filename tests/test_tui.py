@@ -225,14 +225,14 @@ async def test_controller_submit_returns_to_idle(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_controller_help_is_system_output_without_llm_turn(tmp_path):
+async def test_controller_help_is_inline_card_without_llm_turn(tmp_path):
     agent, settings, manager = make_context(tmp_path)
     controller = SessionController(agent, settings, manager)
 
     assert await controller.submit("/help") is True
 
     assert controller.state.phase == "idle"
-    assert [item.kind for item in controller.state.transcript] == ["system"]
+    assert [item.kind for item in controller.state.transcript] == ["help"]
     assert controller.state.transcript[0].text.startswith("XG 命令帮助")
     assert "/mcp status|restart|logs|enable|disable|resources" in controller.state.transcript[0].text
     assert len(agent.messages) == 1
@@ -604,6 +604,40 @@ async def test_tui_modals_open_and_close(tmp_path):
         app.push_screen(ApprovalModal(ApprovalRequest("execute_command", "always", {"command": "echo hi"})))
         await pilot.pause()
         await pilot.press("r")
+
+
+@pytest.mark.asyncio
+async def test_tui_help_uses_inline_card_without_llm_turn(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(80, 24)) as pilot:
+        composer = app.query_one("#composer")
+        composer.value = "/help"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(app.screen_stack) == 1
+        assert [item.kind for item in app.controller.state.transcript] == ["help"]
+        assert app.controller.state.transcript[0].text.startswith("XG 命令帮助")
+        assert "/mcp status|restart|logs|enable|disable|resources" in app.controller.state.transcript[0].text
+        assert len(agent.messages) == 1
+        assert composer.has_focus
+
+
+@pytest.mark.asyncio
+async def test_tui_help_query_uses_same_command_catalog_inline(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(80, 24)) as pilot:
+        composer = app.query_one("#composer")
+        composer.value = "/help mcp"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(app.screen_stack) == 1
+        assert [item.kind for item in app.controller.state.transcript] == ["help"]
+        assert app.controller.state.transcript[0].text.startswith("/mcp — 管理 MCP Server")
+        assert "/mcp status|restart|logs|enable|disable|resources" in app.controller.state.transcript[0].text
 
 
 @pytest.mark.asyncio

@@ -43,6 +43,15 @@ def _command_key(value: str) -> str:
     return value.strip().lower().lstrip("/")
 
 
+def parse_help_command(raw: str) -> str | None:
+    """Return the optional help query, or ``None`` for a non-help input."""
+
+    parts = raw.strip().split(maxsplit=1)
+    if not parts or parts[0].lower() not in ("/help", "/?"):
+        return None
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
 def _aliases_text(spec: SlashCommandSpec) -> str:
     if not spec.aliases:
         return ""
@@ -125,15 +134,7 @@ def format_command_help(
     if not normalized:
         return format_help(commands)
 
-    spec = next(
-        (
-            item
-            for item in commands
-            if _command_key(item.name) == normalized
-            or any(_command_key(alias) == normalized for alias in item.aliases)
-        ),
-        None,
-    )
+    spec = find_command(token, commands)
     if spec is None:
         return f"未找到命令帮助：{token}。输入 /help 查看全部命令。"
 
@@ -142,3 +143,22 @@ def format_command_help(
         lines.append(f"别名：{'、'.join(spec.aliases)}")
     return "\n".join(lines)
 
+
+def find_command(
+    query: str,
+    commands: Sequence[SlashCommandSpec] = SLASH_COMMANDS,
+) -> SlashCommandSpec | None:
+    """Find a command by its name or alias."""
+
+    normalized = _command_key(query)
+    if not normalized:
+        return None
+    return next(
+        (
+            item
+            for item in commands
+            if _command_key(item.name) == normalized
+            or any(_command_key(alias) == normalized for alias in item.aliases)
+        ),
+        None,
+    )

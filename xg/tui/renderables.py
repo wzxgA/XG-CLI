@@ -164,6 +164,8 @@ def render_item(item: TranscriptItem):
         return Panel(Text(item.text or "工具审批结果"), title=f"审批 · {item.tool_name}", border_style="yellow")
     if item.kind == "context":
         return Panel(Text(item.text), title="上下文", border_style="blue")
+    if item.kind == "help":
+        return Panel(Text(_truncate(item.text)), title="命令帮助", border_style="cyan")
     if item.kind == "plan":
         plan = item.plan
         if plan is None:

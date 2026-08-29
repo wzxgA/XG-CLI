@@ -14,6 +14,7 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from xg.agent.plan import ReviewDecision
+from xg.cli.help import parse_help_command
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.input_history import HistoryConfig, InputHistory
@@ -425,6 +426,11 @@ class XgTuiApp(App[None]):
 
     def on_input_submitted(self, event: Composer.Submitted) -> None:
         text = event.value.strip()
+        help_query = parse_help_command(text)
+        if help_query is not None:
+            event.input.value = ""
+            asyncio.create_task(self._submit_text(text))
+            return
         if self._route_decision_input(text, event.input):
             return
         if self._has_pending_plan() and not self._replan_mode:
@@ -450,7 +456,8 @@ class XgTuiApp(App[None]):
         try:
             accepted = await self.controller.submit(text)
             composer = self.query_one("#composer", Composer)
-            composer.record_submission(text, accepted)
+            if parse_help_command(text) is None:
+                composer.record_submission(text, accepted)
             if not accepted:
                 if not composer.value:
                     composer.value = text
