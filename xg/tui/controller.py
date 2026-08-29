@@ -10,12 +10,13 @@ from typing import Awaitable, Callable
 
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, ReviewDecision
 from xg.agent.react import AgentEvent, ReActAgent
+from xg.agent.team import TeamEvent, TeamExecutor, TeamPlan
 from xg.cli.commands import CommandContext, CommandResult, CommandService
 from xg.cli.help import parse_help_command
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.safety.hitl import ApprovalDecision
-from xg.tui.reducer import finalize_trace, reduce_agent_event, reduce_plan_event
+from xg.tui.reducer import finalize_trace, reduce_agent_event, reduce_plan_event, reduce_team_event
 from xg.tui.state import (
     ApprovalRequest,
     ConfirmationRequest,
@@ -214,6 +215,8 @@ class SessionController:
         lowered = text.lower()
         if lowered.startswith("/plan"):
             return "plan"
+        if lowered.startswith("/team"):
+            return "plan"
         if lowered.startswith("/"):
             return "command"
         return "task"
@@ -318,7 +321,7 @@ class SessionController:
 
     async def _execute_one(self, text: str) -> bool:
         lowered = text.lower()
-        if text.startswith("/") and not lowered.startswith("/plan"):
+        if text.startswith("/") and not lowered.startswith(("/plan", "/team")):
             current = asyncio.current_task()
             self._active_task = current
             try:
@@ -334,12 +337,13 @@ class SessionController:
         if turn_id is None:
             return False
         self._append_item(TranscriptItem(id=f"user-{len(self.state.transcript)}", kind="user", text=text, turn_id=turn_id))
-        is_plan = text.lower().startswith("/plan")
-        goal = text[5:].strip() if is_plan else ""
-        if is_plan and not goal:
-            self._append_system("用法: /plan <任务描述>")
+        is_plan = lowered.startswith("/plan")
+        is_team = lowered.startswith("/team")
+        goal = text[5:].strip() if (is_plan or is_team) else ""
+        if (is_plan or is_team) and not goal:
+            self._append_system(f"用法: {'/team' if is_team else '/plan'} <任务描述>")
             return True
-        if is_plan:
+        if is_plan or is_team:
             progress_text = "正在生成执行计划"
         else:
             progress_text = "正在准备响应"
@@ -357,6 +361,8 @@ class SessionController:
         try:
             if is_plan:
                 await self._run_plan(goal, turn_id)
+            elif is_team:
+                await self._run_team(goal, turn_id)
             else:
                 await self._run_agent(text, turn_id)
         except asyncio.CancelledError:
@@ -390,6 +396,21 @@ class SessionController:
         )
         async for event in executor.run(goal):
             self._set_state(reduce_plan_event(self.state, event, turn_id))
+
+    async def _run_team(self, goal: str, turn_id: str) -> None:
+        executor = TeamExecutor(
+            llm=self.agent.llm,
+            tools=self.agent.tools,
+            settings=self.settings,
+            reviewer=self._review_plan,
+            approval_policy=self.agent.approval_policy,
+            audit=self.agent.audit,
+            memory_manager=self.agent.memory_manager,
+            mcp_manager=getattr(self.agent, "mcp_manager", None),
+            project_root=getattr(self.agent.memory_manager, "project_root", None),
+        )
+        async for event in executor.run(goal):
+            self._set_state(reduce_team_event(self.state, event, turn_id))
 
     async def cancel(self) -> bool:
         if self._confirmation is not None:

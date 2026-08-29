@@ -22,6 +22,7 @@ from rich.text import Text
 
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, PlanTask, ReviewDecision
 from xg.agent.react import DEFAULT_SYSTEM_PROMPT, AgentEvent, ReActAgent
+from xg.agent.team import TeamEvent, TeamExecutor, TeamPlan, TeamTask
 from xg.config.manager import ConfigManager, mask_key
 from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
@@ -45,7 +46,7 @@ console = Console()
 
 BANNER = """\
 [XG] Agent CLI v0.1.0
-输入任务开始对话；/plan 先拆解计划再执行，/model 切换 provider 或模型，
+输入任务开始对话；/plan 先拆解计划再执行，/team 使用多 Agent 协作，/model 切换 provider 或模型，
 /config 查看/设置配置，/init 初始化项目记忆，/save 保存记忆，
 /memory 管理记忆，/mcp 管理外部能力，/web 查看联网能力，/hitl 审批开关，/clear 清空上下文，/exit 退出。
 也可以使用 /skill list|load|enable|disable 管理本地任务规范，/history status|clear 管理输入历史。
@@ -161,8 +162,9 @@ def build_agent(
 class ApprovalUI:
     """HITL 审批交互：绑定 Live 以暂停流式渲染，读取用户决策。"""
 
-    def __init__(self, session: PromptSession[str]) -> None:
+    def __init__(self, session: PromptSession[str], label: str = "plan") -> None:
         self.session = session
+        self.label = label
         self._live: Live | None = None
 
     def bind_live(self, live: Live) -> None:
@@ -278,7 +280,7 @@ class PlanReviewUI:
         # 面板已由 plan_generated 事件渲染（含 warnings），这里只读决策，不重复打印
         while True:
             answer = (await self.session.prompt_async(
-                HTML("<ansiyellow>[plan] Enter 执行 / d 详情 / r 重规划 / ESC 取消 ></ansiyellow> "),
+                HTML(f"<ansiyellow>[{self.label}] Enter 执行 / d 详情 / r 重规划 / ESC 取消 ></ansiyellow> "),
                 key_bindings=_escape_cancel_bindings(),
             )).strip().lower()
             if answer == "":
@@ -288,7 +290,7 @@ class PlanReviewUI:
                 continue
             if answer == "r":
                 feedback = await self.session.prompt_async(
-                    HTML("<ansicyan>[plan] 补充要求（空行返回不重规划）></ansicyan> ")
+                    HTML(f"<ansicyan>[{self.label}] 补充要求（空行返回不重规划）></ansicyan> ")
                 )
                 feedback = feedback.strip()
                 if not feedback:
@@ -392,9 +394,67 @@ def _render_plan_event(event: PlanEvent) -> None:
         console.print(Panel(Text(event.message), title="plan_failed", border_style="red"))
 
 
-def _render_subtask_event(task: PlanTask, ae: AgentEvent) -> None:
+def _print_team_panel(plan: TeamPlan, note: str = "") -> None:
+    table = Table.grid(padding=(0, 1))
+    table.add_column(style="magenta", justify="right", no_wrap=True)
+    table.add_column()
+    for index, batch in enumerate(plan.batches, 1):
+        table.add_row(f"第 {index} 轮", Text(", ".join(batch), style="bold"))
+        for task_id in batch:
+            task = plan.task_by_id(task_id)
+            assert task is not None
+            deps = f"（依赖 {', '.join(task.deps)}）" if task.deps else ""
+            table.add_row("", f"{task.id} [{task.owner_role}] {task.title}{deps}")
+            criteria = "；".join(task.acceptance_criteria[:2])
+            if criteria:
+                table.add_row("", Text(f"    验收：{criteria}", style="dim"))
+    lines = [table]
+    if note:
+        lines.append(Text(f"提示: {note}", style="yellow"))
+    console.print(Panel(*lines, title=f"团队计划: {plan.goal}", border_style="magenta"))
+
+
+def _render_team_event(event: TeamEvent) -> None:
+    """渲染 Team 事件，保留角色、任务和审查身份。"""
+    task = event.task
+    if event.kind == "team_plan_generated" and event.plan:
+        _print_team_panel(event.plan, note=event.message)
+    elif event.kind == "approved":
+        console.print(Text("团队计划已批准，开始执行。", style="green"))
+    elif event.kind == "cancelled":
+        console.print(Text(f"团队计划已取消：{event.message}", style="yellow"))
+    elif event.kind == "replanned":
+        console.print(Text(f"按反馈重新规划团队：{event.message}", style="dim"))
+    elif event.kind == "batch_started":
+        console.print(Text(f"── {event.message}: {', '.join(event.batch)}", style="cyan"))
+    elif event.kind in {"task_started", "agent_started"} and task:
+        console.print(Text(f"▶ [{event.role}/{task.id}] {task.title}", style="dim"))
+    elif event.kind == "subtask_event" and task and event.agent_event:
+        _render_subtask_event(task, event.agent_event, role=event.role)
+    elif event.kind == "artifact_produced" and event.artifact:
+        summary = event.artifact.summary.replace("\n", " ")[:160]
+        console.print(Text(f"  [{event.role}/{task.id if task else ''}] Artifact {event.artifact.kind}: {summary}", style="dim cyan"))
+    elif event.kind == "task_review_started" and task:
+        console.print(Text(f"  [reviewer/{task.id}] 开始审查任务证据", style="yellow"))
+    elif event.kind == "task_review_done" and task and event.review:
+        style = "green" if event.review.verdict == "pass" else "red"
+        detail = "；".join(event.review.findings) or "验收通过"
+        console.print(Text(f"  [reviewer/{task.id}] {event.review.verdict}: {detail[:240]}", style=style))
+    elif event.kind == "repair_requested" and task:
+        console.print(Text(f"  [repairer/{task.id}] {event.message[:240]}", style="yellow"))
+    elif event.kind == "task_done" and task:
+        console.print(Text(f"OK [{task.owner_role}/{task.id}]: {event.message[:200]}", style="green"))
+    elif event.kind in {"task_failed", "agent_failed"} and task:
+        console.print(Text(f"FAIL [{event.role or task.owner_role}/{task.id}]: {event.message[:240]}", style="red"))
+    elif event.kind == "team_done":
+        console.print(Panel(Text(event.message), title="team_done", border_style="green"))
+    elif event.kind == "team_failed":
+        console.print(Panel(Text(event.message), title="team_failed", border_style="red"))
+
+
+def _render_subtask_event(task: PlanTask | TeamTask, ae: AgentEvent, role: str = "") -> None:
     """渲染子任务内部转发的 AgentEvent（前缀子任务 id）。"""
-    prefix = f"  [{task.id}]"
+    prefix = f"  [{role + '/' if role else ''}{task.id}]"
     if ae.kind == "context_compacted":
         console.print(Text(f"{prefix} {ae.text}", style="dim cyan"))
     elif ae.kind == "context_warning":
@@ -437,6 +497,34 @@ async def handle_plan_turn(
             _render_plan_event(event)
     except LlmError as e:
         console.print(Panel(Text(f"请求失败: {e}"), style="red"))
+
+
+async def handle_team_turn(
+    agent: ReActAgent,
+    settings: Settings,
+    goal: str,
+    session: PromptSession[str],
+    approval_ui: ApprovalUI | None = None,
+) -> None:
+    """执行 /team 全流程并渲染角色、Artifact 和审查事件。"""
+    if approval_ui is not None:
+        approval_ui.unbind_live()
+    executor = TeamExecutor(
+        llm=agent.llm,
+        tools=agent.tools,
+        settings=settings,
+        reviewer=PlanReviewUI(session, label="team"),
+        approval_policy=agent.approval_policy,
+        audit=agent.audit,
+        memory_manager=agent.memory_manager,
+        mcp_manager=getattr(agent, "mcp_manager", None),
+        project_root=getattr(agent.memory_manager, "project_root", None),
+    )
+    try:
+        async for event in executor.run(goal):
+            _render_team_event(event)
+    except LlmError as exc:
+        console.print(Panel(Text(f"请求失败: {exc}"), style="red"))
 
 
 async def run_loop(agent: ReActAgent, settings: Settings, manager: ConfigManager) -> None:
@@ -492,6 +580,17 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
                 await handle_plan_turn(agent, settings, goal, session, approval_ui)
             except KeyboardInterrupt:
                 console.print(Text("（已中断计划执行）", style="yellow"))
+            continue
+
+        if user_input.startswith("/team"):
+            goal = user_input[5:].strip()
+            if not goal:
+                console.print(Text("用法: /team <任务描述>", style="yellow"))
+                continue
+            try:
+                await handle_team_turn(agent, settings, goal, session, approval_ui)
+            except KeyboardInterrupt:
+                console.print(Text("（已中断团队执行）", style="yellow"))
             continue
 
         if user_input.lower().startswith(("/init", "/save", "/memory")):
@@ -570,7 +669,7 @@ def _handle_command(
     if cmd == "/mcp":
         mcp = getattr(agent, "mcp_manager", None)
         return (mcp.format_status() if mcp is not None else "MCP 未初始化。"), False
-    return f"未知命令: {cmd}。可用: /plan /model /config /mcp /init /save /memory /hitl /clear /exit", False
+    return f"未知命令: {cmd}。可用: /plan /team /model /config /mcp /init /save /memory /hitl /clear /exit", False
 
 
 def _memory_manager(agent: ReActAgent) -> MemoryManager | None:

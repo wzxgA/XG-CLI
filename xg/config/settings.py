@@ -47,6 +47,10 @@ class Settings:
     plan_subtask_steps: int = 10
     # 计划模式：计划级允许的子任务失败数（超出终止剩余批次）
     plan_max_failures: int = 3
+    # 第 10 期：Team 协作限制
+    team_max_agents: int = 4
+    team_max_repairs: int = 2
+    team_review: bool = True
     # Textual TUI 最大刷新频率（第 6 期）
     tui_refresh_fps: int = 20
     # 第 7 期：MCP 客户端与资源限制
@@ -127,6 +131,9 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         plan_max_subtasks=_get_int(manager.env, "XG_PLAN_MAX_SUBTASKS", 12),
         plan_subtask_steps=_get_int(manager.env, "XG_PLAN_SUBTASK_STEPS", 10),
         plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
+        team_max_agents=max(1, _get_int(manager.env, "XG_TEAM_MAX_AGENTS", 4)),
+        team_max_repairs=max(0, _get_int(manager.env, "XG_TEAM_MAX_REPAIRS", 2)),
+        team_review=manager.env.get("XG_TEAM_REVIEW", "on").lower() not in ("off", "0", "false"),
         tui_refresh_fps=max(5, min(60, _get_int(manager.env, "XG_TUI_REFRESH_FPS", 20))),
         ui_language=normalize_language(manager.get_ui_language()),
         mcp_enabled=manager.env.get("XG_MCP_ENABLED", "on").lower() not in ("off", "0", "false"),

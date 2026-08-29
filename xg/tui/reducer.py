@@ -11,6 +11,7 @@ from typing import Any
 
 from xg.agent.plan import PlanEvent
 from xg.agent.react import AgentEvent
+from xg.agent.team import TeamEvent
 from xg.llm.types import Usage
 from xg.tui.state import (
     PlanInspectorSnapshot,
@@ -544,7 +545,174 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
     return out
 
 
-def reduce_event(state: TuiState, event: AgentEvent | PlanEvent, turn_id: str | None = None) -> TuiState:
+def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = None) -> TuiState:
+    """将 Team 协作事件归约为现有计划/执行视图。"""
+    turn_id = turn_id or state.active_turn_id
+    if state.active_turn_id and turn_id and state.active_turn_id != turn_id:
+        return state
+    out = _copy(state)
+    kind = event.kind
+    if kind in {"team_plan_generated", "team_done", "cancelled", "team_failed"}:
+        _remove_progress(out, turn_id)
+    if kind == "team_plan_generated" and event.plan:
+        out.pending_plan = event.plan
+        out.phase = "awaiting_plan_review"
+        out.inspector = replace(
+            out.inspector,
+            plan_status="review",
+            plan=_plan_snapshot(
+                event.plan, status="review", current_round=0,
+                total_rounds=len(event.plan.batches), previous=out.inspector.plan,
+            ),
+            session=replace(out.inspector.session, status="Team review"),
+        )
+        out.plan_tasks = {task.id: task.status for task in event.plan.tasks}
+        _append(out, TranscriptItem(
+            id=f"team-plan-{len(out.transcript)}", kind="plan", text=event.plan.goal,
+            plan=event.plan, plan_review=True, collapsed=True, turn_id=turn_id,
+        ))
+        if event.message:
+            out.notification = event.message
+            out.notification_level = "warning"
+        return out
+    if kind == "team_review":
+        out.phase = "awaiting_plan_review"
+        return out
+    if kind in {"approved", "replanned"}:
+        for item in reversed(out.transcript):
+            if item.kind == "plan" and item.turn_id == turn_id:
+                item.plan_review = False
+                break
+        out.phase = "running"
+        out.pending_plan = None
+        out.inspector = replace(
+            out.inspector,
+            plan_status="running",
+            plan=replace(out.inspector.plan, status="running"),
+            session=replace(out.inspector.session, status="Working"),
+        )
+        return out
+    if kind == "batch_started":
+        out.phase = "running"
+        if event.plan:
+            round_number = event.plan.batches.index(event.batch) + 1 if event.batch in event.plan.batches else out.inspector.plan.current_round
+            out.inspector = replace(
+                out.inspector,
+                batch=event.message,
+                plan=_plan_snapshot(
+                    event.plan, status="running", current_round=round_number,
+                    total_rounds=len(event.plan.batches), previous=out.inspector.plan,
+                ),
+            )
+        return out
+    if kind in {"task_started", "task_done", "task_failed"} and event.task:
+        task_status = {
+            "task_started": "running",
+            "task_done": "done",
+            "task_failed": "failed",
+        }[kind]
+        out.plan_tasks[event.task.id] = task_status
+        tasks = list(out.inspector.plan.tasks)
+        for index, snapshot in enumerate(tasks):
+            if snapshot.id == event.task.id:
+                tasks[index] = PlanTaskSnapshot(snapshot.id, snapshot.title, task_status)
+                break
+        out.inspector = replace(
+            out.inspector,
+            plan=replace(
+                out.inspector.plan,
+                tasks=tuple(tasks),
+                completed_tasks=sum(item.status == "done" for item in tasks),
+                failure_count=sum(item.status == "failed" for item in tasks),
+            ),
+        )
+        if kind == "task_started":
+            _append(out, TranscriptItem(
+                id=f"team-task-{len(out.transcript)}", kind="system",
+                text=f"[{event.role or event.task.owner_role}/{event.task.id}] 开始：{event.task.title}",
+                turn_id=turn_id, trace_id=f"{turn_id}:{event.task.id}",
+            ))
+        return out
+    if kind == "agent_started" and event.task:
+        # 普通任务已有 task_started；Repair task 没有进入原始 DAG，仍需在 TUI 显示其身份。
+        if event.task.id not in out.plan_tasks:
+            _append(out, TranscriptItem(
+                id=f"team-agent-{len(out.transcript)}", kind="system",
+                text=f"[{event.role}/{event.task.id}] Agent 已启动",
+                turn_id=turn_id, trace_id=f"{turn_id}:{event.agent_id}",
+            ))
+        return out
+    if kind == "subtask_event" and event.agent_event:
+        trace = f"{turn_id}:{event.agent_id or (event.task.id if event.task else 'agent')}"
+        nested = reduce_agent_event(out, event.agent_event, turn_id, trace)
+        if event.agent_event.kind not in {"error", "context_overflow", "budget_exceeded"}:
+            nested.phase = "running"
+        return nested
+    if kind == "artifact_produced" and event.artifact:
+        summary = event.artifact.summary.replace("\n", " ")[:240]
+        _append(out, TranscriptItem(
+            id=f"team-artifact-{len(out.transcript)}", kind="context",
+            text=f"[{event.role}/{event.task.id if event.task else ''}] Artifact {event.artifact.kind}: {summary}",
+            turn_id=turn_id, trace_id=f"{turn_id}:artifacts", collapsible=True, collapsed=True,
+        ))
+        return out
+    if kind == "task_review_started" and event.task:
+        _append(out, TranscriptItem(
+            id=f"team-review-{len(out.transcript)}", kind="system",
+            text=f"[reviewer/{event.task.id}] 正在审查任务证据", turn_id=turn_id,
+        ))
+        return out
+    if kind == "task_review_done" and event.task and event.review:
+        detail = "；".join(event.review.findings) or "验收通过"
+        _append(out, TranscriptItem(
+            id=f"team-review-result-{len(out.transcript)}", kind="context",
+            text=f"[reviewer/{event.task.id}] {event.review.verdict}: {detail[:320]}",
+            turn_id=turn_id, trace_id=f"{turn_id}:review", collapsible=True, collapsed=True,
+            status="success" if event.review.verdict == "pass" else "failed",
+        ))
+        return out
+    if kind == "repair_requested" and event.task:
+        _append(out, TranscriptItem(
+            id=f"team-repair-{len(out.transcript)}", kind="system",
+            text=f"[repairer/{event.task.id}] {event.message[:320]}", turn_id=turn_id,
+        ))
+        return out
+    if kind in {"team_done", "cancelled"}:
+        _collapse_turn(out, turn_id, status="cancelled" if kind == "cancelled" else "done")
+        out.phase = "idle"
+        out.pending_plan = None
+        final_status = "done" if kind == "team_done" else "cancelled"
+        out.inspector = replace(
+            out.inspector,
+            plan_status=final_status,
+            plan=_plan_snapshot(event.plan, status=final_status, previous=out.inspector.plan),
+            session=replace(out.inspector.session, status="Idle"),
+        )
+        out.notification = event.message
+        out.notification_level = "info"
+        return out
+    if kind == "team_failed":
+        _collapse_turn(out, turn_id, status="failed")
+        out.phase = "error"
+        out.pending_plan = None
+        out.inspector = replace(
+            out.inspector,
+            plan_status="failed",
+            plan=_plan_snapshot(event.plan, status="failed", previous=out.inspector.plan),
+            session=replace(out.inspector.session, status="Error"),
+        )
+        out.notification = event.message
+        out.notification_level = "error"
+        _append(out, TranscriptItem(
+            id=f"team-error-{len(out.transcript)}", kind="error", text=event.message, turn_id=turn_id,
+        ))
+        return out
+    return out
+
+
+def reduce_event(state: TuiState, event: AgentEvent | PlanEvent | TeamEvent, turn_id: str | None = None) -> TuiState:
     if isinstance(event, AgentEvent):
         return reduce_agent_event(state, event, turn_id)
+    if isinstance(event, TeamEvent):
+        return reduce_team_event(state, event, turn_id)
     return reduce_plan_event(state, event, turn_id)

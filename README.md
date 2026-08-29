@@ -1,6 +1,6 @@
 # XG-CLI
 
-Python Agent CLI 。终端交互的 Agent 命令行工具，ReAct 直接执行 + `/plan` 计划模式（DAG 拆解、按轮执行）双路径，内置文件读写、代码搜索与命令执行工具。
+Python Agent CLI 。终端交互的 Agent 命令行工具，支持 ReAct 直接执行、`/plan` 计划模式和 `/team` Multi-Agent 协作，内置文件读写、代码搜索与命令执行工具。
 
 
 ## 快速开始
@@ -63,6 +63,7 @@ Key 读取：每个 provider 必须配置自己的专属 `XG_<NAME>_API_KEY`（�
 | 命令 | 说明 |
 |------|------|
 | `/plan <任务>` | 计划模式：先拆解为子任务 DAG，审阅后按轮执行（见下） |
+| `/team <任务>` | Multi-Agent 模式：Supervisor 调度隔离 Worker，审查证据并定向修复（见下） |
 | `/init` | 分析当前项目，预览并生成 `XG.md` 项目记忆（已有文件不覆盖） |
 | `/save <内容>` | 显式保存一条当前项目长期记忆 |
 | `/memory list\|search\|delete\|clear` | 管理当前项目的长期记忆 |
@@ -95,6 +96,12 @@ ReAct 之外的第二条执行路径。`/plan <任务>` 把多步任务先拆解
 5. **汇总**：`plan_done` / `plan_failed` 面板展示各子任务状态与结果
 
 子任务执行复用全部安全机制：并行工具、HITL 审批、策略层黑名单/路径越界拒绝、审计（含 `subtask_started` / `subtask_done` 事件）。
+
+## Multi-Agent Team 模式
+
+`/team <任务>` 用于复杂任务。Planner 生成带角色、依赖、资源范围和验收标准的 DAG；用户确认后，Supervisor 调度隔离上下文的 Coder、Tester 等 Worker。Worker 产生的工具结果和最终报告会收集为进程内 Artifact，供 Reviewer 检查工具结果与验证证据；Artifact 不是文件快照，完整 diff/snapshot 审查属于后续增强。
+
+审查失败时只生成针对问题的 Repair 任务，默认最多修复 2 次；存在资源范围冲突的任务会自动串行化。所有 Worker 仍然经过统一的 HITL、PathGuard、CommandGuard、ToolRegistry 和 Audit 链路。简单任务不需要使用 `/team`，`/plan` 的行为保持兼容。
 
 ## 安全机制
 
@@ -196,6 +203,9 @@ Server 工具会动态注册为 `mcp__{server}__{tool}`，默认经过 HITL 确�
 | `XG_PLAN_MAX_SUBTASKS` | 计划模式子任务数上限（默认 12，超出截断） |
 | `XG_PLAN_SUBTASK_STEPS` | 计划模式单个子任务最大工具步数（默认 10） |
 | `XG_PLAN_MAX_FAILURES` | 计划级允许失败数（默认 3，超出终止剩余轮次） |
+| `XG_TEAM_MAX_AGENTS` | `/team` 同时运行的 Agent 数量上限（默认 4） |
+| `XG_TEAM_MAX_REPAIRS` | `/team` 单个任务的定向修复次数上限（默认 2） |
+| `XG_TEAM_REVIEW` | `/team` 任务级证据审查开关（on 默认） |
 | `XG_MCP_ENABLED` | MCP 总开关（on 默认） |
 | `XG_MCP_STARTUP_TIMEOUT` | MCP Server 初始化超时秒数（默认 15） |
 | `XG_MCP_REQUEST_TIMEOUT` | MCP 单请求超时秒数（默认 120） |

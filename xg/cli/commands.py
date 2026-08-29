@@ -66,6 +66,17 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
         examples=("/plan 检查项目配置并修复测试",),
     ),
     SlashCommandSpec(
+        "/team",
+        usage="/team <任务>",
+        description="使用多 Agent 协作完成复杂任务",
+        category="workflow",
+        details=(
+            "由 Supervisor 调度隔离上下文的 Worker，并对任务结果进行证据化审查。",
+            "简单任务建议继续使用普通对话；/plan 保持原有 DAG 执行语义。",
+        ),
+        examples=("/team 实现一个带测试的登录模块",),
+    ),
+    SlashCommandSpec(
         "/model",
         usage="/model [provider] [model]",
         description="查看或切换 provider / 模型",
