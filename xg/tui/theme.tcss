@@ -116,7 +116,7 @@ InspectorTab.active {
 #inspector-content > Static {
     width: 1fr;
     height: auto;
-    color: $text-muted;
+    color: $text;
 }
 
 #notification {

@@ -4,7 +4,13 @@ from xg.agent.react import AgentEvent
 from xg.llm.types import Usage
 from xg.agent.plan import Plan, PlanEvent, PlanTask
 from xg.tui.reducer import reduce_agent_event, reduce_plan_event
-from xg.tui.state import InspectorState, PlanTaskSnapshot, TuiState
+from xg.tui.state import (
+    InspectorState,
+    PlanInspectorSnapshot,
+    PlanTaskSnapshot,
+    SafetyInspectorSnapshot,
+    TuiState,
+)
 from xg.tui.widgets.header import HeaderBar
 from xg.tui.widgets.inspector import InspectorPanel
 
@@ -89,6 +95,71 @@ def test_usage_widgets_show_unavailable_until_data_arrives() -> None:
     inspector.update_state(state)
     assert "Context -/-" in str(header.render())
     assert "source           unavailable" in str(inspector.render())
+
+
+def test_inspector_uses_semantic_styles_for_session_values_and_status() -> None:
+    state = TuiState(
+        phase="running",
+        inspector=InspectorState(
+            provider="deepseek",
+            model="deepseek-chat",
+        ),
+    )
+    inspector = InspectorPanel()
+    inspector.update_state(state)
+    rendered = inspector.render()
+    assert rendered.plain.startswith("Session\n")
+    assert any(span.style == "bold bright_cyan" for span in rendered.spans)
+    assert any(span.style == "yellow" for span in rendered.spans)
+    assert "● Working" in rendered.plain
+
+
+def test_inspector_plan_progress_and_task_statuses_are_colored() -> None:
+    state = TuiState(
+        inspector=InspectorState(
+            active_view="plan",
+            plan=PlanInspectorSnapshot(
+                goal="检查项目",
+                status="failed",
+                completed_tasks=1,
+                total_tasks=2,
+                failure_count=1,
+                tasks=(
+                    PlanTaskSnapshot("t1", "读取配置", "done"),
+                    PlanTaskSnapshot("t2", "执行测试", "failed"),
+                ),
+            ),
+        )
+    )
+    inspector = InspectorPanel()
+    inspector.update_state(state)
+    rendered = inspector.render()
+    assert "█████░░░░░ 1 / 2 tasks" in rendered.plain
+    assert "✓ t1" in rendered.plain
+    assert "! t2" in rendered.plain
+    assert any(span.style == "green" for span in rendered.spans)
+    assert any(span.style == "red" for span in rendered.spans)
+
+
+def test_inspector_memory_and_safety_highlight_risks() -> None:
+    state = TuiState(
+        inspector=InspectorState(
+            active_view="safety",
+            safety=SafetyInspectorSnapshot(
+                hitl_enabled=False,
+                session_allow_all=True,
+                approval_status="rejected",
+                last_rejection="blocked command",
+            ),
+        )
+    )
+    inspector = InspectorPanel()
+    inspector.update_state(state)
+    rendered = inspector.render()
+    assert "! off" in rendered.plain
+    assert "! rejected" in rendered.plain
+    assert "blocked command" in rendered.plain
+    assert any(span.style == "red" for span in rendered.spans)
 
 
 def test_header_contains_watermelon_brand_and_runtime_summary() -> None:
