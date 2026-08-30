@@ -88,8 +88,11 @@ class StreamEvent:
     - kind="done": 结束，含 finish_reason 与 usage
     """
 
-    kind: Literal["content", "thinking", "tool_call", "done"]
+    kind: Literal["content", "thinking", "tool_call", "done", "retrying"]
     text: str = ""
     tool_call: ToolCall | None = None
     finish_reason: str = ""
     usage: Usage | None = None
+    attempt: int = 0
+    max_attempts: int = 0
+    retry_after: float | None = None

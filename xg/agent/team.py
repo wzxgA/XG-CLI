@@ -45,6 +45,17 @@ TEAM_PLAN_MAX_RETRIES = 2
 RESOURCE_SCOPED_TOOLS = {"read_file", "write_file", "list_dir", "glob_files", "grep_code"}
 READ_DISCOVERY_TOOLS = {"read_file", "list_dir", "glob_files", "grep_code"}
 READ_DISCOVERY_ROLES = {"researcher", "reviewer"}
+CANONICAL_TEAM_TOOLS = frozenset({
+    "read_file", "write_file", "list_dir", "glob_files", "grep_code",
+    "execute_command", "web_search", "web_fetch", "load_skill",
+})
+TEAM_TOOL_ALIASES = {
+    "find": "glob_files",
+    "glob": "glob_files",
+    "grep": "grep_code",
+    "read": "read_file",
+    "write": "write_file",
+}
 DEFAULT_RESOURCE_DENY_PATTERNS = (
     ".env",
     ".env.*",
@@ -74,6 +85,9 @@ TEAM_PLANNER_PROMPT = (
     "- id 全局唯一，形如 t1/t2；deps 只能引用其他任务 id；\n"
     "- 依赖必须是无环 DAG；\n"
     "- owner_role 使用 coder、researcher、tester、reviewer 或 repairer；\n"
+    "- allowed_tools 必须使用 XG 注册的精确工具名：read_file、write_file、list_dir、glob_files、grep_code、execute_command、web_search、web_fetch、load_skill；\n"
+    "- 不要输出 find、glob、grep、cat、shell、bash、terminal、read 或 write 作为工具名；\n"
+    "- 读取文件使用 read_file，查看目录使用 list_dir，按模式查找文件使用 glob_files，搜索代码使用 grep_code，执行测试/命令使用 execute_command；\n"
     "- 只读任务不得声明 write 工具；\n"
     "- researcher/reviewer 需要先探索项目结构时使用 resource_scope_mode=read_discovery；\n"
     "- coder/tester/repairer 使用 resource_scope_mode=targeted，写入范围必须声明；\n"
@@ -86,7 +100,11 @@ TEAM_REVIEWER_PROMPT = (
     "你是严格的任务审查 Agent。你不能修改文件，只能根据任务验收标准、"
     "实际工具结果和任务产物判断是否通过。只输出 JSON："
     '{"verdict":"pass|fail|needs_input","findings":["问题"],'
-    '"required_fixes":["定向修复要求"],"evidence":["证据"]}。'
+    '"required_fixes":["定向修复要求"],'
+    '"repair_scope":[{"pattern":"path/to/file","access":"write"}],'
+    '"evidence":["证据"]}。'
+    "verdict 为 fail 时，尽量提供最小的 repair_scope；"
+    "不要把原任务的只读范围自动升级为写入范围。"
     "不要把 Worker 的主观汇报当成测试通过证据。"
 )
 
@@ -143,6 +161,7 @@ class ReviewResult:
     findings: list[str] = field(default_factory=list)
     required_fixes: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
+    repair_scope: list[ResourceClaim] = field(default_factory=list)
 
 
 @dataclass
@@ -153,6 +172,9 @@ class TeamTask:
     deps: list[str]
     owner_role: str = "coder"
     allowed_tools: list[str] = field(default_factory=list)
+    allowed_tools_declared: bool = False
+    invalid_tools: list[str] = field(default_factory=list)
+    tool_warnings: list[str] = field(default_factory=list)
     resource_claims: list[ResourceClaim] = field(default_factory=list)
     resource_scope_mode: Literal["targeted", "read_discovery"] = "targeted"
     resource_deny_patterns: list[str] = field(default_factory=list)
@@ -265,6 +287,8 @@ class ScopedToolRegistry:
     def schemas(self) -> list[dict]:
         schemas = self._base.schemas()
         allowed = self._allowed_tools()
+        if self._task.allowed_tools_declared and not allowed:
+            return []
         if not allowed:
             return schemas
         return [schema for schema in schemas if schema.get("name") in allowed]
@@ -274,6 +298,12 @@ class ScopedToolRegistry:
         executable: list[ToolCall] = []
         rejected: dict[str, ToolResult] = {}
         for call in calls:
+            if self._task.allowed_tools_declared and not allowed:
+                rejected[call.id] = ToolResult(
+                    tool_call_id=call.id, name=call.name, ok=False,
+                    error=f"任务未允许任何工具调用: {call.name}",
+                )
+                continue
             if allowed and call.name not in allowed:
                 rejected[call.id] = ToolResult(
                     tool_call_id=call.id, name=call.name, ok=False,
@@ -307,6 +337,8 @@ class ScopedToolRegistry:
     def _allowed_tools(self) -> set[str]:
         profile_tools = set(self._profile.allowed_tools)
         task_tools = set(self._task.allowed_tools)
+        if self._task.allowed_tools_declared and not task_tools:
+            return set()
         if profile_tools and task_tools:
             return profile_tools & task_tools
         return profile_tools or task_tools
@@ -392,6 +424,156 @@ class ScopedToolRegistry:
 
     def __getattr__(self, name: str):
         return getattr(self._base, name)
+
+
+def build_repair_scope(
+    original_task: TeamTask,
+    review: ReviewResult,
+) -> tuple[list[ResourceClaim], list[str]]:
+    """根据审查结果生成 Repairer 的最小写入范围。
+
+    Reviewer 明确给出的范围优先。为了兼容旧版 Reviewer，原任务已有的
+    write claim 可以作为回退；原任务的 read claim 永远不会被升级为 write。
+    """
+    explicit = [
+        ResourceClaim(claim.pattern, "write", claim.exclusive)
+        for claim in review.repair_scope
+        if claim.access == "write" and claim.pattern.strip()
+    ]
+    if explicit:
+        return explicit, []
+
+    inherited = [
+        ResourceClaim(claim.pattern, "write", claim.exclusive)
+        for claim in original_task.resource_claims
+        if claim.access == "write" and claim.pattern.strip()
+    ]
+    if inherited:
+        return inherited, ["Reviewer 未提供 repair_scope，已兼容使用原任务的 write claim"]
+
+    return [], ["Reviewer 未提供可安全写入的 repair_scope"]
+
+
+def _resource_claims_from_json(raw: object) -> list[ResourceClaim]:
+    """Parse the optional structured repair scope from Reviewer JSON."""
+    if not isinstance(raw, list):
+        return []
+    claims: list[ResourceClaim] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        pattern = str(item.get("pattern", "")).strip()
+        access = str(item.get("access", "write")).strip().lower()
+        if pattern and access in {"read", "write"}:
+            claims.append(ResourceClaim(pattern, access, bool(item.get("exclusive", False))))
+    return claims
+
+
+def _safe_claim_pattern(pattern: str) -> bool:
+    """Return whether a claim pattern can stay within the project root."""
+    normalized = pattern.replace("\\", "/").strip()
+    if not normalized or normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        return False
+    return not any(part == ".." for part in normalized.split("/"))
+
+
+def _claim_overlaps_pattern(claim: str, protected: str) -> bool:
+    """Conservatively detect a claim that may include a protected path."""
+    return (
+        fnmatch.fnmatch(claim, protected)
+        or fnmatch.fnmatch(protected, claim)
+        or ScopedToolRegistry._claim_matches(claim, protected)
+        or ScopedToolRegistry._claim_matches(protected, claim)
+    )
+
+
+def validate_task_resource_policy(
+    task: TeamTask,
+    profile: AgentProfile,
+    project_root: Path | None = None,
+) -> list[str]:
+    """Validate the role/tool/resource combination before starting a Worker."""
+    errors: list[str] = []
+    mode = task.resource_scope_mode
+    profile_tools = set(profile.allowed_tools)
+    task_tools = set(task.allowed_tools)
+
+    if task.invalid_tools:
+        errors.append(f"计划包含无效工具：{', '.join(task.invalid_tools)}")
+    if mode not in {"targeted", "read_discovery"}:
+        errors.append(f"未知资源模式：{mode}")
+    if mode == "read_discovery":
+        if profile.name not in READ_DISCOVERY_ROLES or profile.can_write:
+            errors.append(f"角色 {profile.name} 不能使用 read_discovery")
+        if any(claim.access == "write" for claim in task.resource_claims):
+            errors.append("read_discovery 不能包含 write claim")
+        if task_tools and any(tool not in READ_DISCOVERY_TOOLS for tool in task_tools):
+            errors.append("read_discovery 只能使用只读发现工具")
+    elif profile.can_write and task.owner_role in {"coder", "tester", "repairer"}:
+        # Writable roles must never be put into the discovery-only policy.
+        if mode != "targeted":
+            errors.append(f"可写角色 {profile.name} 必须使用 targeted")
+
+    if profile_tools and task_tools:
+        unknown = sorted(task_tools - profile_tools)
+        if unknown:
+            errors.append(f"任务工具超出角色权限：{', '.join(unknown)}")
+
+    write_claims = [claim for claim in task.resource_claims if claim.access == "write"]
+    if task.owner_role == "repairer" and not write_claims:
+        errors.append("repair_scope_missing：Repairer 没有明确的 write claim")
+
+    protected_patterns = DEFAULT_RESOURCE_DENY_PATTERNS + tuple(task.resource_deny_patterns)
+    for claim in task.resource_claims:
+        normalized = claim.normalized()
+        if not _safe_claim_pattern(normalized):
+            errors.append(f"资源声明越出项目根目录：{claim.pattern}")
+        if claim.access == "write" and any(
+            _claim_overlaps_pattern(normalized, protected.replace("\\", "/"))
+            for protected in protected_patterns
+        ):
+            errors.append(f"write claim 命中受保护资源：{claim.pattern}")
+        if task.owner_role == "repairer" and normalized in {"*", "**"}:
+            errors.append("Repairer 不允许使用全项目写入范围")
+
+    # Keep the optional parameter part of the validation contract so callers can
+    # pass the project root now and path-specific checks can be extended without
+    # changing the Worker startup API.
+    _ = project_root
+    return list(dict.fromkeys(errors))
+
+
+def normalize_team_tool_names(
+    raw_tools: object,
+    profile: AgentProfile,
+) -> tuple[list[str], list[str]]:
+    """Normalize Planner tool names to registered XG names.
+
+    Only aliases with an unambiguous, non-escalating meaning are accepted.
+    Role and resource policy checks remain separate and are applied afterwards.
+    """
+    if not isinstance(raw_tools, list):
+        return [], []
+    tools: list[str] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_tools:
+        original = str(raw).strip()
+        if not original:
+            continue
+        name = original.lower()
+        canonical = TEAM_TOOL_ALIASES.get(name, name)
+        if canonical != name:
+            warnings.append(f"{original} 已转换为 {canonical}")
+        if canonical not in CANONICAL_TEAM_TOOLS:
+            warnings.append(f"{original} 不是已注册工具")
+            continue
+        if profile.allowed_tools and canonical not in profile.allowed_tools:
+            warnings.append(f"{canonical} 超出角色 {profile.name} 的工具权限")
+        if canonical not in seen:
+            tools.append(canonical)
+            seen.add(canonical)
+    return tools, warnings
 
 
 def default_profiles() -> dict[str, AgentProfile]:
@@ -483,7 +665,18 @@ def parse_team_tasks(
             warnings.append(f"任务 {task_id} 使用未知角色 {role}，已回退为 coder")
             role = "coder"
         allowed_raw = item.get("allowed_tools", [])
-        allowed = [str(name).strip() for name in allowed_raw if str(name).strip()] if isinstance(allowed_raw, list) else []
+        allowed, tool_warnings = normalize_team_tool_names(allowed_raw, profiles[role])
+        warnings.extend(f"任务 {task_id}：{warning}" for warning in tool_warnings)
+        invalid_tools: list[str] = []
+        if isinstance(allowed_raw, list):
+            for raw_name in allowed_raw:
+                original = str(raw_name).strip()
+                canonical = TEAM_TOOL_ALIASES.get(original.lower(), original.lower())
+                if canonical not in CANONICAL_TEAM_TOOLS or (
+                    profiles[role].allowed_tools and canonical not in profiles[role].allowed_tools
+                ):
+                    if original and original not in invalid_tools:
+                        invalid_tools.append(original)
         claims_raw = item.get("resource_claims", [])
         claims: list[ResourceClaim] = []
         if isinstance(claims_raw, list):
@@ -529,6 +722,9 @@ def parse_team_tasks(
             deps=deps,
             owner_role=role,
             allowed_tools=allowed,
+            allowed_tools_declared="allowed_tools" in item,
+            invalid_tools=invalid_tools,
+            tool_warnings=tool_warnings,
             resource_claims=claims,
             resource_scope_mode=mode,  # type: ignore[arg-type]
             resource_deny_patterns=deny_patterns,
@@ -910,18 +1106,35 @@ class TeamExecutor:
         max_repairs = max(0, getattr(self.settings, "team_max_repairs", TEAM_MAX_RETRIES))
         for attempt in range(1, max_repairs + 1):
             task.attempts = attempt
+            repair_claims, scope_warnings = build_repair_scope(task, review)
+            repair_description = "\n".join(review.required_fixes or review.findings) or "根据审查结果修复任务"
+            if scope_warnings:
+                repair_description += "\n\n修复范围提示：" + "；".join(scope_warnings)
             repair = replace(
                 task,
                 id=f"{task.id}-repair-{attempt}",
                 title=f"修复：{task.title}",
-                description="\n".join(review.required_fixes or review.findings) or "根据审查结果修复任务",
+                description=repair_description,
                 owner_role="repairer",
+                # A role change must not inherit the original role's tool or
+                # discovery policy. Empty means use the repairer profile tools.
+                allowed_tools=[],
+                allowed_tools_declared=False,
+                invalid_tools=[],
+                tool_warnings=[],
+                resource_scope_mode="targeted",
+                resource_claims=[
+                    ResourceClaim(claim.pattern, "write", claim.exclusive)
+                    for claim in repair_claims
+                ],
+                resource_deny_patterns=list(task.resource_deny_patterns),
                 deps=[],
                 status="pending",
                 result="",
                 artifacts=[],
                 failure_category="",
                 blocked_by=[],
+                recovery_attempts=0,
             )
             queue.put_nowait(TeamEvent(kind="repair_requested", team_id=self.team_id, plan=plan, task=repair, role="repairer", message=repair.description))
             repair_result, repair_artifacts, repair_agent_id, repair_error, repair_category = await self._execute_worker(plan, repair, queue, attempt=attempt)
@@ -1022,6 +1235,14 @@ class TeamExecutor:
     ) -> tuple[str, list[Artifact], str, str, str]:
         profile = self.profiles.get(task.owner_role) or self.profiles["coder"]
         agent_id = f"agent-{uuid.uuid4().hex[:8]}"
+        policy_errors = validate_task_resource_policy(task, profile, self.project_root)
+        if policy_errors:
+            category = (
+                "repair_scope_missing"
+                if any(error.startswith("repair_scope_missing") for error in policy_errors)
+                else "resource_policy_invalid"
+            )
+            return "", [], agent_id, "；".join(policy_errors), category
         effective_steps = steps_override or self._effective_steps(profile)
         queue.put_nowait(TeamEvent(
             kind="agent_started", team_id=self.team_id, plan=plan, task=task,
@@ -1052,7 +1273,7 @@ class TeamExecutor:
         try:
             async for event in agent.run(self._worker_user_prompt(task, recovery_summary=recovery_summary)):
                 if event.kind in {
-                    "thinking", "content", "tool_call", "approval", "tool_result",
+                    "thinking", "content", "tool_call", "approval", "tool_result", "retrying",
                     "context_compacted", "context_warning", "context_usage", "usage",
                 }:
                     queue.put_nowait(TeamEvent(kind="subtask_event", team_id=self.team_id, plan=plan, task=task, agent_id=agent_id, role=profile.name, agent_event=event))
@@ -1067,7 +1288,13 @@ class TeamExecutor:
                             verification_records=["tool_result:ok" if result.ok else "tool_result:failed"],
                         ))
                 elif event.kind == "error":
-                    return "", artifacts, agent_id, event.text or "Worker 执行失败", "execution_failed"
+                    category = event.error_category or "execution_failed"
+                    if event.retry_attempts:
+                        category = "transient_api_error_exhausted"
+                    message = event.text or "Worker 执行失败"
+                    if event.retry_attempts:
+                        message = f"{message}（已重试 {event.retry_attempts} 次）"
+                    return "", artifacts, agent_id, message, category
                     return "", artifacts, agent_id, event.text or "Worker 执行失败"
                 elif event.kind == "step_limit":
                     return "", artifacts, agent_id, f"达到 Worker 步数上限（{sub_settings.tool_steps}）", "step_limit"
@@ -1114,7 +1341,8 @@ class TeamExecutor:
             f"任务：{task.title}\n说明：{task.description}\n"
             f"验收标准：\n- " + "\n- ".join(task.acceptance_criteria) +
             f"\n执行产物和证据：\n{evidence}\n"
-            "请严格输出 JSON。"
+            "请严格输出 JSON；verdict 为 fail 时尽量提供最小 repair_scope，"
+            "每项格式为 {\"pattern\": \"项目内路径\", \"access\": \"write\"}。"
         )
         context = [Message(role="system", content=TEAM_REVIEWER_PROMPT), Message(role="user", content=prompt)]
         raw = await self._llm_text(context)
@@ -1128,6 +1356,7 @@ class TeamExecutor:
                 findings=[str(item) for item in data.get("findings", []) if str(item)],
                 required_fixes=[str(item) for item in data.get("required_fixes", []) if str(item)],
                 evidence=[str(item) for item in data.get("evidence", []) if str(item)],
+                repair_scope=_resource_claims_from_json(data.get("repair_scope", [])),
             )
         except (json.JSONDecodeError, AttributeError, TypeError) as exc:
             return ReviewResult(task.id, "fail", [f"Reviewer 输出无效：{exc}"], ["重新输出结构化审查结果"], [])

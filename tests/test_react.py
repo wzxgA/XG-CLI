@@ -6,7 +6,7 @@ from typing import AsyncIterator
 
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.config.settings import Settings
-from xg.llm.client import LlmClient
+from xg.llm.client import LlmClient, LlmError
 from xg.llm.types import Message, StreamEvent, ToolCall
 
 
@@ -131,3 +131,35 @@ class TestClear:
         agent.clear()
         assert len(agent.messages) == 1
         assert agent.messages[0].role == "system"
+
+
+async def test_llm_retry_event_and_structured_error_are_forwarded(settings, registry):
+    class RetryClient(LlmClient):
+        async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+            yield StreamEvent(
+                kind="retrying", text="API 临时故障，正在重试",
+                attempt=2, max_attempts=3, retry_after=1.0,
+            )
+            yield StreamEvent(kind="content", text="完成")
+            yield StreamEvent(kind="done")
+
+    agent = ReActAgent(llm=RetryClient(), tools=registry, settings=settings)
+    events = await run_events(agent, "继续")
+    retry = next(event for event in events if event.kind == "retrying")
+    assert retry.retry_attempts == 2
+    assert retry.retry_max_attempts == 3
+    assert [event.kind for event in events] == ["retrying", "content", "done"]
+
+    class ErrorClient(LlmClient):
+        async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+            raise LlmError(
+                "API 返回 504", category="gateway_timeout", retryable=True,
+                attempt=3, max_attempts=3,
+            )
+            yield StreamEvent(kind="done")
+
+    agent = ReActAgent(llm=ErrorClient(), tools=registry, settings=settings)
+    events = await run_events(agent, "继续")
+    error = next(event for event in events if event.kind == "error")
+    assert error.error_category == "gateway_timeout"
+    assert error.retry_attempts == 2

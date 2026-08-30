@@ -16,9 +16,12 @@ from xg.agent.team import (
     ScopedToolRegistry,
     TeamExecutor,
     TeamTask,
+    build_repair_scope,
     conflict_safe_batches,
     default_profiles,
+    normalize_team_tool_names,
     parse_team_tasks,
+    validate_task_resource_policy,
 )
 from xg.llm.client import LlmClient
 from xg.llm.types import Message, StreamEvent, ToolCall, ToolResult
@@ -147,12 +150,17 @@ async def test_team_failed_review_creates_targeted_repair(tmp_path, settings):
         nonlocal review_count
         review_count += 1
         if review_count == 1:
-            return ReviewResult(task.id, "fail", ["密码校验错误"], ["修复密码校验"], [])
+            return ReviewResult(
+                task.id, "fail", ["密码校验错误"], ["修复密码校验"], [],
+                [ResourceClaim("src/auth.py", "write")],
+            )
         return ReviewResult(task.id, "pass", [], [], ["修复后测试通过"])
 
     plan = json.dumps({"tasks": [{
         "id": "t1", "title": "登录实现", "description": "实现登录",
-        "deps": [], "owner_role": "coder", "acceptance_criteria": ["密码校验正确"],
+        "deps": [], "owner_role": "coder",
+        "resource_claims": [{"pattern": "src/auth.py", "access": "write"}],
+        "acceptance_criteria": ["密码校验正确"],
     }]}, ensure_ascii=False)
     client.worker_scripts["t1"] = [("初始实现", [])]
 
@@ -178,6 +186,42 @@ async def test_team_failed_review_creates_targeted_repair(tmp_path, settings):
     assert any(event.kind == "repair_requested" for event in events)
     assert [event.kind for event in events].count("task_review_done") == 2
     assert any(event.role == "repairer" for event in events if event.kind == "agent_started")
+    repair_event = next(event for event in events if event.kind == "repair_requested")
+    assert repair_event.task.resource_scope_mode == "targeted"
+    assert repair_event.task.allowed_tools == []
+    assert repair_event.task.resource_claims == [ResourceClaim("src/auth.py", "write")]
+
+
+def test_repair_scope_never_upgrades_read_claim_to_write():
+    original = TeamTask(
+        "t1", "调研认证", "读取认证代码", [], owner_role="researcher",
+        resource_scope_mode="read_discovery",
+        resource_claims=[ResourceClaim("src/auth.py", "read")],
+    )
+    review = ReviewResult("t1", "fail", ["需要修改"], ["修复认证"], [])
+
+    claims, warnings = build_repair_scope(original, review)
+
+    assert claims == []
+    assert "repair_scope" in warnings[0]
+
+
+def test_resource_policy_rejects_invalid_repairer_scope_and_accepts_targeted_scope(tmp_path):
+    profile = default_profiles()["repairer"]
+    invalid = TeamTask(
+        "t1-repair-1", "修复", "修复问题", [], owner_role="repairer",
+        resource_scope_mode="read_discovery",
+    )
+    errors = validate_task_resource_policy(invalid, profile, tmp_path)
+    assert any("不能使用 read_discovery" in error for error in errors)
+    assert any(error.startswith("repair_scope_missing") for error in errors)
+
+    valid = TeamTask(
+        "t1-repair-1", "修复", "修复问题", [], owner_role="repairer",
+        resource_scope_mode="targeted",
+        resource_claims=[ResourceClaim("src/auth.py", "write")],
+    )
+    assert validate_task_resource_policy(valid, profile, tmp_path) == []
 
 
 def test_team_parser_and_resource_conflict_scheduling():
@@ -298,6 +342,52 @@ def test_parser_defaults_read_only_research_tasks_to_discovery_mode():
 
     assert not warnings
     assert tasks[0].resource_scope_mode == "read_discovery"
+
+
+def test_parser_normalizes_safe_tool_aliases_for_researcher():
+    tasks, warnings = parse_team_tasks(json.dumps({"tasks": [{
+        "id": "t1", "title": "调研", "description": "扫描项目", "deps": [],
+        "owner_role": "researcher", "allowed_tools": ["find", "glob", "grep"],
+        "acceptance_criteria": ["完成调研"],
+    }]}))
+
+    assert tasks[0].allowed_tools == ["glob_files", "grep_code"]
+    assert tasks[0].invalid_tools == []
+    assert any("find 已转换为 glob_files" in warning for warning in warnings)
+    assert any("glob 已转换为 glob_files" in warning for warning in warnings)
+    assert any("grep 已转换为 grep_code" in warning for warning in warnings)
+
+
+def test_unknown_explicit_tools_fail_closed_instead_of_exposing_all_tools():
+    tasks, warnings = parse_team_tasks(json.dumps({"tasks": [{
+        "id": "t1", "title": "调研", "description": "扫描项目", "deps": [],
+        "owner_role": "researcher", "allowed_tools": ["scan_project"],
+        "acceptance_criteria": ["完成调研"],
+    }]}))
+
+    assert tasks[0].allowed_tools == []
+    assert tasks[0].allowed_tools_declared is True
+    assert tasks[0].invalid_tools == ["scan_project"]
+    assert any("scan_project 不是已注册工具" in warning for warning in warnings)
+    assert any("计划包含无效工具" in error for error in validate_task_resource_policy(
+        tasks[0], default_profiles()["researcher"]
+    ))
+
+
+async def test_explicit_empty_tools_do_not_fallback_to_profile_tools(tmp_path):
+    task = TeamTask(
+        "t1", "空工具", "不调用工具", [], owner_role="researcher",
+        allowed_tools=[], allowed_tools_declared=True,
+        resource_scope_mode="read_discovery",
+    )
+    scoped = ScopedToolRegistry(build_registry(base_dir=tmp_path), task, tmp_path, default_profiles()["researcher"])
+
+    assert scoped.schemas() == []
+    results = await scoped.aexecute_calls([
+        ToolCall("call-1", "list_dir", json.dumps({"path": "."})),
+    ])
+    assert not results[0].ok
+    assert "未允许任何工具调用" in results[0].error
 
 
 def test_failed_task_marks_downstream_as_blocked_not_failed():

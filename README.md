@@ -197,6 +197,13 @@ Server 工具会动态注册为 `mcp__{server}__{tool}`，默认经过 HITL 确�
 | `XG_MEMORY_PROMPT_MAX_CHARS` | 自动注入长期记忆的字符上限（默认 8000） |
 | `XG_PROJECT_MEMORY_MAX_CHARS` | 单个项目记忆文件读取上限（默认 32000） |
 | `XG_TOOL_STEPS` | 单轮工具调用步数上限（默认 20） |
+| `XG_LLM_RETRY_ENABLED` | LLM 临时故障自动重试开关（on 默认） |
+| `XG_LLM_MAX_RETRIES` | 单次 LLM 请求最大重试次数（默认 2） |
+| `XG_LLM_RETRY_BASE_DELAY` | LLM 重试基础退避秒数（默认 1） |
+| `XG_LLM_RETRY_MAX_DELAY` | LLM 重试最大单次等待秒数（默认 8） |
+| `XG_LLM_RETRY_JITTER` | LLM 重试随机抖动比例（默认 0.25） |
+| `XG_LLM_RETRY_TOTAL_TIMEOUT` | 单次 LLM 请求重试总等待上限秒数（默认 30） |
+| `XG_LLM_RESPECT_RETRY_AFTER` | 是否遵循服务端 Retry-After（on 默认） |
 | `XG_MAX_PARALLEL` | 并行工具执行并发数（默认 4） |
 | `XG_TOOL_TIMEOUT` | 单工具执行超时秒数（默认 120） |
 | `XG_HITL` | 危险操作审批开关（on 默认 / off 危险模式） |

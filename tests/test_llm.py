@@ -10,7 +10,7 @@ import respx
 
 from xg.llm.client import LlmError
 from xg.llm.openai_compat import OpenAICompatClient
-from xg.llm.types import Message
+from xg.llm.types import Message, StreamEvent
 
 API_URL = "https://api.test/v1/chat/completions"
 
@@ -107,6 +107,138 @@ class TestErrors:
     async def test_missing_config_raises(self):
         with pytest.raises(LlmError, match="XG_<PROVIDER>_API_BASE"):
             OpenAICompatClient("", "", "m")
+
+    @respx.mock
+    async def test_transient_504_retries_then_succeeds(self, settings):
+        calls = 0
+
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(504, text="gateway timeout")
+            return sse_response(
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+            )
+
+        respx.post(API_URL).mock(side_effect=handler)
+        client = OpenAICompatClient(
+            settings.api_base, settings.api_key, settings.model,
+            retry_base_delay=0, retry_max_delay=0, retry_jitter=0,
+        )
+
+        events = await collect(client, [Message(role="user", content="hi")])
+
+        assert calls == 2
+        assert [event.kind for event in events] == ["retrying", "content", "done"]
+        assert events[0].attempt == 2
+        assert events[0].max_attempts == 3
+
+    @respx.mock
+    async def test_permanent_401_does_not_retry(self, settings):
+        route = respx.post(API_URL).mock(return_value=httpx.Response(401, text="bad key"))
+        client = OpenAICompatClient(
+            settings.api_base, settings.api_key, settings.model,
+            retry_base_delay=0, retry_max_delay=0,
+        )
+
+        with pytest.raises(LlmError) as raised:
+            await collect(client, [Message(role="user", content="hi")])
+
+        assert route.call_count == 1
+        assert raised.value.category == "authentication_error"
+        assert raised.value.retryable is False
+
+    @respx.mock
+    async def test_html_400_from_proxy_retries_then_succeeds(self, settings):
+        calls = 0
+
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(
+                    400,
+                    content=b"<html><body>400 Bad Request</body></html>",
+                    headers={"Content-Type": "text/html"},
+                )
+            return sse_response(
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+            )
+
+        respx.post(API_URL).mock(side_effect=handler)
+        client = OpenAICompatClient(
+            settings.api_base, settings.api_key, settings.model,
+            retry_base_delay=0, retry_max_delay=0, retry_jitter=0,
+        )
+
+        events = await collect(client, [Message(role="user", content="hi")])
+
+        assert calls == 2
+        assert [event.kind for event in events] == ["retrying", "content", "done"]
+
+    @respx.mock
+    async def test_json_400_does_not_retry(self, settings):
+        route = respx.post(API_URL).mock(
+            return_value=httpx.Response(
+                400,
+                json={"error": {"message": "invalid model"}},
+                headers={"Content-Type": "application/json"},
+            )
+        )
+        client = OpenAICompatClient(
+            settings.api_base, settings.api_key, settings.model,
+            retry_base_delay=0, retry_max_delay=0,
+        )
+
+        with pytest.raises(LlmError) as raised:
+            await collect(client, [Message(role="user", content="hi")])
+
+        assert route.call_count == 1
+        assert raised.value.category == "invalid_request"
+        assert raised.value.retryable is False
+
+    @respx.mock
+    async def test_exhausted_html_400_keeps_proxy_category(self, settings):
+        route = respx.post(API_URL).mock(
+            return_value=httpx.Response(
+                400,
+                text="<html><body>400 Bad Request</body></html>",
+                headers={"Content-Type": "text/html"},
+            )
+        )
+        client = OpenAICompatClient(
+            settings.api_base, settings.api_key, settings.model,
+            max_retries=2, retry_base_delay=0, retry_max_delay=0, retry_jitter=0,
+        )
+
+        with pytest.raises(LlmError) as raised:
+            await collect(client, [Message(role="user", content="hi")])
+
+        assert route.call_count == 3
+        assert raised.value.category == "proxy_bad_request"
+        assert raised.value.retryable is True
+
+    async def test_partial_stream_error_is_not_replayed(self, settings):
+        class PartialClient(OpenAICompatClient):
+            def __init__(self):
+                super().__init__(settings.api_base, settings.api_key, settings.model,
+                                 retry_base_delay=0, retry_max_delay=0)
+                self.calls = 0
+
+            async def _stream_once(self, messages, tools):
+                self.calls += 1
+                yield StreamEvent(kind="content", text="partial")
+                raise LlmError(
+                    "stream interrupted", category="stream_interrupted", retryable=True
+                )
+
+        client = PartialClient()
+        with pytest.raises(LlmError) as raised:
+            await collect(client, [Message(role="user", content="hi")])
+
+        assert client.calls == 1
+        assert raised.value.response_started is True
 
 
 class TestMessageFormat:

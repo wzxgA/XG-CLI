@@ -59,7 +59,16 @@ def build_agent(
     config_manager: ConfigManager | None = None,
 ) -> ReActAgent:
     base = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
-    client = create_client(settings.api_base, settings.api_key, settings.model)
+    client = create_client(
+        settings.api_base, settings.api_key, settings.model,
+        retry_enabled=settings.llm_retry_enabled,
+        max_retries=settings.llm_max_retries,
+        retry_base_delay=settings.llm_retry_base_delay,
+        retry_max_delay=settings.llm_retry_max_delay,
+        retry_jitter=settings.llm_retry_jitter,
+        retry_total_timeout=settings.llm_retry_total_timeout,
+        respect_retry_after=settings.llm_respect_retry_after,
+    )
     audit = AuditLogger(base / ".xg" / "audit.log")
     guard = lambda name, args: guard_tool_call(base, name, args)  # noqa: E731
     config_manager = config_manager or ConfigManager(project_dir=base / ".xg")
@@ -249,6 +258,14 @@ async def handle_turn(agent: ReActAgent, user_input: str, approval_ui: ApprovalU
                     preview = preview[:300] + " ..."
                 console.print(Text(f"  {'OK' if event.tool_result.ok else 'FAIL'}: {preview}", style=style))
                 live.update(Text(""))
+            elif event.kind == "retrying":
+                live.update(Text(""))
+                console.print(Text(
+                    f"API 临时故障，正在重试 {event.retry_attempts}/{event.retry_max_attempts}，"
+                    f"等待 {event.retry_delay or 0:.1f} 秒",
+                    style="yellow",
+                ))
+                live.update(Text(""))
             elif event.kind == "context_compacted":
                 live.update(Text(""))
                 console.print(Text(event.text, style="dim cyan"))
@@ -406,6 +423,10 @@ def _print_team_panel(plan: TeamPlan, note: str = "") -> None:
             deps = f"（依赖 {', '.join(task.deps)}）" if task.deps else ""
             table.add_row("", f"{task.id} [{task.owner_role}] {task.title}{deps}")
             table.add_row("", Text(f"    资源模式：{task.resource_scope_mode}", style="dim"))
+            if getattr(task, "allowed_tools", ()):
+                table.add_row("", Text(f"    工具：{', '.join(task.allowed_tools)}", style="dim"))
+            for warning in getattr(task, "tool_warnings", ()):
+                table.add_row("", Text(f"    工具提示：{warning}", style="yellow"))
             for claim in task.resource_claims:
                 table.add_row("", Text(f"    资源声明：{claim.access} {claim.pattern}", style="dim"))
             criteria = "；".join(task.acceptance_criteria[:2])
@@ -467,7 +488,13 @@ def _render_team_event(event: TeamEvent) -> None:
 def _render_subtask_event(task: PlanTask | TeamTask, ae: AgentEvent, role: str = "") -> None:
     """渲染子任务内部转发的 AgentEvent（前缀子任务 id）。"""
     prefix = f"  [{role + '/' if role else ''}{task.id}]"
-    if ae.kind == "context_compacted":
+    if ae.kind == "retrying":
+        console.print(Text(
+            f"{prefix} API 临时故障，正在重试 {ae.retry_attempts}/{ae.retry_max_attempts}，"
+            f"等待 {ae.retry_delay or 0:.1f} 秒",
+            style="yellow",
+        ))
+    elif ae.kind == "context_compacted":
         console.print(Text(f"{prefix} {ae.text}", style="dim cyan"))
     elif ae.kind == "context_warning":
         console.print(Text(f"{prefix} 上下文提示：{ae.text}", style="yellow"))
@@ -864,7 +891,16 @@ def _switch(
     settings.api_base = api_base
     settings.api_key = key
     settings.context_window = manager.resolve_window(provider)
-    agent.llm = create_client(api_base, key, model)
+    agent.llm = create_client(
+        api_base, key, model,
+        retry_enabled=settings.llm_retry_enabled,
+        max_retries=settings.llm_max_retries,
+        retry_base_delay=settings.llm_retry_base_delay,
+        retry_max_delay=settings.llm_retry_max_delay,
+        retry_jitter=settings.llm_retry_jitter,
+        retry_total_timeout=settings.llm_retry_total_timeout,
+        respect_retry_after=settings.llm_respect_retry_after,
+    )
     manager.set_active(provider.name, model)
     return f"已切换: {provider.display_name} / {model}"
 

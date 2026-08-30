@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
+import time
+from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator
 
 import httpx
@@ -16,6 +20,57 @@ from xg.llm.types import Message, StreamEvent, ToolCall, Usage
 DEFAULT_TIMEOUT = 120.0
 
 
+def _looks_like_html_error(content_type: str = "", body: str = "") -> bool:
+    """Identify gateway/proxy error pages, which often use HTTP 400 generically."""
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    prefix = body.lstrip()[:512].lower()
+    return media_type == "text/html" or prefix.startswith(("<!doctype html", "<html", "<head", "<body"))
+
+
+def _status_retry_policy(
+    status_code: int,
+    *,
+    content_type: str = "",
+    body: str = "",
+) -> tuple[bool, str]:
+    if status_code == 408:
+        return True, "transient_api_error"
+    if status_code == 429:
+        return True, "rate_limited"
+    if status_code == 503:
+        return True, "service_unavailable"
+    if status_code == 504:
+        return True, "gateway_timeout"
+    if 500 <= status_code < 600:
+        return True, "transient_api_error"
+    if status_code in {400, 422}:
+        if _looks_like_html_error(content_type, body):
+            return True, "proxy_bad_request"
+        return False, "invalid_request"
+    if status_code == 401:
+        return False, "authentication_error"
+    if status_code == 403:
+        return False, "permission_error"
+    if status_code == 404:
+        return False, "endpoint_not_found"
+    if status_code == 413:
+        return False, "request_too_large"
+    return False, "api_error"
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value.strip()))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(value)
+            return max(0.0, parsed.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
 class OpenAICompatClient(LlmClient):
     def __init__(
         self,
@@ -23,6 +78,13 @@ class OpenAICompatClient(LlmClient):
         api_key: str,
         model: str,
         timeout: float = DEFAULT_TIMEOUT,
+        retry_enabled: bool = True,
+        max_retries: int = 2,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 8.0,
+        retry_jitter: float = 0.25,
+        retry_total_timeout: float = 30.0,
+        respect_retry_after: bool = True,
     ) -> None:
         if not api_base or not api_key:
             raise LlmError("缺少 API 配置：请设置 XG_<PROVIDER>_API_BASE / XG_<PROVIDER>_API_KEY（见 .env.example）")
@@ -30,13 +92,66 @@ class OpenAICompatClient(LlmClient):
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.retry_enabled = retry_enabled
+        self.max_retries = max(0, max_retries)
+        self.retry_base_delay = max(0.0, retry_base_delay)
+        self.retry_max_delay = max(0.0, retry_max_delay)
+        self.retry_jitter = max(0.0, min(1.0, retry_jitter))
+        self.retry_total_timeout = max(0.0, retry_total_timeout)
+        self.respect_retry_after = respect_retry_after
 
     def stream_chat(
         self, messages: list[Message], tools: list[dict] | None = None
     ) -> AsyncIterator[StreamEvent]:
-        return self._stream(messages, tools)
+        return self._stream_with_retry(messages, tools)
 
-    async def _stream(
+    async def _stream_with_retry(
+        self, messages: list[Message], tools: list[dict] | None
+    ) -> AsyncIterator[StreamEvent]:
+        started_at = time.monotonic()
+        max_attempts = 1 + (self.max_retries if self.retry_enabled else 0)
+        for attempt in range(1, max_attempts + 1):
+            semantic_event_seen = False
+            try:
+                async for event in self._stream_once(messages, tools):
+                    if event.kind in {"content", "thinking", "tool_call"}:
+                        semantic_event_seen = True
+                    yield event
+                return
+            except LlmError as error:
+                error.response_started = error.response_started or semantic_event_seen
+                error.attempt = attempt
+                error.max_attempts = max_attempts
+                if (
+                    not self.retry_enabled
+                    or attempt >= max_attempts
+                    or not error.retryable
+                    or error.response_started
+                ):
+                    raise
+                delay = self._retry_delay(error, attempt)
+                elapsed = time.monotonic() - started_at
+                if elapsed + delay > self.retry_total_timeout:
+                    error.category = f"{error.category}_retry_timeout"
+                    raise
+                yield StreamEvent(
+                    kind="retrying",
+                    text="API 临时故障，正在重试",
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    retry_after=delay,
+                )
+                await asyncio.sleep(delay)
+
+    def _retry_delay(self, error: LlmError, attempt: int) -> float:
+        delay = min(self.retry_max_delay, self.retry_base_delay * (2 ** (attempt - 1)))
+        if self.respect_retry_after and error.retry_after is not None:
+            delay = max(delay, error.retry_after)
+        if self.retry_jitter:
+            delay *= random.uniform(1.0 - self.retry_jitter, 1.0 + self.retry_jitter)
+        return max(0.0, min(delay, self.retry_max_delay))
+
+    async def _stream_once(
         self, messages: list[Message], tools: list[dict] | None
     ) -> AsyncIterator[StreamEvent]:
         payload: dict[str, Any] = {
@@ -62,13 +177,31 @@ class OpenAICompatClient(LlmClient):
                 async with client.stream("POST", url, json=payload, headers=headers) as resp:
                     if resp.status_code != 200:
                         body = (await resp.aread()).decode("utf-8", errors="replace")
-                        raise LlmError(f"API 返回 {resp.status_code}: {body[:500]}")
+                        status = resp.status_code
+                        retryable, category = _status_retry_policy(
+                            status,
+                            content_type=resp.headers.get("Content-Type", ""),
+                            body=body,
+                        )
+                        raise LlmError(
+                            f"API 返回 {status}: {body[:500]}",
+                            status_code=status,
+                            category=category,
+                            retryable=retryable,
+                            retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
+                            request_id=resp.headers.get("x-request-id", ""),
+                        )
                     async for event in self._parse_sse(resp):
                         yield event
         except httpx.TimeoutException as e:
-            raise LlmError(f"请求超时（{self.timeout}s）: {e}") from e
+            raise LlmError(
+                f"请求超时（{self.timeout}s）: {e}",
+                category="network_timeout", retryable=True,
+            ) from e
         except httpx.HTTPError as e:
-            raise LlmError(f"网络错误: {e}") from e
+            raise LlmError(
+                f"网络错误: {e}", category="network_error", retryable=True,
+            ) from e
 
     async def _parse_sse(self, resp: httpx.Response) -> AsyncIterator[StreamEvent]:
         """解析 SSE 流，聚合 content 与 tool_call 增量分片。"""

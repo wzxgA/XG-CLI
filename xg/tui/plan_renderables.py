@@ -90,6 +90,11 @@ def _task_summary_renderable(plan: Plan | TeamPlan, ordered_ids: tuple[str, ...]
                 Text(f"  描述：{task.description or '暂无描述'}", style="dim"),
                 Text(f"  依赖：{deps}", style="dim"),
             ])
+            tools = getattr(task, "allowed_tools", ())
+            if tools:
+                renderables.append(Text(f"  工具：{', '.join(tools)}", style="dim"))
+            for warning in getattr(task, "tool_warnings", ()):
+                renderables.append(Text(f"  工具提示：{warning}", style="yellow"))
             mode = getattr(task, "resource_scope_mode", "")
             if mode:
                 renderables.append(Text(f"  资源模式：{mode}", style="dim"))

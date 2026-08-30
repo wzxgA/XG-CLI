@@ -407,7 +407,7 @@ def reduce_agent_event(
     kind = event.kind
     if kind in {
         "thinking", "content", "tool_call", "tool_result", "approval",
-        "error", "context_overflow", "budget_exceeded", "step_limit", "done",
+        "error", "context_overflow", "budget_exceeded", "step_limit", "retrying", "done",
     }:
         _remove_progress(out, turn_id)
     if event.estimated_prompt_tokens is not None:
@@ -416,6 +416,19 @@ def reduce_agent_event(
         return out
     if kind == "usage":
         _update_provider_usage(out, event.usage)
+        return out
+    if kind == "retrying":
+        _append(out, TranscriptItem(
+            id=f"retry-{len(out.transcript)}", kind="system",
+            text=(
+                f"{event.text or 'API 临时故障，正在重试'} "
+                f"({event.retry_attempts}/{event.retry_max_attempts})，"
+                f"等待 {event.retry_delay or 0:.1f}s"
+            ),
+            turn_id=turn_id, trace_id=trace_id,
+        ))
+        out.notification = event.text or "API 临时故障，正在重试"
+        out.notification_level = "warning"
         return out
     if kind == "thinking":
         if not (out.transcript and out.transcript[-1].kind == "thinking" and out.transcript[-1].streaming and out.transcript[-1].trace_id == trace_id):

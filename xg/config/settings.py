@@ -23,6 +23,14 @@ class Settings:
     model: str = ""
     context_window: int = 128_000
     tool_steps: int = 20
+    # LLM transient request retry policy.
+    llm_retry_enabled: bool = True
+    llm_max_retries: int = 2
+    llm_retry_base_delay: float = 1.0
+    llm_retry_max_delay: float = 8.0
+    llm_retry_jitter: float = 0.25
+    llm_retry_total_timeout: float = 30.0
+    llm_respect_retry_after: bool = True
     # token 预算阈值：messages 估算 token 超过 window * budget_ratio 时终止循环
     budget_ratio: float = 0.8
     # 第 5 期：自动压缩时保留的最近完整对话轮次
@@ -130,6 +138,13 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         model=active.model,
         context_window=active.context_window,
         tool_steps=_get_int(manager.env, "XG_TOOL_STEPS", 20),
+        llm_retry_enabled=manager.env.get("XG_LLM_RETRY_ENABLED", "on").lower() not in ("off", "0", "false"),
+        llm_max_retries=max(0, _get_int(manager.env, "XG_LLM_MAX_RETRIES", 2)),
+        llm_retry_base_delay=max(0.0, _get_float(manager.env, "XG_LLM_RETRY_BASE_DELAY", 1.0)),
+        llm_retry_max_delay=max(0.0, _get_float(manager.env, "XG_LLM_RETRY_MAX_DELAY", 8.0)),
+        llm_retry_jitter=_clamp_float(_get_float(manager.env, "XG_LLM_RETRY_JITTER", 0.25), 0.0, 1.0),
+        llm_retry_total_timeout=max(0.0, _get_float(manager.env, "XG_LLM_RETRY_TOTAL_TIMEOUT", 30.0)),
+        llm_respect_retry_after=manager.env.get("XG_LLM_RESPECT_RETRY_AFTER", "on").lower() not in ("off", "0", "false"),
         budget_ratio=_clamp_float(_get_float(manager.env, "XG_CONTEXT_BUDGET_RATIO", 0.8), 0.5, 0.9),
         context_keep_recent_turns=max(0, _get_int(manager.env, "XG_CONTEXT_KEEP_RECENT_TURNS", 4)),
         context_summary_max_tokens=max(512, _get_int(manager.env, "XG_CONTEXT_SUMMARY_MAX_TOKENS", 4096)),

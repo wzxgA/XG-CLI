@@ -50,7 +50,7 @@ class AgentEvent:
     kind: Literal[
         "content", "thinking", "tool_call", "approval", "tool_result", "step_limit",
         "budget_exceeded", "context_compacted", "context_warning",
-        "context_overflow", "context_usage", "usage", "error", "done"
+        "context_overflow", "context_usage", "usage", "error", "retrying", "done"
     ]
     text: str = ""
     tool_call: ToolCall | None = None
@@ -62,6 +62,10 @@ class AgentEvent:
     context_window: int | None = None
     compaction_before: int | None = None
     compaction_after: int | None = None
+    error_category: str = ""
+    retry_attempts: int = 0
+    retry_max_attempts: int = 0
+    retry_delay: float | None = None
 
 
 class ReActAgent:
@@ -160,10 +164,21 @@ class ReActAgent:
                         yield AgentEvent(kind="content", text=event.text)
                     elif event.kind == "tool_call" and event.tool_call:
                         tool_calls.append(event.tool_call)
+                    elif event.kind == "retrying":
+                        yield AgentEvent(
+                            kind="retrying", text=event.text,
+                            retry_attempts=event.attempt,
+                            retry_max_attempts=event.max_attempts,
+                            retry_delay=event.retry_after,
+                        )
                     elif event.kind == "done":
                         request_usage = event.usage
             except LlmError as e:
-                yield AgentEvent(kind="error", text=str(e))
+                yield AgentEvent(
+                    kind="error", text=str(e), error_category=e.category,
+                    retry_attempts=max(0, e.attempt - 1),
+                    retry_max_attempts=max(0, e.max_attempts - 1),
+                )
                 return
 
             if not tool_calls:

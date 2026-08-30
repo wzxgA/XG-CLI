@@ -9,6 +9,29 @@ from xg.llm.types import Message, StreamEvent
 
 
 class LlmError(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        category: str = "llm_error",
+        retryable: bool = False,
+        retry_after: float | None = None,
+        response_started: bool = False,
+        attempt: int = 1,
+        max_attempts: int = 1,
+        request_id: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.category = category
+        self.retryable = retryable
+        self.retry_after = retry_after
+        self.response_started = response_started
+        self.attempt = attempt
+        self.max_attempts = max_attempts
+        self.request_id = request_id
     """LLM 请求失败（网络 / 鉴权 / 超时 / 协议错误）。"""
 
 
