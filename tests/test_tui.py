@@ -24,6 +24,7 @@ from xg.tui.state import TuiState, TranscriptItem
 from xg.tui.state import ApprovalRequest
 from xg.tui.widgets.approval_modal import ApprovalModal
 from xg.tui.widgets.collapsible_card import CollapsibleCard
+from xg.tui.widgets.transcript import TranscriptView
 
 
 class DummyClient(LlmClient):
@@ -465,6 +466,55 @@ async def test_tui_empty_transcript_shows_brand_welcome_state(tmp_path):
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert len(app.query(".transcript-empty-state")) == 0
+
+
+@pytest.mark.asyncio
+async def test_transcript_reuses_widget_for_same_item_and_only_changes_delta(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptView)
+        first = TuiState(transcript=[
+            TranscriptItem(id="assistant-1", kind="assistant", text="第一版"),
+            TranscriptItem(id="assistant-2", kind="assistant", text="第二条"),
+        ])
+        transcript.request_state(first)
+        await pilot.pause(0.1)
+
+        first_widgets = list(transcript.children)
+        assert len(first_widgets) == 2
+
+        second = TuiState(transcript=[
+            TranscriptItem(id="assistant-1", kind="assistant", text="第一版已更新"),
+            TranscriptItem(id="assistant-2", kind="assistant", text="第二条"),
+            TranscriptItem(id="assistant-3", kind="assistant", text="新增内容"),
+        ])
+        transcript.request_state(second)
+        await pilot.pause(0.1)
+
+        assert list(transcript.children)[0] is first_widgets[0]
+        assert list(transcript.children)[1] is first_widgets[1]
+        assert len(transcript.children) == 3
+        assert transcript._widgets_by_key["item:assistant-1"] is first_widgets[0]
+
+
+@pytest.mark.asyncio
+async def test_transcript_layout_refresh_keeps_widget_identity(tmp_path):
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptView)
+        transcript.request_state(TuiState(transcript=[
+            TranscriptItem(id="assistant-1", kind="assistant", text="稳定内容"),
+        ]))
+        await pilot.pause(0.1)
+        widget = list(transcript.children)[0]
+
+        transcript.request_layout_refresh()
+        await pilot.pause(0.1)
+
+        assert list(transcript.children)[0] is widget
+        assert len(transcript.children) == 1
 
 
 @pytest.mark.asyncio

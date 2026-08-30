@@ -26,8 +26,8 @@ class InlineConfirmationCard(Vertical):
     def __init__(self, request: ConfirmationRequest) -> None:
         # Per-kind class lets the theme give each confirmation its own
         # border color while sharing one simple layout.  No fixed widget id:
-        # TranscriptView rebuilds children on every state change and Textual
-        # removes old nodes asynchronously, so duplicate ids would collide.
+        # TranscriptView keeps this card stable and updates its content in
+        # place, so no nested input or duplicate child id is required.
         super().__init__(
             classes=f"inline-action-card inline-confirmation-card confirmation-{request.kind}",
         )
@@ -40,6 +40,12 @@ class InlineConfirmationCard(Vertical):
     def compose(self) -> ComposeResult:
         yield self._text
 
+    def update_request(self, request: ConfirmationRequest) -> None:
+        """Update the stable card without replacing its DOM node."""
+        self.request = request
+        hint = CONFIRMATION_HINTS.get(self.request.kind, "输入 y 确认 · n 取消")
+        self._text.update(f"{self.request.title}\n\n{self.request.body}\n\n{hint}")
+
 
 class InlineApprovalCard(Vertical):
     def __init__(self, request: ApprovalRequest) -> None:
@@ -51,6 +57,11 @@ class InlineApprovalCard(Vertical):
 
     def compose(self) -> ComposeResult:
         yield self._text
+
+    def update_request(self, request: ApprovalRequest) -> None:
+        """Update request data while preserving the card and its mode."""
+        self.request = request
+        self._text.update(self._render_text())
 
     def set_mode(self, mode: str = "", modified_args: dict | None = None) -> None:
         """Switch the card text; empty mode means waiting for the decision."""

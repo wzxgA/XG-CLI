@@ -237,7 +237,8 @@ class XgTuiApp(App[None]):
 
     def _render_state(self, state: TuiState) -> None:
         self.query_one("#header", HeaderBar).update_state(state)
-        self.query_one("#transcript", TranscriptView).update_state(state)
+        transcript = self.query_one("#transcript", TranscriptView)
+        transcript.request_state(state)
         self.query_one("#inspector", InspectorPanel).update_state(state)
         note = self.query_one("#notification", Static)
         note.update(state.notification)
@@ -246,8 +247,8 @@ class XgTuiApp(App[None]):
         composer = self.query_one("#composer", Composer)
         if state.pending_approval is not None:
             # Cards are read-only; the decision is typed into the Composer.
-            # remove_children() detaches asynchronously, so during a rebuild
-            # two cards can coexist briefly — always restyle the newest one.
+            # TranscriptView keeps the action card stable while its request
+            # state is being reconciled.
             if self._decision_mode:
                 cards = list(self.query(InlineApprovalCard))
                 if cards:
@@ -258,6 +259,10 @@ class XgTuiApp(App[None]):
         else:
             self._decision_mode = ""
             self._modified_args = None
+        transcript.set_approval_mode(
+            self._decision_mode if state.pending_approval is not None else "",
+            self._modified_args if state.pending_approval is not None else None,
+        )
         suggestions = self.query_one("#command-suggestions", CommandSuggestions)
         suggestions_allowed = (
             not self._replan_mode
@@ -588,9 +593,9 @@ class XgTuiApp(App[None]):
         # Sidebar is useful on wide terminals and should never squeeze the
         # conversation below a usable width.
         self.query_one("#inspector", InspectorPanel).display = event.size.width >= 100
-        # DiagramCard is a width-aware Rich renderable. Rewriting the log is
-        # enough to relayout it; no model or LLM request is involved.
-        self._render_state_immediately(self._state)
+        # DiagramCard is a width-aware Rich renderable. Request a layout-only
+        # refresh; content widgets and their DOM identities remain intact.
+        self.query_one("#transcript", TranscriptView).request_layout_refresh()
 
 
 def run_tui(agent, settings: Settings, manager: ConfigManager) -> None:
