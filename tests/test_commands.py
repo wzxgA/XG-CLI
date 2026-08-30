@@ -262,6 +262,22 @@ def test_help_formatting_is_catalog_driven_and_can_omit_shortcuts():
     assert "f1" not in output.lower()
 
 
+def test_team_help_describes_resume_scope():
+    output = format_command_help("team")
+
+    assert "/team <任务>" in output
+    assert "/team resume <任务ID> --write-scope <范围>" in output
+    assert "needs_input" in output
+    assert "Repairer" in output
+    assert "/team resume t4 --write-scope xg/auth/*.py" in output
+
+
+def test_full_help_keeps_team_top_level_entry():
+    output = format_help(include_shortcuts=False)
+
+    assert "/team <任务>" in output
+
+
 def test_command_help_accepts_name_or_alias():
     assert format_command_help("cancel").startswith("/cancel —")
     assert format_command_help("/c").startswith("/cancel —")
