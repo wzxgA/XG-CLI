@@ -19,7 +19,8 @@ ProgressKind = Literal["response", "plan", "context"]
 QueueItemKind = Literal["task", "plan", "command"]
 InspectorView = Literal["session", "plan", "memory", "safety"]
 TuiPhase = Literal[
-    "idle", "running", "awaiting_approval", "awaiting_plan_review", "error",
+    "idle", "running", "awaiting_approval", "awaiting_plan_review",
+    "awaiting_team_input", "error",
 ]
 
 
@@ -183,6 +184,10 @@ class TuiState:
     pending_approval: Any | None = None
     pending_plan: Any | None = None
     pending_confirmation: ConfirmationRequest | None = None
+    team_input_task_id: str = ""
+    team_input_category: str = ""
+    team_input_message: str = ""
+    team_input_scope: list[Any] = field(default_factory=list)
     notification: str = ""
     notification_level: Literal["info", "warning", "error"] = "info"
     plan_tasks: dict[str, str] = field(default_factory=dict)

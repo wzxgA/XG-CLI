@@ -290,6 +290,8 @@ class XgTuiApp(App[None]):
             composer.placeholder = "输入重新规划要求，Enter 提交"
         elif state.phase == "awaiting_plan_review" and state.pending_plan is not None:
             composer.placeholder = "按 Enter 执行 · r 重规划 · Esc 取消"
+        elif state.phase == "awaiting_team_input":
+            composer.placeholder = "输入 /team resume <任务ID> --write-scope <范围>，或 /cancel"
         else:
             composer.placeholder = "输入任务或 /help …"
 

@@ -20,6 +20,7 @@ from xg.agent.team import (
     conflict_safe_batches,
     default_profiles,
     normalize_team_tool_names,
+    parse_review_output,
     parse_team_tasks,
     validate_task_resource_policy,
 )
@@ -230,6 +231,154 @@ def test_team_parser_and_resource_conflict_scheduling():
     assert [task.owner_role for task in tasks] == ["coder", "coder", "tester"]
     assert conflict_safe_batches(tasks) == [["t1", "t2"], ["t3"]]
 
+
+def test_review_output_parser_fails_closed_for_empty_and_missing_scope():
+    empty = parse_review_output("t1", "   ")
+    assert empty.category == "review_output_empty"
+
+    invalid_scope = parse_review_output(
+        "t1",
+        json.dumps({"verdict": "fail", "repair_scope": [{"pattern": "src/a.py"}]}),
+    )
+    assert invalid_scope.category == "review_scope_invalid"
+
+    valid = parse_review_output(
+        "t1",
+        json.dumps({
+            "verdict": "fail",
+            "findings": ["需要修复"],
+            "required_fixes": ["修复实现"],
+            "evidence": ["测试失败"],
+            "repair_scope": [{"pattern": "src/a.py", "access": "write"}],
+        }),
+    )
+    assert isinstance(valid, ReviewResult)
+    assert valid.repair_scope == [ResourceClaim("src/a.py", "write")]
+
+
+async def test_invalid_reviewer_output_pauses_without_creating_repairer(tmp_path, settings):
+    plan = json.dumps({"tasks": [{
+        "id": "t1", "title": "实现登录", "description": "实现登录",
+        "deps": [], "owner_role": "coder", "acceptance_criteria": ["完成实现"],
+    }]}, ensure_ascii=False)
+    client = TeamScriptClient(
+        worker_scripts={"t1": [("初始实现", [])]},
+        reviews=["", ""],
+    )
+    original = client.stream_chat
+
+    async def stream_chat(messages, tools=None):
+        if messages and "团队任务规划器" in messages[0].content:
+            yield StreamEvent(kind="content", text=plan)
+            yield StreamEvent(kind="done")
+            return
+        async for event in original(messages, tools):
+            yield event
+
+    client.stream_chat = stream_chat  # type: ignore[method-assign]
+    executor = TeamExecutor(
+        llm=client, tools=build_registry(base_dir=tmp_path), settings=settings,
+        reviewer=approve_team, project_root=tmp_path,
+    )
+
+    events = await collect(executor, "实现登录")
+
+    task = next(event.plan.task_by_id("t1") for event in events if event.kind == "task_needs_input")
+    assert task.status == "needs_input"
+    assert task.failure_category == "review_output_empty"
+    assert not any(event.kind == "repair_requested" for event in events)
+    assert not any(event.kind == "task_failed" for event in events)
+    assert not any(event.kind == "team_failed" for event in events)
+    assert any(event.kind == "review_output_retry" for event in events)
+    assert task.repair_attempts_started == 0
+
+
+async def test_missing_repair_scope_does_not_consume_repair_quota(tmp_path, settings):
+    plan = json.dumps({"tasks": [{
+        "id": "t1", "title": "调研认证", "description": "读取认证代码",
+        "deps": [], "owner_role": "researcher", "resource_scope_mode": "read_discovery",
+        "resource_claims": [{"pattern": "src/**", "access": "read"}],
+        "acceptance_criteria": ["找出问题"],
+    }]}, ensure_ascii=False)
+    client = TeamScriptClient(worker_scripts={"t1": [("发现问题", [])]})
+    review = ReviewResult("t1", "fail", ["需要修改"], ["修复问题"], [])
+
+    async def task_review(task, artifacts):
+        return review
+
+    original = client.stream_chat
+
+    async def stream_chat(messages, tools=None):
+        if messages and "团队任务规划器" in messages[0].content:
+            yield StreamEvent(kind="content", text=plan)
+            yield StreamEvent(kind="done")
+            return
+        async for event in original(messages, tools):
+            yield event
+
+    client.stream_chat = stream_chat  # type: ignore[method-assign]
+    executor = TeamExecutor(
+        llm=client, tools=build_registry(base_dir=tmp_path), settings=settings,
+        reviewer=approve_team, task_reviewer=task_review, project_root=tmp_path,
+    )
+
+    events = await collect(executor, "调研认证")
+
+    task = next(event.plan.task_by_id("t1") for event in events if event.kind == "repair_scope_required")
+    assert task.status == "needs_input"
+    assert task.repair_attempts_started == 0
+    assert task.repair_attempts_blocked == 0
+    assert not any(event.kind == "repair_requested" for event in events)
+
+
+async def test_user_scope_resume_starts_repairer_and_finishes_task(tmp_path, settings):
+    plan = json.dumps({"tasks": [{
+        "id": "t1", "title": "实现登录", "description": "实现登录",
+        "deps": [], "owner_role": "coder", "acceptance_criteria": ["完成实现"],
+    }]}, ensure_ascii=False)
+    client = TeamScriptClient(
+        worker_scripts={
+            "t1": [("初始实现", [])],
+            "t1-repair-1": [("修复完成", [])],
+        },
+    )
+    review_count = 0
+
+    async def task_review(task, artifacts):
+        nonlocal review_count
+        review_count += 1
+        if review_count == 1:
+            return ReviewResult(task.id, "fail", ["需要修复"], ["修复问题"], [])
+        return ReviewResult(task.id, "pass", [], [], ["修复后通过"])
+
+    original = client.stream_chat
+
+    async def stream_chat(messages, tools=None):
+        if messages and "团队任务规划器" in messages[0].content:
+            yield StreamEvent(kind="content", text=plan)
+            yield StreamEvent(kind="done")
+            return
+        async for event in original(messages, tools):
+            yield event
+
+    client.stream_chat = stream_chat  # type: ignore[method-assign]
+    executor = TeamExecutor(
+        llm=client, tools=build_registry(base_dir=tmp_path), settings=settings,
+        reviewer=approve_team, task_reviewer=task_review, project_root=tmp_path,
+    )
+
+    first_events = await collect(executor, "实现登录")
+    assert any(event.kind == "repair_scope_required" for event in first_events)
+
+    resumed = [event async for event in executor.resume_task_with_repair_scope(
+        "t1", [ResourceClaim("src/auth.py", "write")]
+    )]
+    task = next(event.plan.task_by_id("t1") for event in resumed if event.kind == "team_done")
+    assert task.status == "done"
+    assert any(event.kind == "repair_requested" for event in resumed)
+    assert any(event.kind == "agent_started" and event.role == "repairer" for event in resumed)
+    assert task.repair_attempts_started == 1
+
     conflicting = [
         TeamTask("a", "A", "", [], resource_claims=[]),
         TeamTask("b", "B", "", [], resource_claims=[]),
@@ -421,6 +570,29 @@ def test_team_events_keep_role_and_task_progress_in_tui_state():
     state = reduce_team_event(state, TeamEvent("task_started", team_id="team-1", plan=plan, task=tasks[0], role="coder"), "turn-1")
     assert state.plan_tasks["t1"] == "running"
     assert any("coder/t1" in item.text for item in state.transcript)
+
+
+def test_team_needs_input_is_visible_without_becoming_failure():
+    from xg.agent.team import TeamEvent, TeamPlan
+
+    tasks, _ = parse_team_tasks(json.dumps({"tasks": [{
+        "id": "t1", "title": "修复认证", "description": "修复问题", "deps": [],
+        "owner_role": "coder", "acceptance_criteria": ["通过验证"],
+    }]}))
+    plan = TeamPlan("修复认证", tasks, [["t1"]])
+    state = TuiState(active_turn_id="turn-1")
+    state = reduce_team_event(
+        state,
+        TeamEvent("task_needs_input", team_id="team-1", plan=plan, task=tasks[0],
+                  failure_category="repair_scope_missing", message="请确认写入范围"),
+        "turn-1",
+    )
+
+    assert state.phase == "awaiting_team_input"
+    assert state.plan_tasks["t1"] == "needs_input"
+    assert state.inspector.plan.failure_count == 0
+    assert state.team_input_task_id == "t1"
+    assert state.notification == "请确认写入范围"
 
 
 def test_team_plan_review_card_shows_full_plan_before_execution():

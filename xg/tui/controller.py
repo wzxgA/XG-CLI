@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import shlex
 from collections import deque
 from dataclasses import dataclass, replace
 from typing import Awaitable, Callable
 
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, ReviewDecision
 from xg.agent.react import AgentEvent, ReActAgent
-from xg.agent.team import TeamEvent, TeamExecutor, TeamPlan
+from xg.agent.team import ResourceClaim, TeamEvent, TeamExecutor, TeamPlan
 from xg.cli.commands import CommandContext, CommandResult, CommandService
 from xg.cli.help import parse_help_command
 from xg.config.manager import ConfigManager
@@ -95,6 +96,7 @@ class SessionController:
         self._active_turn_id = ""
         self._approval_future: asyncio.Future[ApprovalDecision] | None = None
         self._review_future: asyncio.Future[ReviewDecision] | None = None
+        self._team_executor: TeamExecutor | None = None
         self._confirmation: ConfirmationRequest | None = None
         self._confirmation_future: asyncio.Future[bool] | None = None
         mcp_manager = getattr(agent, "mcp_manager", None)
@@ -307,6 +309,15 @@ class SessionController:
                 notification_level="info",
             ))
             return False
+        if self.state.phase == "awaiting_team_input":
+            if lowered.startswith("/team resume"):
+                return await self._resume_team_command(text)
+            self._set_state(replace(
+                self.state,
+                notification="当前 Team 任务等待输入，请使用 /team resume <任务ID> --write-scope <范围>，或 /cancel",
+                notification_level="info",
+            ))
+            return False
         if self.busy and (self._is_readonly_mcp_command(text) or self._is_language_command(text)):
             result = await self.execute_command(text)
             if result.message:
@@ -409,8 +420,44 @@ class SessionController:
             mcp_manager=getattr(self.agent, "mcp_manager", None),
             project_root=getattr(self.agent.memory_manager, "project_root", None),
         )
+        self._team_executor = executor
         async for event in executor.run(goal):
             self._set_state(reduce_team_event(self.state, event, turn_id))
+
+    async def _resume_team_command(self, text: str) -> bool:
+        executor = self._team_executor
+        if executor is None:
+            self._set_state(replace(self.state, notification="没有可恢复的 Team 任务", notification_level="warning"))
+            return False
+        try:
+            parts = shlex.split(text)
+        except ValueError as exc:
+            self._set_state(replace(self.state, notification=f"恢复命令格式错误：{exc}", notification_level="error"))
+            return False
+        if len(parts) < 5 or parts[0].lower() != "/team" or parts[1].lower() != "resume":
+            self._set_state(replace(self.state, notification="用法：/team resume <任务ID> --write-scope <项目内路径模式>", notification_level="info"))
+            return False
+        task_id = parts[2]
+        claims: list[ResourceClaim] = []
+        index = 3
+        while index < len(parts):
+            if parts[index] != "--write-scope" or index + 1 >= len(parts):
+                self._set_state(replace(self.state, notification="用法：/team resume <任务ID> --write-scope <项目内路径模式>", notification_level="info"))
+                return False
+            claims.append(ResourceClaim(parts[index + 1], "write"))
+            index += 2
+        current = asyncio.current_task()
+        self._active_task = current
+        self._set_state(replace(self.state, phase="running", notification="正在按确认范围恢复 Team 任务"))
+        try:
+            async for event in executor.resume_task_with_repair_scope(task_id, claims):
+                self._set_state(reduce_team_event(self.state, event, self._active_turn_id))
+        finally:
+            if self._active_task is current:
+                self._active_task = None
+            if self.state.phase == "running":
+                self._set_state(replace(self.state, phase="idle"))
+        return True
 
     async def cancel(self) -> bool:
         if self._confirmation is not None:

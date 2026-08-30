@@ -258,6 +258,7 @@ class InspectorPanel(Vertical):
             "running": "Working",
             "awaiting_approval": "Waiting approval",
             "awaiting_plan_review": "Plan review",
+            "awaiting_team_input": "Waiting team input",
             "error": "Error",
         }.get(state.phase, state.phase)
         text = Text()

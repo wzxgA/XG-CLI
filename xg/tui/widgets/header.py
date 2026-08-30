@@ -29,6 +29,7 @@ def _status_label(phase: str) -> str:
         "running": "Working",
         "awaiting_approval": "Waiting approval",
         "awaiting_plan_review": "Plan review",
+        "awaiting_team_input": "Waiting team input",
         "error": "Error",
     }.get(phase, phase)
 

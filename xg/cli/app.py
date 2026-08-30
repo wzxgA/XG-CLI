@@ -466,12 +466,26 @@ def _render_team_event(event: TeamEvent) -> None:
         console.print(Text(f"  [{event.role}/{task.id if task else ''}] Artifact {event.artifact.kind}: {summary}", style="dim cyan"))
     elif event.kind == "task_review_started" and task:
         console.print(Text(f"  [reviewer/{task.id}] 开始审查任务证据", style="yellow"))
+    elif event.kind == "review_output_invalid" and task:
+        console.print(Text(
+            f"  [reviewer/{task.id}] 输出异常 ({event.failure_category})：{event.message[:240]}",
+            style="yellow",
+        ))
+    elif event.kind == "review_output_retry" and task:
+        console.print(Text(f"  [reviewer/{task.id}] {event.message}", style="yellow"))
     elif event.kind == "task_review_done" and task and event.review:
         style = "green" if event.review.verdict == "pass" else "red"
         detail = "；".join(event.review.findings) or "验收通过"
         console.print(Text(f"  [reviewer/{task.id}] {event.review.verdict}: {detail[:240]}", style=style))
     elif event.kind == "repair_requested" and task:
         console.print(Text(f"  [repairer/{task.id}] {event.message[:240]}", style="yellow"))
+    elif event.kind in {"task_needs_input", "repair_scope_required"} and task:
+        scope = ", ".join(claim.pattern for claim in event.scope_claims) or "未提供"
+        console.print(Text(
+            f"INPUT [{task.id}] {event.message[:240]}；修复范围：{scope}；"
+            f"Repair 配额已启动 {event.repair_attempts_started} 次",
+            style="yellow",
+        ))
     elif event.kind == "task_blocked" and task:
         console.print(Text(f"BLOCKED [{event.role or task.owner_role}/{task.id}]: {event.message[:240]}", style="yellow"))
     elif event.kind == "task_done" and task:

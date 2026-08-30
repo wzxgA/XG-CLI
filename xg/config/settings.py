@@ -58,6 +58,8 @@ class Settings:
     # 第 10 期：Team 协作限制
     team_max_agents: int = 4
     team_max_repairs: int = 2
+    # Reviewer 输出协议重试次数；与 API 重试和 Repairer 次数分离。
+    team_review_output_retries: int = 1
     # Team Worker role-specific execution budgets. None keeps the legacy fallback.
     team_researcher_steps: int | None = None
     team_reviewer_steps: int | None = None
@@ -158,6 +160,7 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
         team_max_agents=max(1, _get_int(manager.env, "XG_TEAM_MAX_AGENTS", 4)),
         team_max_repairs=max(0, _get_int(manager.env, "XG_TEAM_MAX_REPAIRS", 2)),
+        team_review_output_retries=max(0, _get_int(manager.env, "XG_TEAM_REVIEW_OUTPUT_RETRIES", 1)),
         team_researcher_steps=_get_optional_positive_int(manager.env, "XG_TEAM_RESEARCHER_STEPS"),
         team_reviewer_steps=_get_optional_positive_int(manager.env, "XG_TEAM_REVIEWER_STEPS"),
         team_coder_steps=_get_optional_positive_int(manager.env, "XG_TEAM_CODER_STEPS"),

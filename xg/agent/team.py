@@ -42,6 +42,7 @@ TEAM_RESULT_LIMIT = 2000
 TEAM_ARTIFACT_LIMIT = 4000
 TEAM_REVIEW_LIMIT = 4000
 TEAM_PLAN_MAX_RETRIES = 2
+TEAM_REVIEW_OUTPUT_RETRIES = 1
 RESOURCE_SCOPED_TOOLS = {"read_file", "write_file", "list_dir", "glob_files", "grep_code"}
 READ_DISCOVERY_TOOLS = {"read_file", "list_dir", "glob_files", "grep_code"}
 READ_DISCOVERY_ROLES = {"researcher", "reviewer"}
@@ -162,6 +163,15 @@ class ReviewResult:
     required_fixes: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
     repair_scope: list[ResourceClaim] = field(default_factory=list)
+    category: str = ""
+
+
+@dataclass(frozen=True)
+class ReviewOutputError:
+    """Reviewer 输出无法安全转换为 ReviewResult 时的结构化错误。"""
+
+    category: str
+    message: str
 
 
 @dataclass
@@ -188,6 +198,12 @@ class TeamTask:
     failure_category: str = ""
     blocked_by: list[str] = field(default_factory=list)
     recovery_attempts: int = 0
+    repair_attempts_started: int = 0
+    repair_attempts_blocked: int = 0
+    pending_input_category: str = ""
+    pending_input_message: str = ""
+    pending_repair_scope: list[ResourceClaim] = field(default_factory=list)
+    pending_review: ReviewResult | None = None
 
 
 @dataclass
@@ -212,6 +228,8 @@ class TeamEvent:
         "task_retry_started",
         "subtask_event", "artifact_produced", "task_review_started",
         "task_review_done", "repair_requested", "team_done", "team_failed",
+        "review_output_invalid", "review_output_retry", "repair_scope_required",
+        "repair_scope_validated", "task_needs_input", "task_resume_requested",
         "cancelled",
     ]
     team_id: str = ""
@@ -232,6 +250,9 @@ class TeamEvent:
     previous_steps: int = 0
     retry_steps: int = 0
     preserved_artifacts: list[str] = field(default_factory=list)
+    scope_claims: list[ResourceClaim] = field(default_factory=list)
+    repair_attempts_started: int = 0
+    repair_attempts_blocked: int = 0
 
 
 class Planner(Protocol):
@@ -462,9 +483,12 @@ def _resource_claims_from_json(raw: object) -> list[ResourceClaim]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        pattern = str(item.get("pattern", "")).strip()
-        access = str(item.get("access", "write")).strip().lower()
-        if pattern and access in {"read", "write"}:
+        pattern = item.get("pattern")
+        access = item.get("access")
+        if isinstance(pattern, str) and isinstance(access, str):
+            pattern = pattern.strip()
+            access = access.strip().lower()
+        if isinstance(pattern, str) and pattern and access in {"read", "write"}:
             claims.append(ResourceClaim(pattern, access, bool(item.get("exclusive", False))))
     return claims
 
@@ -631,6 +655,65 @@ def _strip_json(text: str) -> str:
         text = re.sub(r"\s*```$", "", text)
     start, end = text.find("{"), text.rfind("}")
     return text[start:end + 1] if start >= 0 and end > start else text
+
+
+def _review_string_list(data: dict[str, object], field_name: str) -> list[str]:
+    raw = data.get(field_name, [])
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise ValueError(f"{field_name} 必须是字符串数组")
+    return [item.strip() for item in raw if item.strip()]
+
+
+def parse_review_output(
+    task_id: str,
+    raw: str,
+) -> ReviewResult | ReviewOutputError:
+    """严格解析 Reviewer JSON，避免非法输出触发 Repairer。"""
+    if not raw.strip():
+        return ReviewOutputError("review_output_empty", "Reviewer 返回了空内容")
+    try:
+        data = json.loads(_strip_json(raw))
+    except json.JSONDecodeError as exc:
+        return ReviewOutputError("review_output_not_json", f"Reviewer 输出不是合法 JSON：{exc}")
+    if not isinstance(data, dict):
+        return ReviewOutputError("review_output_wrong_shape", "Reviewer 输出顶层必须是 JSON 对象")
+
+    verdict = data.get("verdict")
+    if verdict not in {"pass", "fail", "needs_input"}:
+        return ReviewOutputError("review_verdict_invalid", "verdict 必须是 pass、fail 或 needs_input")
+    try:
+        findings = _review_string_list(data, "findings")
+        required_fixes = _review_string_list(data, "required_fixes")
+        evidence = _review_string_list(data, "evidence")
+    except ValueError as exc:
+        return ReviewOutputError("review_output_wrong_shape", str(exc))
+
+    raw_scope = data.get("repair_scope", [])
+    if not isinstance(raw_scope, list):
+        return ReviewOutputError("review_scope_invalid", "repair_scope 必须是对象数组")
+    claims: list[ResourceClaim] = []
+    for index, item in enumerate(raw_scope):
+        if not isinstance(item, dict):
+            return ReviewOutputError("review_scope_invalid", f"repair_scope[{index}] 必须是对象")
+        pattern = item.get("pattern")
+        access = item.get("access")
+        exclusive = item.get("exclusive", False)
+        if not isinstance(pattern, str) or not pattern.strip():
+            return ReviewOutputError("review_scope_invalid", f"repair_scope[{index}].pattern 无效")
+        if access not in {"read", "write"}:
+            return ReviewOutputError("review_scope_invalid", f"repair_scope[{index}].access 无效")
+        if not isinstance(exclusive, bool):
+            return ReviewOutputError("review_scope_invalid", f"repair_scope[{index}].exclusive 必须是布尔值")
+        claims.append(ResourceClaim(pattern.strip(), access, exclusive))
+
+    return ReviewResult(
+        task_id=task_id,
+        verdict=verdict,  # type: ignore[arg-type]
+        findings=findings,
+        required_fixes=required_fixes,
+        evidence=evidence,
+        repair_scope=claims,
+    )
 
 
 def parse_team_tasks(
@@ -836,6 +919,7 @@ class TeamExecutor:
         self.project_root = (project_root or Path.cwd()).resolve()
         self.team_id = team_id or f"team-{uuid.uuid4().hex[:8]}"
         self.agent_factory = agent_factory
+        self._last_plan: TeamPlan | None = None
 
     async def run(self, goal: str) -> AsyncIterator[TeamEvent]:
         if self.mcp_manager is not None:
@@ -885,6 +969,7 @@ class TeamExecutor:
                 return
 
         yield TeamEvent(kind="approved", team_id=self.team_id, plan=plan, message="团队计划已批准，开始执行")
+        self._last_plan = plan
         plan.batches = conflict_safe_batches(plan.tasks)
         for batch_number, batch in enumerate(plan.batches, 1):
             yield TeamEvent(
@@ -893,6 +978,9 @@ class TeamExecutor:
             )
             async for event in self._run_batch(plan, batch):
                 yield event
+            waiting = [task for task in plan.tasks if task.status == "needs_input"]
+            if waiting:
+                return
             failed = [task for task in plan.tasks if task.status == "failed"]
             if failed:
                 blocked = self._block_dependents(plan, {task.id for task in failed})
@@ -1012,6 +1100,175 @@ class TeamExecutor:
                 changed = True
         return blocked
 
+    def _pause_task_for_input(
+        self,
+        plan: TeamPlan,
+        task: TeamTask,
+        queue: asyncio.Queue[TeamEvent | None],
+        *,
+        category: str,
+        message: str,
+        review: ReviewResult | None = None,
+        scope_claims: list[ResourceClaim] | None = None,
+    ) -> None:
+        """Pause safely instead of converting an unresolved decision to failure."""
+        task.status = "needs_input"
+        task.failure_category = category
+        task.pending_input_category = category
+        task.pending_input_message = message
+        task.pending_repair_scope = list(scope_claims or [])
+        task.pending_review = review
+        task.result = message[:TEAM_RESULT_LIMIT]
+        queue.put_nowait(TeamEvent(
+            kind="repair_scope_required" if category.startswith("repair_scope") else "task_needs_input",
+            team_id=self.team_id, plan=plan, task=task, role=task.owner_role,
+            failure_category=category, scope_claims=list(task.pending_repair_scope),
+            repair_attempts_started=task.repair_attempts_started,
+            repair_attempts_blocked=task.repair_attempts_blocked,
+            message=message,
+            review=review,
+        ))
+
+    async def resume_task_with_repair_scope(
+        self,
+        task_id: str,
+        claims: list[ResourceClaim],
+    ) -> AsyncIterator[TeamEvent]:
+        """Resume a paused task after revalidating an explicit write scope."""
+        plan = self._last_plan
+        if plan is None:
+            yield TeamEvent(
+                kind="team_failed", team_id=self.team_id,
+                message="没有可恢复的 Team 计划",
+            )
+            return
+        task = plan.task_by_id(task_id)
+        if task is None or task.status != "needs_input" or task.pending_review is None:
+            yield TeamEvent(
+                kind="task_needs_input", team_id=self.team_id, plan=plan, task=task,
+                failure_category="resume_invalid", message="任务不存在或当前不处于等待输入状态",
+            )
+            return
+
+        queue: asyncio.Queue[TeamEvent | None] = asyncio.Queue()
+        review = task.pending_review
+        repair_claims = [
+            ResourceClaim(claim.pattern, "write", claim.exclusive)
+            for claim in claims
+            if claim.access == "write" and claim.pattern.strip()
+        ]
+        repair = replace(
+            task,
+            id=f"{task.id}-repair-{task.repair_attempts_started + 1}",
+            title=f"修复：{task.title}",
+            description="\n".join(review.required_fixes or review.findings) or "根据审查结果修复任务",
+            owner_role="repairer",
+            allowed_tools=[],
+            allowed_tools_declared=False,
+            invalid_tools=[],
+            tool_warnings=[],
+            resource_scope_mode="targeted",
+            resource_claims=repair_claims,
+            resource_deny_patterns=list(task.resource_deny_patterns),
+            deps=[],
+            status="pending",
+            result="",
+            artifacts=[],
+            failure_category="",
+            blocked_by=[],
+            recovery_attempts=0,
+        )
+        repair_profile = self.profiles.get("repairer") or self.profiles["coder"]
+        policy_errors = validate_task_resource_policy(repair, repair_profile, self.project_root)
+        if policy_errors:
+            task.repair_attempts_blocked += 1
+            self._pause_task_for_input(
+                plan, task, queue,
+                category="repair_scope_missing" if not repair_claims else "repair_scope_unsafe",
+                message="；".join(policy_errors), review=review, scope_claims=repair_claims,
+            )
+            while not queue.empty():
+                event = queue.get_nowait()
+                if event is not None:
+                    yield event
+            return
+
+        task.status = "running"
+        task.pending_input_category = ""
+        task.pending_input_message = ""
+        task.pending_repair_scope = list(repair_claims)
+        task.repair_attempts_started += 1
+        task.attempts = task.repair_attempts_started
+        queue.put_nowait(TeamEvent(
+            kind="task_resume_requested", team_id=self.team_id, plan=plan, task=task,
+            role="repairer", scope_claims=list(repair_claims),
+            message="已确认修复范围，继续执行 Repairer",
+        ))
+        queue.put_nowait(TeamEvent(
+            kind="repair_scope_validated", team_id=self.team_id, plan=plan, task=task,
+            role="repairer", scope_claims=list(repair_claims),
+            message="Repairer 写入范围校验通过",
+        ))
+        queue.put_nowait(TeamEvent(
+            kind="repair_requested", team_id=self.team_id, plan=plan, task=repair,
+            role="repairer", attempt=task.repair_attempts_started,
+            message=repair.description,
+        ))
+        result, artifacts, agent_id, error, category = await self._execute_worker(
+            plan, repair, queue, attempt=task.repair_attempts_started,
+        )
+        if error:
+            task.status = "failed"
+            task.failure_category = category or "execution_failed"
+            task.result = error[:TEAM_RESULT_LIMIT]
+            queue.put_nowait(TeamEvent(
+                kind="agent_failed", team_id=self.team_id, plan=plan, task=repair,
+                agent_id=agent_id, role="repairer", attempt=task.repair_attempts_started,
+                failure_category=task.failure_category, message=error,
+            ))
+            queue.put_nowait(TeamEvent(
+                kind="task_failed", team_id=self.team_id, plan=plan, task=task,
+                agent_id=agent_id, role=task.owner_role,
+                failure_category=task.failure_category, message=error,
+            ))
+        else:
+            await self._publish_artifacts(
+                plan, repair, artifacts, agent_id, queue,
+                attempt=task.repair_attempts_started,
+            )
+            task.result = result[:TEAM_RESULT_LIMIT]
+            try:
+                next_review = await self._review(plan, task, artifacts, queue)
+            except Exception as exc:
+                next_review = ReviewResult(
+                    task.id, "needs_input", [f"Reviewer 执行失败：{exc}"],
+                    ["重新执行任务审查"], [], [], "review_execution_failed",
+                )
+            if next_review.verdict == "pass":
+                task.status = "done"
+                task.pending_review = None
+                queue.put_nowait(TeamEvent(
+                    kind="task_done", team_id=self.team_id, plan=plan, task=task,
+                    message=f"修复后通过：{task.result}",
+                ))
+                if all(item.status == "done" for item in plan.tasks):
+                    queue.put_nowait(TeamEvent(
+                        kind="team_done", team_id=self.team_id, plan=plan,
+                        message=f"Team 完成：{sum(item.status == 'done' for item in plan.tasks)}/{len(plan.tasks)} 个任务通过",
+                    ))
+            else:
+                self._pause_task_for_input(
+                    plan, task, queue,
+                    category=next_review.category or "review_output_invalid",
+                    message="；".join(next_review.findings or next_review.required_fixes) or "Reviewer 需要用户处理",
+                    review=next_review,
+                )
+
+        while not queue.empty():
+            event = queue.get_nowait()
+            if event is not None:
+                yield event
+
     async def _run_task(self, plan: TeamPlan, task_id: str, queue: asyncio.Queue[TeamEvent | None]) -> None:
         task = plan.task_by_id(task_id)
         if task is None:
@@ -1096,23 +1353,41 @@ class TeamExecutor:
         try:
             review = await self._review(plan, task, artifacts, queue)
         except Exception as exc:
-            review = ReviewResult(task.id, "fail", [f"Reviewer 执行失败：{exc}"], ["重新执行任务审查"], [])
+            review = ReviewResult(
+                task.id, "needs_input", [f"Reviewer 执行失败：{exc}"],
+                ["重新执行任务审查"], [], [], "review_execution_failed",
+            )
         if review.verdict == "pass":
             task.status = "done"
             self._audit("team_task_done", team_id=self.team_id, task_id=task.id, role=task.owner_role, result=task.result)
             queue.put_nowait(TeamEvent(kind="task_done", team_id=self.team_id, plan=plan, task=task, message=task.result))
             return
+        if review.verdict == "needs_input":
+            self._pause_task_for_input(
+                plan, task, queue,
+                category=review.category or "review_output_invalid",
+                message="；".join(review.findings or review.required_fixes) or "Reviewer 需要用户处理",
+                review=review,
+            )
+            return
 
         max_repairs = max(0, getattr(self.settings, "team_max_repairs", TEAM_MAX_RETRIES))
         for attempt in range(1, max_repairs + 1):
-            task.attempts = attempt
             repair_claims, scope_warnings = build_repair_scope(task, review)
+            if not repair_claims:
+                self._pause_task_for_input(
+                    plan, task, queue,
+                    category="repair_scope_missing",
+                    message="Repairer 尚未启动：没有明确的 write claim，请确认允许修改的文件范围",
+                    review=review,
+                )
+                return
             repair_description = "\n".join(review.required_fixes or review.findings) or "根据审查结果修复任务"
             if scope_warnings:
                 repair_description += "\n\n修复范围提示：" + "；".join(scope_warnings)
             repair = replace(
                 task,
-                id=f"{task.id}-repair-{attempt}",
+                id=f"{task.id}-repair-{task.repair_attempts_started + 1}",
                 title=f"修复：{task.title}",
                 description=repair_description,
                 owner_role="repairer",
@@ -1136,25 +1411,54 @@ class TeamExecutor:
                 blocked_by=[],
                 recovery_attempts=0,
             )
+            repair_profile = self.profiles.get("repairer") or self.profiles["coder"]
+            policy_errors = validate_task_resource_policy(repair, repair_profile, self.project_root)
+            if policy_errors:
+                task.repair_attempts_blocked += 1
+                category = (
+                    "repair_scope_missing"
+                    if any(error.startswith("repair_scope_missing") for error in policy_errors)
+                    else "repair_scope_unsafe"
+                )
+                self._pause_task_for_input(
+                    plan, task, queue,
+                    category=category,
+                    message="；".join(policy_errors),
+                    review=review,
+                    scope_claims=repair_claims,
+                )
+                return
+            task.attempts = task.repair_attempts_started + 1
+            task.repair_attempts_started += 1
             queue.put_nowait(TeamEvent(kind="repair_requested", team_id=self.team_id, plan=plan, task=repair, role="repairer", message=repair.description))
-            repair_result, repair_artifacts, repair_agent_id, repair_error, repair_category = await self._execute_worker(plan, repair, queue, attempt=attempt)
+            repair_result, repair_artifacts, repair_agent_id, repair_error, repair_category = await self._execute_worker(
+                plan, repair, queue, attempt=task.repair_attempts_started
+            )
             if repair_error:
                 queue.put_nowait(TeamEvent(
                     kind="agent_failed", team_id=self.team_id, plan=plan, task=repair,
-                    agent_id=repair_agent_id, role="repairer", attempt=attempt,
+                    agent_id=repair_agent_id, role="repairer", attempt=task.repair_attempts_started,
                     failure_category=repair_category or "execution_failed", message=repair_error,
                 ))
-                review = ReviewResult(task.id, "fail", [repair_error], [repair_error], [])
+                review = ReviewResult(task.id, "fail", [repair_error], [repair_error], [], [], repair_category or "execution_failed")
             else:
-                await self._publish_artifacts(plan, repair, repair_artifacts, repair_agent_id, queue, attempt=attempt)
+                await self._publish_artifacts(plan, repair, repair_artifacts, repair_agent_id, queue, attempt=task.repair_attempts_started)
                 task.result = repair_result[:TEAM_RESULT_LIMIT]
                 try:
                     review = await self._review(plan, task, repair_artifacts, queue)
                 except Exception as exc:
-                    review = ReviewResult(task.id, "fail", [f"Reviewer 执行失败：{exc}"], ["重新执行任务审查"], [])
+                    review = ReviewResult(task.id, "needs_input", [f"Reviewer 执行失败：{exc}"], ["重新执行任务审查"], [], [], "review_execution_failed")
             if review.verdict == "pass":
                 task.status = "done"
                 queue.put_nowait(TeamEvent(kind="task_done", team_id=self.team_id, plan=plan, task=task, message=f"修复后通过：{task.result}"))
+                return
+            if review.verdict == "needs_input":
+                self._pause_task_for_input(
+                    plan, task, queue,
+                    category=review.category or "review_output_invalid",
+                    message="；".join(review.findings or review.required_fixes) or "Reviewer 需要用户处理",
+                    review=review,
+                )
                 return
         task.status = "failed"
         task.failure_category = "review_failed"
@@ -1327,12 +1631,22 @@ class TeamExecutor:
         elif self.task_reviewer is not None:
             result = await self.task_reviewer(task, artifacts)
         else:
-            result = await self._llm_review(task, artifacts)
-        queue.put_nowait(TeamEvent(kind="task_review_done", team_id=self.team_id, plan=plan, task=task, role="reviewer", review=result, message="；".join(result.findings)))
+            result = await self._llm_review(task, artifacts, queue=queue)
+        queue.put_nowait(TeamEvent(
+            kind="task_review_done", team_id=self.team_id, plan=plan, task=task,
+            role="reviewer", review=result, failure_category=result.category,
+            message="；".join(result.findings or result.required_fixes),
+        ))
         self._audit("team_task_review", team_id=self.team_id, task_id=task.id, verdict=result.verdict, findings=result.findings)
         return result
 
-    async def _llm_review(self, task: TeamTask, artifacts: list[Artifact]) -> ReviewResult:
+    async def _llm_review(
+        self,
+        task: TeamTask,
+        artifacts: list[Artifact],
+        *,
+        queue: asyncio.Queue[TeamEvent | None] | None = None,
+    ) -> ReviewResult:
         evidence = "\n".join(
             f"- [{artifact.kind}] {artifact.uri}: {artifact.summary[:TEAM_ARTIFACT_LIMIT]}"
             for artifact in artifacts
@@ -1345,21 +1659,52 @@ class TeamExecutor:
             "每项格式为 {\"pattern\": \"项目内路径\", \"access\": \"write\"}。"
         )
         context = [Message(role="system", content=TEAM_REVIEWER_PROMPT), Message(role="user", content=prompt)]
-        raw = await self._llm_text(context)
-        try:
-            data = json.loads(_strip_json(raw))
-            verdict = str(data.get("verdict", "fail"))
-            if verdict not in {"pass", "fail", "needs_input"}:
-                verdict = "fail"
-            return ReviewResult(
-                task_id=task.id, verdict=verdict,  # type: ignore[arg-type]
-                findings=[str(item) for item in data.get("findings", []) if str(item)],
-                required_fixes=[str(item) for item in data.get("required_fixes", []) if str(item)],
-                evidence=[str(item) for item in data.get("evidence", []) if str(item)],
-                repair_scope=_resource_claims_from_json(data.get("repair_scope", [])),
-            )
-        except (json.JSONDecodeError, AttributeError, TypeError) as exc:
-            return ReviewResult(task.id, "fail", [f"Reviewer 输出无效：{exc}"], ["重新输出结构化审查结果"], [])
+        retry_limit = max(
+            0,
+            getattr(self.settings, "team_review_output_retries", TEAM_REVIEW_OUTPUT_RETRIES),
+        )
+        last_error = ReviewOutputError("review_output_invalid", "Reviewer 输出无效")
+        for attempt in range(retry_limit + 1):
+            raw = await self._llm_text(context)
+            parsed = parse_review_output(task.id, raw)
+            if isinstance(parsed, ReviewResult):
+                return parsed
+            last_error = parsed
+            if queue is not None:
+                queue.put_nowait(TeamEvent(
+                    kind="review_output_invalid", team_id=self.team_id, task=task,
+                    role="reviewer", attempt=attempt + 1,
+                    failure_category=parsed.category, retryable=attempt < retry_limit,
+                    message=parsed.message,
+                ))
+            if attempt >= retry_limit:
+                break
+            if queue is not None:
+                queue.put_nowait(TeamEvent(
+                    kind="review_output_retry", team_id=self.team_id, task=task,
+                    role="reviewer", attempt=attempt + 1, retryable=True,
+                    message=f"Reviewer 输出无法解析，正在重新请求结构化结果（{attempt + 1}/{retry_limit}）",
+                ))
+            context.extend([
+                Message(role="assistant", content=raw),
+                Message(
+                    role="user",
+                    content=(
+                        f"上一次 Reviewer 输出无效（{parsed.category}）。"
+                        "请不要重新执行任务或调用工具，只输出一个合法 JSON 对象。"
+                        "如果无法安全确定修改文件范围，请使用 verdict=needs_input，不要猜测路径。"
+                    ),
+                ),
+            ])
+        return ReviewResult(
+            task.id,
+            "needs_input",
+            ["Reviewer 未返回可解析的结构化结果"],
+            ["请选择重新审查，或补充允许 Repairer 修改的文件范围"],
+            [last_error.category],
+            [],
+            last_error.category,
+        )
 
     def _worker_system_prompt(self, plan: TeamPlan, task: TeamTask, profile: AgentProfile) -> str:
         parts = [DEFAULT_SYSTEM_PROMPT, "", f"# 你的角色：{profile.name}", profile.system_prompt, "", f"# Team 总目标\n{plan.goal}", f"# 当前任务\n{task.title}\n{task.description}", "# 验收标准\n- " + "\n- ".join(task.acceptance_criteria)]

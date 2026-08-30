@@ -29,6 +29,7 @@ def _trace_status(item: TranscriptItem) -> str:
         "success": "成功",
         "failed": "失败",
         "blocked": "已阻塞",
+        "needs_input": "等待输入",
         "skipped": "已跳过",
         "cancelled": "已取消",
         "done": "已完成",
@@ -91,6 +92,7 @@ def _agent_group_status(status: str) -> str:
         "done": "已完成",
         "failed": "失败",
         "blocked": "已阻塞",
+        "needs_input": "等待输入",
         "skipped": "已跳过",
         "cancelled": "已取消",
     }.get(status, status or "未知")
