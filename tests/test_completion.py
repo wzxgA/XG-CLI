@@ -323,3 +323,118 @@ def test_p2_dynamic_failing_provider_degrades_to_empty():
     reg = CompletionProviderRegistry()
     reg.register("mcp", boom)
     assert dynamic_candidates("/mcp restart lo", None, reg) == []
+
+
+# ---------------------------------------------------------------------------
+# P3: workspace path completion
+# ---------------------------------------------------------------------------
+
+
+def _make_workspace(root):
+    for rel in ("xg/auth/login.py", "xg/auth/signup.py", "xg/lib/util.py", "src/main.rs"):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+    (root / ".env").write_text("KEY=secret")
+    (root / "xg" / "secret.pem").write_text("key")
+    (root / "xg" / "auth" / ".hidden").write_text("")
+    return root
+
+
+def test_p3_normalize_path_value_strips_quotes_and_dots():
+    from xg.cli.completion import normalize_path_value
+
+    assert normalize_path_value("xg/auth") == "xg/auth"
+    assert normalize_path_value("./xg/") == "xg"
+    assert normalize_path_value("'xg/auth'") == "xg/auth"
+    assert normalize_path_value("") == ""
+    assert normalize_path_value("/usr/etc") == "usr/etc"
+    assert normalize_path_value("..") is None
+    assert normalize_path_value("xg/../../etc") is None
+    assert normalize_path_value("C:/Windows") is None
+
+
+def test_p3_enumerate_workspace_names_lists_dirs_and_files(tmp_path):
+    from xg.cli.completion import enumerate_workspace_names
+
+    root = _make_workspace(tmp_path)
+    names = enumerate_workspace_names(root, "xg/a")
+    # Only the immediate children of the listed directory are offered; deeper
+    # files are reached by completing the directory first.
+    assert "xg/auth/" in names
+    assert "xg/auth/login.py" not in names
+    assert all(name.startswith("xg/a") for name in names)
+
+
+def test_p3_enumerate_root_level_omits_hidden_and_sensitive(tmp_path):
+    from xg.cli.completion import enumerate_workspace_names
+
+    root = _make_workspace(tmp_path)
+    names = enumerate_workspace_names(root, "")
+    assert "src/" in names
+    assert "xg/" in names
+    assert ".env" not in names
+    assert ".git" not in names
+
+
+def test_p3_deny_patterns_filter_sensitive_files(tmp_path):
+    from xg.cli.completion import enumerate_workspace_names
+
+    root = _make_workspace(tmp_path)
+    names = enumerate_workspace_names(root, "xg/")
+    assert "xg/auth/" in names
+    assert "xg/lib/" in names
+    assert "xg/secret.pem" not in names
+
+
+def test_p3_traversal_and_absolute_never_escape_workspace(tmp_path):
+    from xg.cli.completion import enumerate_workspace_names, path_completion_candidates
+
+    root = _make_workspace(tmp_path)
+    assert enumerate_workspace_names(root, "..") == []
+    assert enumerate_workspace_names(root, "xg/../../") == []
+    assert path_completion_candidates("/team resume t1 --write-scope ..", None, root) == []
+
+
+def test_p3_allow_patterns_constrain_scope_hints(tmp_path):
+    from xg.cli.completion import enumerate_workspace_names
+
+    root = _make_workspace(tmp_path)
+    names = enumerate_workspace_names(root, "xg/", allow_patterns=("xg/lib/**",))
+    assert "xg/lib/" in names
+    assert "xg/auth/" not in names
+
+
+def test_p3_result_cap(tmp_path):
+    from xg.cli.completion import enumerate_workspace_names
+
+    root = _make_workspace(tmp_path)
+    names = enumerate_workspace_names(root, "xg/a", limit=1)
+    assert len(names) == 1
+
+
+def test_p3_path_completion_line(tmp_path):
+    from xg.cli.completion import path_completion_candidates
+
+    root = _make_workspace(tmp_path)
+    cands = path_completion_candidates("/team resume t1 --write-scope xg/a", None, root)
+    assert any(c.kind == "path" for c in cands)
+    assert all(c.insert_text.startswith("xg/a") for c in cands)
+    assert not any(c.insert_text.endswith(".pem") for c in cands)
+
+
+def test_p3_apply_completion_keeps_trailing_tokens_and_cursor():
+    from xg.cli.completion import apply_completion, CompletionCandidate
+
+    line = "/team resume t1 --write-scope xg/au extra"
+    cursor_idx = line.index("xg/au")
+    value, cursor = apply_completion(
+        line,
+        cursor_idx,
+        CompletionCandidate("xg/auth/", "xg/auth/", detail="路径", kind="path"),
+    )
+    assert value == "/team resume t1 --write-scope xg/auth/ extra"
+    # The line keeps the trailing token " extra" and the cursor is placed at
+    # the end of the inserted token, not the end of the line.
+    assert cursor == value.index("xg/auth/") + len("xg/auth/")
+    assert value[cursor:] == " extra"

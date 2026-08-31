@@ -11,8 +11,11 @@ top of the data model introduced here.
 
 from __future__ import annotations
 
+import fnmatch
+import posixpath
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from xg.cli.commands import (
@@ -317,27 +320,55 @@ def completion_candidates(raw: str, cursor_position: int | None = None) -> list[
         return []
 
     # --- index_of_current >= 2: arguments / option values ---
+    # Detect whether we are typing the *value* of a preceding option (the
+    # previous token itself is a declared option name). In that case the
+    # static layer must not repeat the option list; dynamic rules own value
+    # completion (e.g. ``--write-scope <path>``). Options already typed are
+    # also excluded so you never see ``--write-scope`` twice.
+    prev_declares_value = False
+    if index_of_current >= 1 and index_of_current - 1 < len(tokens):
+        prev_text = tokens[index_of_current - 1].text
+        declared_options: set[str] = set()
+        if spec is not None:
+            declared_options.update(spec.options or ())
+            if spec.subcommands and len(tokens) >= 2:
+                sub_spec = _subcommand_or_none(spec, tokens[1].text)
+                if sub_spec is not None:
+                    declared_options.update(sub_spec.options or ())
+        prev_declares_value = prev_text in declared_options
+
+    # Collect already-written option names so we don't offer them twice. They
+    # are the non-current tokens whose text is in declared_options.
+    consumed_options: set[str] = set()
+    if spec is not None:
+        for idx, token in enumerate(tokens):
+            if idx == index_of_current:
+                continue
+            if token.text in declared_options:
+                consumed_options.add(token.text)
+
     if spec is not None and spec.subcommands and len(tokens) >= 2:
         sub = _subcommand_or_none(spec, tokens[1].text)
-        if sub is not None and sub.options:
+        if sub is not None and sub.options and not prev_declares_value:
             current = ctx.current_token if index_of_current < len(tokens) else ""
-            matches = [o for o in sub.options if o.lower().startswith(current.lower())]
+            options = [o for o in sub.options if o not in consumed_options]
             if current and current.startswith("-"):
-                options = matches
-            else:
-                options = list(sub.options)
+                matches = [o for o in options if o.lower().startswith(current.lower())]
+                options = matches or options
             return [
                 CompletionCandidate(o, o + " ", detail="选项参数", kind="option") for o in options
             ]
-        if sub is None and tokens[1].text and spec.options:
+        if sub is None and tokens[1].text and spec.options and not prev_declares_value:
+            options = [o for o in spec.options if o not in consumed_options]
             return [
                 CompletionCandidate(o, o + " ", detail="选项参数", kind="option")
-                for o in spec.options
+                for o in options
             ]
-    if spec is not None and spec.options:
+    if spec is not None and spec.options and not prev_declares_value:
+        options = [o for o in spec.options if o not in consumed_options]
         return [
             CompletionCandidate(o, o + " ", detail="选项参数", kind="option")
-            for o in spec.options
+            for o in options
         ]
     return []
 
@@ -357,7 +388,9 @@ def apply_completion(
     start = ctx.current_token_start
     end = ctx.current_token_end
     new_text, _ = replace_span(raw, start, end, candidate.insert_text)
-    return new_text, len(new_text)
+    # Keep the cursor on the inserted token rather than forcing it to the end
+    # of the whole line, so any later tokens are preserved (P3 §4.4).
+    return new_text, start + len(candidate.insert_text)
 
 
 # ---------------------------------------------------------------------------
@@ -534,3 +567,174 @@ def _dynamic_slot_spec(
     if default_spec is not None and current_index >= 1:
         return default_spec
     return None
+
+
+# ---------------------------------------------------------------------------
+# P3: workspace path completion
+#
+# Path candidates are workspace-relative, never escape the project root, and
+# never carry execution intent. `allow_patterns` (read/write claim patterns)
+# constrain which prefixes are offered purely as a hint; the runtime repair
+# scope check still decides real write access.
+# ---------------------------------------------------------------------------
+
+DEFAULT_PATH_DENY_PATTERNS: tuple[str, ...] = (
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*secret*",
+    "**/*credential*",
+    "**/*password*",
+    ".git",
+    "**/.git*",
+    ".xg/memory.db",
+    ".xg/audit.log",
+)
+DEFAULT_PATH_LIMIT = 30
+DEFAULT_PATH_MAX_DEPTH = 8
+
+
+def normalize_path_value(value: str) -> str | None:
+    """Normalize a user path token to a workspace-relative posix string.
+
+    Returns ``""`` for an effectively-empty value. Returns ``None`` when the
+    value would escape the workspace (``..`` traversal). Leading slashes are
+    treated as workspace-relative (slash-command convention). Quotes are
+    stripped; ``.``/``./`` become ``""``.
+    """
+    cleaned = (value or "").strip().strip("\"'")
+    if cleaned in ("", ".", "./", ".\\"):
+        return ""
+    cleaned = cleaned.lstrip("/").lstrip("\\")
+    if ":" in cleaned:  # reject windows drive / URL-ish values in path slots
+        return None
+    parts = [part for part in cleaned.replace("\\", "/").split("/") if part not in ("", ".")]
+    if ".." in parts:
+        return None
+    return "/".join(parts)
+
+
+def _path_claim_match(value: str, pattern: str) -> bool:
+    """Mirror Team's ``_claim_matches`` so scope hints reuse the same matching."""
+    if fnmatch.fnmatch(value, pattern) or (
+        pattern.startswith("**/") and fnmatch.fnmatch(value, pattern[3:])
+    ):
+        return True
+    prefix = pattern.rstrip("/*").rstrip("/")
+    if prefix and (value == prefix or value.startswith(prefix + "/")):
+        return True
+    return fnmatch.fnmatch(value, pattern.rstrip("/") + "/**")
+
+
+def _path_is_denied(name: str, rel: str, deny_patterns: Sequence[str]) -> bool:
+    return any(
+        pattern == name
+        or pattern == rel
+        or (pattern.rstrip("/") and (rel.startswith(pattern.rstrip("/") + "/") or rel == pattern.rstrip("/")))
+        or fnmatch.fnmatch(name, pattern)
+        or fnmatch.fnmatch(rel, pattern)
+        for pattern in deny_patterns
+    )
+
+
+def enumerate_workspace_names(
+    root: Path,
+    rel: str,
+    *,
+    allow_patterns: Sequence[str] = (),
+    deny_patterns: Sequence[str] = DEFAULT_PATH_DENY_PATTERNS,
+    limit: int = DEFAULT_PATH_LIMIT,
+    max_depth: int = DEFAULT_PATH_MAX_DEPTH,
+) -> list[str]:
+    """List workspace-relative names the current path prefix could expand to.
+
+    The prefix ``rel`` is workspace-relative. The directory being listed is
+    resolved and re-checked against the workspace root so symlinks or
+    nonexistent paths cannot move results outside the project. Results are
+    depth- and count-limited. ``allow_patterns`` (if any) only *hint* which
+    prefixes are offered; it never authorises anything.
+    """
+    rel = rel or ""
+    if rel.count("/") >= max_depth:
+        return []
+    search_rel, _, name_prefix = rel.rpartition("/")
+    if rel.endswith("/"):
+        search_rel = rel[:-1]
+        name_prefix = ""
+    root = root.resolve()
+    try:
+        search_dir = (root / search_rel).resolve() if search_rel else root
+    except OSError:
+        return []
+    try:
+        search_dir.relative_to(root)
+    except ValueError:
+        return []
+    if not search_dir.is_dir():
+        return []
+    try:
+        entries = sorted(search_dir.iterdir(), key=lambda entry: entry.name)
+    except OSError:
+        return []
+    results: list[str] = []
+    for entry in entries:
+        name = entry.name
+        if name.startswith(".") and not (name_prefix.startswith(name)):
+            continue
+        if name_prefix and not name.startswith(name_prefix):
+            continue
+        entry_rel = f"{search_rel}/{name}" if search_rel else name
+        if entry.is_dir():
+            entry_rel += "/"
+        if _path_is_denied(name, entry_rel.rstrip("/"), deny_patterns):
+            continue
+        if allow_patterns and not any(
+            _path_claim_match(entry_rel.rstrip("/"), pattern) for pattern in allow_patterns
+        ):
+            continue
+        results.append(entry_rel)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def path_completion_candidates(
+    raw: str,
+    cursor_position: int | None,
+    workspace_root: Path,
+    *,
+    allow_patterns: Sequence[str] = (),
+    deny_patterns: Sequence[str] = DEFAULT_PATH_DENY_PATTERNS,
+    limit: int = DEFAULT_PATH_LIMIT,
+) -> list[CompletionCandidate]:
+    """Return workspace-relative path candidates for the current token."""
+    if not (isinstance(raw, str) and raw.lstrip().startswith("/")):
+        return []
+    ctx = parse_completion_line(raw, cursor_position)
+    if not ctx.is_command or not ctx.tokens:
+        return []
+    raw_token = (ctx.current_token or "").strip().strip("\"'")
+    rel = normalize_path_value(ctx.current_token)
+    if rel is None:
+        return []
+    # Preserve the user's intent to list a directory's children: if they typed
+    # a trailing slash (``xg/auth/`` vs ``xg/auth``), enumeration must descend
+    # into that directory instead of treating the name as a prefix filter on
+    # the parent listing. normalize_path_value strips the trailing slash so we
+    # re-attach it purely as a listing hint (it never affects claim matching).
+    had_trailing_sep = rel and (raw_token.endswith("/") or raw_token.endswith("\\"))
+    if had_trailing_sep:
+        rel += "/"
+    names = enumerate_workspace_names(
+        workspace_root,
+        rel,
+        allow_patterns=allow_patterns,
+        deny_patterns=deny_patterns,
+        limit=limit,
+    )
+    return [
+        CompletionCandidate(name, name, detail="路径", kind="path") for name in names
+    ]

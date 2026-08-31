@@ -291,7 +291,12 @@ class SessionController:
         Polling happens on every keys/refresh; the engine caps and degrades
         gracefully, and the Agent's data is already kept in memory.
         """
-        from xg.cli.completion import CompletionCandidate, CompletionProviderRegistry
+        from xg.cli.completion import (
+            CompletionCandidate,
+            CompletionContext,
+            CompletionProviderRegistry,
+            path_completion_candidates,
+        )
 
         reg = CompletionProviderRegistry()
         mgr = self.manager
@@ -357,27 +362,49 @@ class SessionController:
         )
 
         executor = self._team_executor
+        project_root = getattr(self.agent.memory_manager, "project_root", None)
 
-        def _team_scope_values():
+        def _write_claim_patterns():
             if executor is None or executor.plan is None:
                 return []
-            values = set()
+            patterns: set[str] = set()
             for task in executor.plan.tasks:
                 if task.status != "needs_input":
                     continue
                 for claim in getattr(task, "pending_repair_scope", []):
-                    path = getattr(claim, "path", "") or ""
-                    if path:
-                        values.add(path)
-            return sorted(values)
+                    if claim.access == "write":
+                        patterns.add(ResourceClaim(claim.pattern, "write").normalized())
+            return sorted(patterns)
 
-        reg.register(
-            "team_scope",
-            lambda ctx: [
-                CompletionCandidate(v, v, detail="已声明范围", kind="value")
-                for v in _team_scope_values()
-            ],
-        )
+        def _team_team_scope_candidates(ctx: CompletionContext):
+            declared: list[CompletionCandidate] = []
+            if executor is not None and executor.plan is not None:
+                for task in executor.plan.tasks:
+                    if task.status != "needs_input":
+                        continue
+                    for claim in getattr(task, "pending_repair_scope", []):
+                        path = getattr(claim, "pattern", "") or ""
+                        if path:
+                            declared.append(
+                                CompletionCandidate(path, path, detail="已声明范围", kind="scope")
+                            )
+            if project_root is None:
+                return declared
+            path_cands = path_completion_candidates(
+                ctx.raw,
+                ctx.cursor_position,
+                project_root,
+                allow_patterns=_write_claim_patterns(),
+            )
+            merged = list(declared)
+            seen = {c.insert_text for c in merged}
+            for cand in path_cands:
+                if cand.insert_text not in seen:
+                    merged.append(cand)
+                    seen.add(cand.insert_text)
+            return merged
+
+        reg.register("team_scope", lambda ctx: _team_team_scope_candidates(ctx))
         reg.register(
             "team_task",
             lambda ctx: [
