@@ -11,7 +11,8 @@ top of the data model introduced here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from typing import Literal
 
 from xg.cli.commands import (
@@ -22,6 +23,8 @@ from xg.cli.commands import (
 )
 
 CompletionKind = Literal["command", "subcommand", "argument", "option", "value", "path"]
+
+CompletionValueKind = Literal["text", "enum", "provider", "model", "task", "path", "scope"]
 
 
 @dataclass(frozen=True)
@@ -355,3 +358,179 @@ def apply_completion(
     end = ctx.current_token_end
     new_text, _ = replace_span(raw, start, end, candidate.insert_text)
     return new_text, len(new_text)
+
+
+# ---------------------------------------------------------------------------
+# P2: dynamic local value completion
+#
+# Layered static candidates (commands/subcommands/options) are independent of
+# runtime data.  P2 adds local, side-effect-free dynamic values (providers,
+# models, MCP servers, skills, memory ids, team tasks).  The engine only knows
+# about a *kind* plus a provider name; the registry resolves names to data,
+# so the engine stays U.I.- and agent-independent and never triggers network
+# I/O or tool execution.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CompletionArgumentSpec:
+    """Describes one positional argument slot that takes a dynamic value.
+
+    ``kind`` drives presentation; ``value_provider`` names a registered,
+    user-agnostic provider (never a user-constructed callable).
+    """
+
+    name: str
+    kind: CompletionValueKind = "text"
+    value_provider: str = ""
+
+
+@dataclass(frozen=True)
+class DynamicArgumentRules:
+    """Declare which dynamic value kinds each subcommand/option consumes.
+
+    ``positionals`` maps a likely subcommand token to the value spec for its
+    first argument; ``option_values`` maps ``--option`` to a value spec.
+    """
+
+    positionals: dict[str, CompletionArgumentSpec] = field(default_factory=dict)
+    option_values: dict[str, CompletionArgumentSpec] = field(default_factory=dict)
+
+
+__DYNAMIC_RULES: dict[str, DynamicArgumentRules] = {
+    "/model": DynamicArgumentRules(
+        positionals={
+            "list": CompletionArgumentSpec("provider", "provider", "provider"),
+            "provider": CompletionArgumentSpec("provider", "provider", "provider"),
+            "model": CompletionArgumentSpec("model", "model", "model"),
+            "": CompletionArgumentSpec("provider", "provider", "provider"),
+        }
+    ),
+    "/mcp": DynamicArgumentRules(
+        positionals={
+            "status": CompletionArgumentSpec("server", "enum"),
+            "resources": CompletionArgumentSpec("server", "enum"),
+            "restart": CompletionArgumentSpec("server", "enum", "mcp"),
+            "logs": CompletionArgumentSpec("server", "enum", "mcp"),
+            "enable": CompletionArgumentSpec("server", "enum", "mcp"),
+            "disable": CompletionArgumentSpec("server", "enum", "mcp"),
+        }
+    ),
+    "/skill": DynamicArgumentRules(
+        positionals={
+            "load": CompletionArgumentSpec("skill", "enum", "skill"),
+            "enable": CompletionArgumentSpec("skill", "enum", "skill"),
+            "disable": CompletionArgumentSpec("skill", "enum", "skill"),
+        }
+    ),
+    "/memory": DynamicArgumentRules(
+        positionals={"delete": CompletionArgumentSpec("id", "text", "memory_id")}
+    ),
+    "/web": DynamicArgumentRules(
+        positionals={"search": CompletionArgumentSpec("query", "text")}
+    ),
+    "/team": DynamicArgumentRules(
+        option_values={
+            "--write-scope": CompletionArgumentSpec("scope", "scope", "team_scope")
+        }
+    ),
+}
+
+
+def dynamic_argument_rules(command: str) -> DynamicArgumentRules:
+    return __DYNAMIC_RULES.get(command.lower(), DynamicArgumentRules())
+
+
+ProviderGetCandidates = Callable[[CompletionContext], Sequence[CompletionCandidate]]
+
+
+class CompletionProviderRegistry:
+    """Resolve provider names to candidate generators.
+
+    Providers are registered by plain string names.  Resolving never raises:
+    an unknown provider or a failing provider yields an empty sequence so the
+    user can always keep typing manually.
+    """
+
+    def __init__(self) -> None:
+        self._providers: dict[str, ProviderGetCandidates] = {}
+
+    def register(self, name: str, fn: ProviderGetCandidates) -> None:
+        self._providers[name] = fn
+
+    def candidate(self, ctx: CompletionContext, provider_name: str) -> list[CompletionCandidate]:
+        fn = self._providers.get(provider_name)
+        if fn is None:
+            return []
+        try:
+            result = fn(ctx)
+        except Exception:
+            return []
+        if result is None:
+            return []
+        return list(result)
+
+
+def dynamic_candidates(
+    raw: str, cursor_position: int | None, registry: CompletionProviderRegistry, *, limit: int = 20
+) -> list[CompletionCandidate]:
+    """Return capped dynamic candidates for the current argument slot.
+
+    Only arguments whose declared provider resolves to non-empty values are
+    offered.  Results are capped to ``limit`` so a huge local store never
+    floods the suggestion list. Returns [] for non-command lines.
+    """
+
+    if not isinstance(raw, str) or not raw.lstrip().startswith("/"):
+        return []
+    ctx = parse_completion_line(raw, cursor_position)
+    if not ctx.is_command or not ctx.tokens:
+        return []
+
+    rules = dynamic_argument_rules(ctx.command)
+    spec = _dynamic_slot_spec(ctx, rules)
+    if spec is None or not spec.value_provider:
+        return []
+    candidates = registry.candidate(ctx, spec.value_provider)
+    return candidates[:limit]
+
+
+def _dynamic_slot_spec(
+    ctx: CompletionContext, rules: DynamicArgumentRules
+) -> CompletionArgumentSpec | None:
+    tokens = ctx.tokens
+    if len(tokens) < 2:
+        return None
+
+    # Determine the index of the token under the cursor. Boundary at the very
+    # end counts as a fresh argument slot after the command.
+    current_index = None
+    for index, token in enumerate(tokens):
+        if token.start <= ctx.cursor_position <= token.end:
+            current_index = index
+            break
+    if current_index is None and ctx.cursor_position >= tokens[0].end:
+        current_index = len(tokens)
+    if current_index is None:
+        current_index = 0
+
+    # Option value being typed: an option token appears at or before the
+    # cursor and declares a dynamic value. e.g. `/team resume t4 --write-scope xg/`
+    for idx, token in enumerate(tokens):
+        if idx >= current_index or token.text.startswith("--") is False:
+            continue
+        spec = rules.option_values.get(token.text)
+        if spec is not None:
+            return spec
+
+    # Argument slot: the second token may name a declared subcommand whose
+    # first value is dynamic. `/mcp restart lo` -> value at index 2.
+    # Otherwise the first argument itself is dynamic. `/model dee` -> index 1.
+    first_arg = tokens[1].text.lower()
+    pos_spec = rules.positionals.get(first_arg)
+    if pos_spec is not None:
+        return pos_spec if current_index >= 2 else None
+    default_spec = rules.positionals.get("")
+    if default_spec is not None and current_index >= 1:
+        return default_spec
+    return None

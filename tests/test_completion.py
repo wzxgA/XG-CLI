@@ -219,3 +219,107 @@ def test_p1_apply_completion_preserves_non_command_text():
     )
     assert value == "普通文本"
     assert cursor == len(value)
+
+
+# ---------------------------------------------------------------------------
+# P2: dynamic local value completion
+# ---------------------------------------------------------------------------
+
+
+def _registry():
+    from xg.cli.completion import CompletionProviderRegistry, CompletionCandidate
+
+    reg = CompletionProviderRegistry()
+    reg.register(
+        "provider",
+        lambda ctx: [CompletionCandidate(n, n, kind="value") for n in
+                     ("openai", "deepseek", "glm")],
+    )
+    reg.register(
+        "model",
+        lambda ctx: [CompletionCandidate(m, m, kind="value") for m in
+                     ("deepseek-chat", "gpt-4o-mini", "glm-4-flash")],
+    )
+    reg.register(
+        "mcp", lambda ctx: [CompletionCandidate("local", "local", kind="value")]
+    )
+    reg.register(
+        "skill", lambda ctx: [CompletionCandidate("code-review", "code-review", kind="value")]
+    )
+    reg.register(
+        "memory_id", lambda ctx: [CompletionCandidate("1", "1", kind="value")]
+    )
+    reg.register(
+        "team_scope",
+        lambda ctx: [CompletionCandidate(v, v, kind="value") for v in ("xg/auth/", "xg/lib/")],
+    )
+    return reg
+
+
+def test_p2_dynamic_provider_candidates_for_model():
+    from xg.cli.completion import dynamic_candidates
+
+    got = dynamic_candidates("/model dee", None, _registry())
+    assert [c.insert_text for c in got] == ["openai", "deepseek", "glm"]
+
+
+def test_p2_dynamic_mcp_server_candidates():
+    from xg.cli.completion import dynamic_candidates
+
+    got = dynamic_candidates("/mcp restart ", len("/mcp restart "), _registry())
+    assert [c.insert_text for c in got] == ["local"]
+
+
+def test_p2_dynamic_skill_candidates():
+    from xg.cli.completion import dynamic_candidates
+
+    got = dynamic_candidates("/skill disable co", None, _registry())
+    assert [c.insert_text for c in got] == ["code-review"]
+
+
+def test_p2_dynamic_memory_id_candidates():
+    from xg.cli.completion import dynamic_candidates
+
+    got = dynamic_candidates("/memory delete 1", None, _registry())
+    assert [c.insert_text for c in got] == ["1"]
+
+
+def test_p2_dynamic_team_scope_option_value():
+    from xg.cli.completion import dynamic_candidates
+
+    got = dynamic_candidates(
+        "/team resume t4 --write-scope xg/a", None, _registry()
+    )
+    assert [c.insert_text for c in got] == ["xg/auth/", "xg/lib/"]
+
+
+def test_p2_dynamic_result_is_capped():
+    from xg.cli.completion import dynamic_candidates
+
+    reg = _registry()
+    got = dynamic_candidates("/model ", len("/model "), reg, limit=2)
+    assert len(got) <= 2
+
+
+def test_p2_dynamic_returns_empty_for_non_command():
+    from xg.cli.completion import dynamic_candidates
+
+    assert dynamic_candidates("普通文本", None, _registry()) == []
+
+
+def test_p2_dynamic_missing_provider_never_raises():
+    from xg.cli.completion import CompletionProviderRegistry, dynamic_candidates
+
+    reg = CompletionProviderRegistry()  # empty registry
+    assert dynamic_candidates("/mcp restart lo", None, reg) == []
+
+
+def test_p2_dynamic_failing_provider_degrades_to_empty():
+    from xg.cli.completion import CompletionProviderRegistry, dynamic_candidates
+
+    def boom(_ctx):
+        raise RuntimeError("provider failure")
+
+    reg = CompletionProviderRegistry()
+    reg.register("mcp", boom)
+    assert dynamic_candidates("/mcp restart lo", None, reg) == []

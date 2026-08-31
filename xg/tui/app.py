@@ -66,6 +66,7 @@ class XgTuiApp(App[None]):
 
     def __init__(self, agent, settings: Settings, manager: ConfigManager) -> None:
         super().__init__()
+        self.agent = agent
         self.settings = settings
         self.input_history = getattr(agent, "input_history", None) or InputHistory(
             project_root=manager.project_dir.parent,
@@ -116,6 +117,8 @@ class XgTuiApp(App[None]):
         self._render_state(self._state)
         composer = self.query_one("#composer", Composer)
         composer.set_input_history(self.input_history)
+        suggestions = self.query_one("#command-suggestions", CommandSuggestions)
+        suggestions.set_dynamic_registry(self.controller.completion_registry())
         composer.focus()
         self.run_worker(self.controller.startup(), exclusive=False, name="mcp-startup")
 

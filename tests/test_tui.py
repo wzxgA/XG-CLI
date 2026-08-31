@@ -639,6 +639,23 @@ async def test_tui_subcommand_completion_replaces_token(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_dynamic_value_completion_for_model(tmp_path):
+    """P2: /model arg slot surfaces live provider values from the agent's
+    config manager (read-only, no network / no transcript entry)."""
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer")
+        suggestions = app.query_one("#command-suggestions")
+        composer.value = "/model dee"
+        await pilot.pause()
+        labels = [c.insert_text for c in suggestions.visible_candidates]
+        assert "deepseek" in labels
+        # Dynamic candidates only touch the input line, never the transcript.
+        assert app.controller.state.transcript == []
+
+
+@pytest.mark.asyncio
 async def test_tui_command_suggestions_hidden_for_plan_review_and_replan(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

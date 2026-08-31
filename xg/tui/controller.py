@@ -283,6 +283,114 @@ class SessionController:
                 self._queue.clear()
                 self._publish_queue()
 
+    def completion_registry(self):
+        """Build a runtime provider registry for dynamic command completion.
+
+        Each provider reads only local, in-memory state from the live agent —
+        never LLM calls, MCP starts/restarts, network I/O or tool execution.
+        Polling happens on every keys/refresh; the engine caps and degrades
+        gracefully, and the Agent's data is already kept in memory.
+        """
+        from xg.cli.completion import CompletionCandidate, CompletionProviderRegistry
+
+        reg = CompletionProviderRegistry()
+        mgr = self.manager
+
+        def _providers():
+            return mgr.provider_names()
+
+        def _models():
+            # A provider is not advertised with a full model list, so only the
+            # default model (plus any configured active model) is offered.
+            providers = mgr.provider_names()
+            seen = set(mgr.active().model)
+            for name in providers:
+                p = mgr.resolve_provider(name)
+                if p is not None:
+                    seen.add(p.default_model)
+            return sorted(seen)
+
+        reg.register(
+            "provider",
+            lambda ctx: [
+                CompletionCandidate(name, name, detail="provider", kind="value")
+                for name in _providers()
+            ],
+        )
+        reg.register(
+            "model",
+            lambda ctx: [
+                CompletionCandidate(m, m, detail="model", kind="value") for m in _models()
+            ],
+        )
+
+        mcp = getattr(self.agent, "mcp_manager", None)
+        reg.register(
+            "mcp",
+            lambda ctx: [
+                CompletionCandidate(
+                    snap.name, snap.name, detail="MCP server", kind="value"
+                )
+                for snap in (mcp.snapshots() if mcp is not None else [])
+            ],
+        )
+
+        skills = getattr(self.agent, "skill_registry", None)
+        reg.register(
+            "skill",
+            lambda ctx: [
+                CompletionCandidate(info.name, info.name, detail="skill", kind="value")
+                for info in (
+                    skills.list() if skills is not None and skills.config.enabled else ()
+                )
+                if info.enabled
+            ],
+        )
+
+        memory = getattr(self.agent, "memory_manager", None)
+        reg.register(
+            "memory_id",
+            lambda ctx: [
+                CompletionCandidate(str(entry.id), str(entry.id), detail="记忆", kind="value")
+                for entry in (memory.list(20) if memory is not None else [])
+            ],
+        )
+
+        executor = self._team_executor
+
+        def _team_scope_values():
+            if executor is None or executor.plan is None:
+                return []
+            values = set()
+            for task in executor.plan.tasks:
+                if task.status != "needs_input":
+                    continue
+                for claim in getattr(task, "pending_repair_scope", []):
+                    path = getattr(claim, "path", "") or ""
+                    if path:
+                        values.add(path)
+            return sorted(values)
+
+        reg.register(
+            "team_scope",
+            lambda ctx: [
+                CompletionCandidate(v, v, detail="已声明范围", kind="value")
+                for v in _team_scope_values()
+            ],
+        )
+        reg.register(
+            "team_task",
+            lambda ctx: [
+                CompletionCandidate(task.id, task.id, detail=task.title, kind="value")
+                for task in (
+                    executor.plan.tasks if executor is not None and executor.plan is not None
+                    else []
+                )
+                if task.status == "needs_input"
+            ],
+        )
+        return reg
+
     async def submit(self, text: str) -> bool:
         text = text.strip()
         if not text:

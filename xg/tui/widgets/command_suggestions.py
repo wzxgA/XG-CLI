@@ -6,16 +6,22 @@ from rich.text import Text
 from textual.widgets import OptionList
 
 from xg.cli.commands import SLASH_COMMANDS, SlashCommandSpec
-from xg.cli.completion import CompletionCandidate, completion_candidates
+from xg.cli.completion import (
+    CompletionCandidate,
+    CompletionProviderRegistry,
+    completion_candidates,
+    dynamic_candidates,
+)
 from xg.tui.messages import CommandSuggestionSelected
 
 
 class CommandSuggestions(OptionList):
     """A non-focusable, mouse-selectable list above the Composer.
 
-    The list shows layered candidates (command / subcommand / static option)
-    in front of a thin horizontal rule... The displayed text keeps the
-    candidate's insert_text separate, so help text never leaks into the value.
+    The list shows layered candidates (command / subcommand / static option /
+    dynamic value) in front of a thin horizontal rule... The displayed text
+    keeps the candidate's insert_text separate, so help text never leaks into
+    the value.
     """
 
     can_focus = False
@@ -23,7 +29,13 @@ class CommandSuggestions(OptionList):
     def __init__(self) -> None:
         super().__init__(id="command-suggestions", markup=False)
         self._visible_candidates: list[CompletionCandidate] = []
+        self._revision = 0
+        self._registry: CompletionProviderRegistry | None = None
         self.display = False
+
+    def set_dynamic_registry(self, registry: CompletionProviderRegistry | None) -> None:
+        """Attach the runtime provider registry for dynamic value candidates."""
+        self._registry = registry
 
     @property
     def visible_candidates(self) -> list[CompletionCandidate]:
@@ -49,8 +61,27 @@ class CommandSuggestions(OptionList):
         return self.display and bool(self._visible_candidates)
 
     def update_query(self, query: str, cursor_position: int | None = None) -> None:
-        """Refresh layered candidates for the current line and cursor."""
-        candidates = completion_candidates(query, cursor_position)
+        """Refresh layered candidates (static + dynamic) for the input line.
+
+        Static candidates come first, then dynamic value candidates (the
+        providers are synchronous and read only in-memory agent state), then
+        the list is re-rendered. Dynamic updates use a per-query revision so
+        a stale refresh from an older input never clobbers a newer one.
+        """
+        revision = self._revision + 1
+        self._revision = revision
+        static = completion_candidates(query, cursor_position)
+        dynamic = (
+            dynamic_candidates(query, cursor_position, self._registry)
+            if self._registry is not None
+            else []
+        )
+        candidates = list(static) + dynamic
+        # Defensive: if a newer update_query() bumped the revision before we
+        # applied this result, drop it. Synchronous path never races in
+        # practice, but the guard keeps a stale refresh from winning.
+        if self._revision != revision:
+            return
         self._visible_candidates = candidates
         if not candidates:
             self.set_options(())
