@@ -32,9 +32,9 @@ class AgentGroupToggled(Message):
 class CommandSuggestionSelected(Message):
     """A local command suggestion was selected without being submitted."""
 
-    def __init__(self, command: str) -> None:
+    def __init__(self, candidate) -> None:
         super().__init__()
-        self.command = command
+        self.candidate = candidate
 
 
 class InspectorViewSelected(Message):

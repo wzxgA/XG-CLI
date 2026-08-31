@@ -37,6 +37,7 @@ class SlashSubcommandSpec:
     name: str
     usage: str
     description: str
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class SlashCommandSpec:
     details: tuple[str, ...] = ()
     subcommands: tuple[SlashSubcommandSpec, ...] = ()
     examples: tuple[str, ...] = ()
+    options: tuple[str, ...] = ()
 
 
 # Keep this tuple in presentation order.  It is intentionally metadata only;
@@ -86,6 +88,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
                 "resume",
                 "/team resume <任务ID> --write-scope <范围>",
                 "确认写入范围后恢复暂停的 Repairer",
+                options=("--write-scope",),
             ),
         ),
         examples=(

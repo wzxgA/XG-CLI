@@ -220,20 +220,19 @@ class XgTuiApp(App[None]):
         self.controller.set_inspector_view(message.view)
 
     def on_command_suggestion_selected(self, message: CommandSuggestionSelected) -> None:
-        self.complete_command_suggestion(message.command)
+        self.complete_command_suggestion(message.candidate)
 
-    def complete_command_suggestion(self, command: str) -> None:
-        """Replace only the leading command token and keep Composer focused."""
-        from xg.cli.completion import complete_command_token
+    def complete_command_suggestion(self, candidate) -> None:
+        """Apply a layered candidate and refresh the suggestion list."""
+        from xg.cli.completion import apply_completion
 
         composer = self.query_one("#composer", Composer)
-        raw = composer.value
-        if not raw.lstrip().startswith("/"):
-            return
-        value, cursor = complete_command_token(raw, command)
+        value, cursor = apply_completion(composer.value, composer.cursor_position, candidate)
         composer.value = value
         composer.cursor_position = cursor
         composer.focus()
+        suggestions = self.query_one("#command-suggestions", CommandSuggestions)
+        suggestions.update_query(value, cursor)
 
     def _render_state(self, state: TuiState) -> None:
         self.query_one("#header", HeaderBar).update_state(state)

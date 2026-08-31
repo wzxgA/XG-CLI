@@ -77,7 +77,7 @@ class Composer(Input):
             return
         suggestions = self._suggestions()
         if suggestions is not None:
-            suggestions.update_query(event.value)
+            suggestions.update_query(event.value, self.cursor_position)
 
     def on_key(self, event: Key) -> None:
         """Keep plan-review shortcuts working while the input stays enabled."""
@@ -95,11 +95,11 @@ class Composer(Input):
                 suggestions.move_selection(1)
                 return
             if event.key == "tab":
-                command = suggestions.selected_command()
-                if command is not None:
+                candidate = suggestions.selected_candidate()
+                if candidate is not None:
                     event.prevent_default()
                     event.stop()
-                    app.complete_command_suggestion(command)
+                    app.complete_command_suggestion(candidate)
                 return
             if event.key == "escape":
                 event.prevent_default()

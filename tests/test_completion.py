@@ -1,10 +1,12 @@
-"""Pure unit tests for the P0 completion module (xg.cli.completion)."""
+"""Pure unit tests for the P0/P1 completion module (xg.cli.completion)."""
 
 from __future__ import annotations
 
 from xg.cli.completion import (
     CompletionCandidate,
+    apply_completion,
     complete_command_token,
+    completion_candidates,
     parse_completion_line,
     replace_span,
     sort_candidates,
@@ -140,3 +142,80 @@ def test_candidate_sort_respects_sort_key_then_label():
     ]
     ordered = sort_candidates(candidates)
     assert [c.insert_text for c in ordered] == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# P1: layered command / subcommand / option completion
+# ---------------------------------------------------------------------------
+
+
+def test_p1_top_level_command_candidates_preserve_compat():
+    candidates = completion_candidates("/m")
+    assert [c.insert_text for c in candidates] == ["/model", "/mcp", "/memory"]
+    assert all(c.kind == "command" for c in candidates)
+
+
+def test_p1_no_candidates_for_plain_text():
+    assert completion_candidates("实现登录模块") == []
+
+
+def test_p1_subcommand_completion_for_team():
+    candidates = completion_candidates("/team res")
+    assert [c.insert_text for c in candidates] == ["resume"]
+    assert candidates[0].kind == "subcommand"
+
+
+def test_p1_subcommand_completion_for_mcp():
+    candidates = completion_candidates("/mcp sta")
+    assert [c.insert_text for c in candidates] == ["status"]
+    assert candidates[0].kind == "subcommand"
+
+
+def test_p1_subcommand_completion_offers_all_when_prefix_unmatched():
+    candidates = completion_candidates("/team xyz")
+    assert [c.insert_text for c in candidates] == ["run", "resume"]
+
+
+def test_p1_static_option_completion_after_subcommand():
+    # /team resume <task>  ->  --write-scope is a declared option.
+    candidates = completion_candidates("/team resume t4 --write-s")
+    assert [c.insert_text for c in candidates] == ["--write-scope "]
+    assert candidates[0].kind == "option"
+
+
+def test_p1_static_option_completion_uno_typed():
+    # A blank argument slot after the subcommand still surfaces the option.
+    candidates = completion_candidates("/team resume t4 ", cursor_position=len("/team resume t4 "))
+    assert any(c.insert_text == "--write-scope " for c in candidates)
+
+
+def test_p1_blank_argument_slot_offers_all_subcommands():
+    # An empty second-token slot surfaces every subcommand of the command.
+    candidates = completion_candidates("/team ", cursor_position=len("/team "))
+    assert [c.insert_text for c in candidates] == ["run", "resume"]
+
+
+def test_p1_apply_completion_replaces_current_token():
+    value, cursor = apply_completion(
+        "/team res", len("/team res"), CompletionCandidate("resume", "resume", kind="subcommand")
+    )
+    assert value == "/team resume"
+    assert cursor == len(value)
+
+
+def test_p1_apply_completion_option_adds_trailing_space():
+    value, cursor = apply_completion(
+        "/team resume t4 --write-s",
+        None,
+        CompletionCandidate("--write-scope", "--write-scope ", kind="option"),
+    )
+    assert value == "/team resume t4 --write-scope "
+    assert cursor == len(value)
+
+
+def test_p1_apply_completion_preserves_non_command_text():
+    value, cursor = apply_completion(
+        "普通文本", None, CompletionCandidate("/a", "/a", kind="command")
+    )
+    assert value == "普通文本"
+    assert cursor == len(value)

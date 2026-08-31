@@ -14,6 +14,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from xg.cli.commands import (
+    SLASH_COMMANDS,
+    SlashCommandSpec,
+    SlashSubcommandSpec,
+    filter_slash_commands,
+)
+
 CompletionKind = Literal["command", "subcommand", "argument", "option", "value", "path"]
 
 
@@ -196,3 +203,155 @@ def sort_candidates(
             cand.label,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# P1: layered command / subcommand / static-option completion
+# ---------------------------------------------------------------------------
+
+
+def _command_spec_or_none(command: str) -> SlashCommandSpec | None:
+    """Return the resolved command spec (name or alias) or None."""
+    normalized = command.lower()
+    for spec in SLASH_COMMANDS:
+        if spec.name.lower() == normalized or any(
+            alias.lower() == normalized for alias in spec.aliases
+        ):
+            return spec
+    return None
+
+
+def _subcommand_or_none(spec: SlashCommandSpec, token: str) -> SlashSubcommandSpec | None:
+    normalized = token.lower()
+    for sub in spec.subcommands:
+        if sub.name.lower() == normalized:
+            return sub
+    return None
+
+
+def completion_candidates(raw: str, cursor_position: int | None = None) -> list[CompletionCandidate]:
+    """Return layered completion candidates for a command line.
+
+    Top-level commands, subcommands and statically-declared options are
+    offered at the correct token, keeping existing top-level behaviour
+    compatible. Dynamic values (providers/models/MCP/skills/...) are a later
+    phase and intentionally not resolved here.
+    """
+
+    if not isinstance(raw, str) or not raw.lstrip().startswith("/"):
+        return []
+
+    ctx = parse_completion_line(raw, cursor_position)
+    if not ctx.is_command or not ctx.tokens:
+        return []
+
+    tokens = ctx.tokens
+    command_token = ctx.command
+    index_of_current = None
+    for index, token in enumerate(tokens):
+        if token.start <= ctx.cursor_position <= token.end:
+            index_of_current = index
+            break
+    # Cursor sitting on the boundary after the command belongs to the next token.
+    if index_of_current is None and ctx.cursor_position >= tokens[0].end:
+        index_of_current = len(tokens)  # treated as a fresh argument slot
+
+    spec = _command_spec_or_none(command_token)
+    is_command_exact = spec is not None
+
+    # --- Layer 1: still typing the command token (or nothing after it) ---
+    if not is_command_exact or index_of_current in (0, None):
+        prefix = tokens[0].text if tokens else raw.strip()
+        if is_command_exact:
+            # Typing an exact command as its own full token; show subcommands.
+            pass
+        else:
+            specs = filter_slash_commands(prefix)
+            return [
+                CompletionCandidate(
+                    spec.name,
+                    spec.name,
+                    detail=spec.description,
+                    kind="command",
+                )
+                for spec in specs
+            ]
+
+    # --- Layer 2: resolve the current token against subcommands / options ---
+    if index_of_current is None:
+        return []
+
+    if index_of_current == 0:
+        # Exact command typed with no arguments yet -> offer subcommands/options.
+        if spec is None:
+            return []
+        if spec.subcommands:
+            return [
+                CompletionCandidate(sub.name, sub.name, detail=sub.description, kind="subcommand")
+                for sub in spec.subcommands
+            ]
+        return [
+            CompletionCandidate(option, option, detail="选项参数", kind="option")
+            for option in spec.options
+        ]
+
+    if index_of_current == 1:
+        # Second token: a subcommand is expected ('' when the slot is blank).
+        token = tokens[1].text if len(tokens) > 1 else ""
+        if spec is not None and spec.subcommands:
+            subs = [sub for sub in spec.subcommands if sub.name.lower().startswith(token.lower())]
+            if not subs:
+                subs = list(spec.subcommands)
+            return [
+                CompletionCandidate(sub.name, sub.name, detail=sub.description, kind="subcommand")
+                for sub in subs
+            ]
+        if spec is not None and spec.options:
+            options = [o for o in spec.options if o.lower().startswith(token.lower())] or list(spec.options)
+            return [
+                CompletionCandidate(o, o + " ", detail="选项参数", kind="option") for o in options
+            ]
+        return []
+
+    # --- index_of_current >= 2: arguments / option values ---
+    if spec is not None and spec.subcommands and len(tokens) >= 2:
+        sub = _subcommand_or_none(spec, tokens[1].text)
+        if sub is not None and sub.options:
+            current = ctx.current_token if index_of_current < len(tokens) else ""
+            matches = [o for o in sub.options if o.lower().startswith(current.lower())]
+            if current and current.startswith("-"):
+                options = matches
+            else:
+                options = list(sub.options)
+            return [
+                CompletionCandidate(o, o + " ", detail="选项参数", kind="option") for o in options
+            ]
+        if sub is None and tokens[1].text and spec.options:
+            return [
+                CompletionCandidate(o, o + " ", detail="选项参数", kind="option")
+                for o in spec.options
+            ]
+    if spec is not None and spec.options:
+        return [
+            CompletionCandidate(o, o + " ", detail="选项参数", kind="option")
+            for o in spec.options
+        ]
+    return []
+
+
+def apply_completion(
+    raw: str, cursor_position: int | None, candidate: CompletionCandidate
+) -> tuple[str, int]:
+    """Apply a candidate to replace the current token; return (value, cursor).
+
+    Trailing text after the current token is preserved. The cursor is placed
+    at the end of the inserted text (mirrors complete_command_token).
+    """
+
+    ctx = parse_completion_line(raw, cursor_position)
+    if not ctx.is_command:
+        return raw, len(raw)
+    start = ctx.current_token_start
+    end = ctx.current_token_end
+    new_text, _ = replace_span(raw, start, end, candidate.insert_text)
+    return new_text, len(new_text)
