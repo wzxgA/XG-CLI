@@ -71,6 +71,36 @@ def test_plan_review_view_switches_off_when_plan_is_approved() -> None:
     assert state.transcript[-1].plan_review is False
 
 
+def test_plan_review_card_omits_flow_panel_when_structured_fallback() -> None:
+    """When the flowchart is too wide and falls back to structured text,
+    hide the cyan 「轮次流程」panel. The downgrade warning is still shown
+    dimmed inside the main card, and batch/task summaries remain intact."""
+
+    plan = make_plan()
+    narrow_console = Console(width=20, record=True)
+    narrow_console.print(PlanReviewCard(
+        TranscriptItem(id="plan-1", kind="plan", plan=plan, plan_review=True)
+    ))
+    rendered = narrow_console.export_text()
+    assert "轮次流程" not in rendered
+    # The long warning is wrapped across lines on a 20-column console,
+    # so assert key fragments independently (each must appear in some line
+    # when surrounding panel padding is stripped).
+    stripped_lines = [line.strip() for line in rendered.splitlines()]
+    assert any("图表超出当前终端" in line for line in stripped_lines)
+    assert any("结构化文本" in line for line in stripped_lines)
+    assert "共 3 轮" in rendered
+    assert "第 1 轮：t1" in rendered
+    assert "t1 准备基础" in rendered
+
+    # Wide console should keep the 「轮次流程」 panel as before.
+    wide_console = Console(width=160, record=True)
+    wide_console.print(PlanReviewCard(
+        TranscriptItem(id="plan-1", kind="plan", plan=plan, plan_review=True)
+    ))
+    assert "轮次流程" in wide_console.export_text()
+
+
 def test_plan_detail_hint_is_dim_without_dimming_task_content() -> None:
     summary = _task_summary_renderable(make_plan(), ("t1",), detailed=False)
     details = _task_summary_renderable(make_plan(), ("t1",), detailed=True)

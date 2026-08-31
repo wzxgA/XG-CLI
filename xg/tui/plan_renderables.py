@@ -124,13 +124,19 @@ class PlanReviewCard:
             width=max(1, options.max_width - 8),
             rank_by_node=data.rank_by_node,
         )
-        chart_parts: list[object] = [Text(chart.text, no_wrap=True, overflow="crop")]
-        if chart.warnings:
-            chart_parts.append(Text("\n\n⚠ " + "；".join(chart.warnings)))
         parts: list[object] = [
             Text(f"目标：{plan.goal}\n共 {len(plan.batches)} 轮", style="bold"),
-            Panel(Group(*chart_parts), title="轮次流程", border_style="cyan"),
         ]
+        # Skip the flow-chart panel entirely when rendering falls back to
+        # structured text: the panel would just repeat the task IDs already
+        # listed below, and the warning inside a cyan border looks noisy.
+        if chart.mode != "structured":
+            chart_parts: list[object] = [Text(chart.text, no_wrap=True, overflow="crop")]
+            if chart.warnings:
+                chart_parts.append(Text("\n\n⚠ " + "；".join(chart.warnings)))
+            parts.append(Panel(Group(*chart_parts), title="轮次流程", border_style="cyan"))
+        elif chart.warnings:
+            parts.append(Text("⚠ " + "；".join(chart.warnings), style="dim"))
         batch_lines = [
             f"第 {batch_no} 轮：{', '.join(batch)}"
             for batch_no, batch in enumerate(plan.batches, 1)
