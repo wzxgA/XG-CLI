@@ -857,19 +857,8 @@ def _cmd_hitl(agent: ReActAgent, arg: str) -> str:
 def _cmd_model(
     agent: ReActAgent, settings: Settings, manager: ConfigManager, arg: str
 ) -> str:
-    if not arg:
-        active = manager.active()
-        lines = [
-            f"当前: {active.provider_name} / {active.model}（窗口 {active.context_window}）",
-            "可用 providers:",
-        ]
-        for p in manager.list_providers():
-            cache = "cache" if p.supports_cache else "-"
-            vision = "vision" if p.supports_vision else "-"
-            lines.append(
-                f"  {p.name:<10} {p.default_model:<18} 窗口 {p.context_window:<6} {cache:<5} {vision}"
-            )
-        return "\n".join(lines)
+    if not arg or arg.strip().lower() in ("list", "provider"):
+        return _model_catalog(manager)
 
     if "/" in arg:
         provider_name, model = (x.strip() for x in arg.split("/", 1))
@@ -878,6 +867,22 @@ def _cmd_model(
         return _switch(agent, settings, manager, arg, None)
     # 不带 provider 前缀时，视为当前 provider 内的模型切换
     return _switch(agent, settings, manager, settings.provider, arg)
+
+
+def _model_catalog(manager: ConfigManager) -> str:
+    """Render the current model and the available providers catalog."""
+    active = manager.active()
+    lines = [
+        f"当前: {active.provider_name} / {active.model}（窗口 {active.context_window}）",
+        "可用 providers:",
+    ]
+    for p in manager.list_providers():
+        cache = "cache" if p.supports_cache else "-"
+        vision = "vision" if p.supports_vision else "-"
+        lines.append(
+            f"  {p.name:<10} {p.default_model:<18} 窗口 {p.context_window:<6} {cache:<5} {vision}"
+        )
+    return "\n".join(lines)
 
 
 def _switch(

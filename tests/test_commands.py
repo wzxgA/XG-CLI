@@ -58,6 +58,19 @@ class TestModelCommand:
         assert "deepseek" in output
         assert "glm" in output
 
+    def test_list_keyword_does_not_switch(self, tmp_path):
+        # `list` and `provider` are declared subcommands, not model names.
+        agent, settings, manager = make_context(
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
+        )
+        for sub in ("list", "provider"):
+            output = run_cmd(agent, settings, manager, f"/model {sub}")
+            assert "当前:" in output and "可用 providers:" in output
+            assert output.strip().startswith("当前:")
+            # 不应被当作模型切换
+            assert "已切换" not in output
+        assert settings.provider != "deepseek"
+
     def test_switch_provider(self, tmp_path):
         agent, settings, manager = make_context(
             tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
