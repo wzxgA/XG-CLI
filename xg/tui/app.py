@@ -224,15 +224,15 @@ class XgTuiApp(App[None]):
 
     def complete_command_suggestion(self, command: str) -> None:
         """Replace only the leading command token and keep Composer focused."""
+        from xg.cli.completion import complete_command_token
+
         composer = self.query_one("#composer", Composer)
         raw = composer.value
-        leading = raw.lstrip()
-        if not leading.startswith("/"):
+        if not raw.lstrip().startswith("/"):
             return
-        token = leading.split(maxsplit=1)[0]
-        prefix_length = len(raw) - len(leading)
-        composer.value = raw[:prefix_length] + command + raw[prefix_length + len(token):]
-        composer.cursor_position = len(composer.value)
+        value, cursor = complete_command_token(raw, command)
+        composer.value = value
+        composer.cursor_position = cursor
         composer.focus()
 
     def _render_state(self, state: TuiState) -> None:
