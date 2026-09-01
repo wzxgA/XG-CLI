@@ -326,6 +326,67 @@ async def test_controller_command_toggle_updates_snapshot(tmp_path, monkeypatch)
     assert snap.active_tier == ""
 
 
+@pytest.mark.asyncio
+async def test_tui_smart_router_header_highlight_follows_route(tmp_path):
+    """phase-02 步骤 D：pilot 集成测试。
+
+    真实规则路由（纯函数，不联网）：on 后四档行出现，Basic/Ultimate 输入交替
+    高亮随之迁移，off 后路由行消失恢复单行渲染。
+    """
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        header = app.query_one("#header", HeaderBar)
+        # 默认 off：Header 无路由行
+        assert "Basic:" not in header.render().plain
+
+        assert await asyncio.wait_for(app.controller.submit("/smartRouter on"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.enabled is True
+        assert len(snap.tiers) == 4
+        assert "Basic:" in header.render().plain
+
+        # Basic 输入 → 高亮 Basic
+        assert await asyncio.wait_for(app.controller.submit("你好"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.active_tier == "Basic"
+        assert [t.is_active for t in snap.tiers] == [True, False, False, False]
+
+        # Ultimate 输入 → 高亮迁移到 Ultimate
+        assert await asyncio.wait_for(app.controller.submit("设计日活千万的推荐系统架构"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.active_tier == "Ultimate"
+        assert [t.is_active for t in snap.tiers] == [False, False, False, True]
+
+        # off：路由行消失，恢复单行
+        assert await asyncio.wait_for(app.controller.submit("/smartRouter off"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.enabled is False
+        assert snap.tiers == ()
+        assert "Basic:" not in header.render().plain
+
+
+@pytest.mark.asyncio
+async def test_tui_smart_router_header_narrow_width_does_not_crash(tmp_path):
+    """phase-02 步骤 D：窄终端下 on 态路由行由 Static 自然折行，不崩溃、不挤压布局。"""
+    agent, settings, manager = make_context(tmp_path)
+    settings.smart_router_enabled = True
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(60, 18)) as pilot:
+        header = app.query_one("#header", HeaderBar)
+        # on 态构造即同步快照，窄宽下应正常渲染出路由行文本
+        await pilot.pause(0.1)
+        assert "Basic:" in header.render().plain
+        # 提交一轮输入，路由/渲染全流程在窄宽下不抛异常
+        assert await asyncio.wait_for(app.controller.submit("你好"), 1) is True
+        await pilot.pause()
+        assert app.controller.state.inspector.smart_router.active_tier == "Basic"
+
+
 def test_reducer_merges_streaming_content_and_ignores_stale_turn():
     state = TuiState(active_turn_id="turn-1", phase="running")
     state.transcript.append(
