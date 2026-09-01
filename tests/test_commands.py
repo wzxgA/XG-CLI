@@ -351,6 +351,77 @@ class TestSmartRouterCommand:
         assert settings.smart_router_enabled is True  # 保持开启
 
 
+class TestSmartRouterRouting:
+    """phase-01 子步骤 D：主循环路由挂点 + 不持久化换模型。"""
+
+    def test_route_switches_model_and_does_not_persist(self, tmp_path):
+        from xg.cli.app import _route_user_turn
+
+        user_cfg = tmp_path / "user_xg" / "config.json"
+        user_cfg.parent.mkdir(exist_ok=True)
+        user_cfg.write_text(
+            json.dumps(
+                {
+                    "smart_router": {
+                        "enabled": True,
+                        "tiers": {
+                            "Superior": {"provider": "deepseek", "model": "deepseek-chat"},
+                            "Ultimate": {"provider": "glm", "model": "glm-4-plus"},
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        agent, settings, manager = make_context(
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_GLM_API_KEY": "gk"}
+        )
+        # 输入命中架构+风险 → Ultimate，配置用 glm → 应切到 glm/glm-4-plus
+        tier, ts = _route_user_turn(
+            agent, settings, manager, "设计日活千万的推荐系统架构并给出部署回滚方案",
+            prev_tier=None, prev_ts=None,
+        )
+        assert tier == "Ultimate"
+        assert settings.provider == "glm"
+        assert settings.model == "glm-4-plus"
+        assert agent.llm.model == "glm-4-plus"  # type: ignore[attr-defined]
+        # 关键：不写回持久化 active_provider/active_model
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert "active_provider" not in cfg
+
+    def test_route_same_model_keeps_client(self, tmp_path):
+        from xg.cli.app import _route_user_turn
+
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        orig_llm = agent.llm
+        tier, _ = _route_user_turn(agent, settings, manager, "你好", None, None)
+        assert tier == "Basic"
+        # fallback 与当前相同 → 不重建客户端
+        assert agent.llm is orig_llm
+        assert settings.provider == "openai"
+
+    def test_route_unknown_provider_falls_back_on_error(self, tmp_path):
+        from xg.cli.app import _route_user_turn
+
+        user_cfg = tmp_path / "user_xg" / "config.json"
+        user_cfg.parent.mkdir(exist_ok=True)
+        user_cfg.write_text(
+            json.dumps(
+                {
+                    "smart_router": {"tiers": {"Ultimate": {"provider": "nope", "model": "x"}}}
+                }
+            ),
+            encoding="utf-8",
+        )
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        tier, _ = _route_user_turn(
+            agent, settings, manager, "设计日活千万的推荐系统架构并给出部署回滚方案", None, None
+        )
+        # Ultimate 配置了 nope（无 key）→ 回落 active openai，路由仍给出 Ultiimate，客户端不换
+        assert settings.provider == "openai"
+        assert isinstance(agent.llm, DummyClient)
+
+
 def test_slash_command_catalog_is_stable_and_prefix_filtered():
     assert [spec.name for spec in filter_slash_commands("/")][:5] == [
         "/plan", "/team", "/model", "/config", "/mcp"

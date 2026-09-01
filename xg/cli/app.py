@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.config.web import WebConfigManager
 from xg.config.skills import SkillConfigManager
-from xg.router import TIER_NAMES, resolve as resolve_tier
+from xg.router import TIER_NAMES, resolve as resolve_tier, route as route_turn
 from xg.cli.help import format_command_help, format_help
 from xg.input_history import HistoryConfig, InputHistory, PromptToolkitHistory
 from xg.llm.client import LlmClient, LlmError
@@ -609,6 +610,10 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
     if agent.approval_policy is not None:
         agent.approval_policy.requester = approval_ui
 
+    # SmartRouter 跨轮路由状态（phase-01 步骤 D）
+    prev_tier: str | None = None
+    prev_ts: float | None = None
+
     while True:
         try:
             if history_adapter is not None:
@@ -683,6 +688,10 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
             continue
 
         try:
+            if settings.smart_router_enabled:
+                prev_tier, prev_ts = _route_user_turn(
+                    agent, settings, manager, user_input, prev_tier, prev_ts
+                )
             await handle_turn(agent, user_input, approval_ui)
         except KeyboardInterrupt:
             console.print(Text("（已中断本轮任务）", style="yellow"))
@@ -933,6 +942,69 @@ def _disable_smart_router(settings: Settings, manager: ConfigManager) -> None:
     settings.smart_router_enabled = False
     settings.smart_router_saved = None
     manager.set_smart_router_enabled(False)
+
+
+def _attach_model(
+    settings: Settings, manager: ConfigManager, agent: ReActAgent,
+    provider_name: str, model: str,
+) -> str | None:
+    """仅重建 agent.llm 与内存配置（provider/model/base），不写回持久化。
+
+    SmartRouter 路由用——避免把自动路由到的模型写进 active_provider/active_model。
+    返回错误消息；成功返回 None。
+    """
+    provider = manager.resolve_provider(provider_name)
+    if provider is None:
+        return f"未知 provider: {provider_name}"
+    key = manager.resolve_api_key(provider)
+    if not key:
+        return f"缺少 {provider.api_key_env} 配置，无法使用 {provider.name}。"
+    agent.llm = create_client(
+        manager.resolve_api_base(provider), key, model,
+        retry_enabled=settings.llm_retry_enabled,
+        max_retries=settings.llm_max_retries,
+        retry_base_delay=settings.llm_retry_base_delay,
+        retry_max_delay=settings.llm_retry_max_delay,
+        retry_jitter=settings.llm_retry_jitter,
+        retry_total_timeout=settings.llm_retry_total_timeout,
+        respect_retry_after=settings.llm_respect_retry_after,
+    )
+    settings.provider = provider.name
+    settings.model = model
+    settings.api_base = manager.resolve_api_base(provider)
+    settings.api_key = key
+    settings.context_window = manager.resolve_window(provider)
+    return None
+
+
+def _route_user_turn(
+    agent: ReActAgent, settings: Settings, manager: ConfigManager,
+    user_input: str, prev_tier: str | None, prev_ts: float | None,
+) -> tuple[str, float]:
+    """对一轮普通输入做路由并切换到目标模型（不持久化），打出行内日志。
+
+    返回 (final_tier, ts)，供下一轮作为防降级上下文。
+    """
+    tiers = (manager.smart_router_config().get("tiers") or {})
+    now = time.time()
+    result = route_turn(
+        user_input,
+        prev_tier=prev_tier, prev_ts=prev_ts, ts=now,
+        fallback_provider=settings.provider, fallback_model=settings.model,
+        tiers_config=tiers, manager=manager,
+    )
+    if (result.provider, result.model) != (settings.provider, settings.model):
+        err = _attach_model(settings, manager, agent, result.provider, result.model)
+        if err:
+            console.print(Text(f"→ SmartRouter 路由失败: {err}", style="dim"))
+            return prev_tier or result.tier, now
+    console.print(
+        Text(
+            f"→ SmartRouter: {result.tier} → {result.provider}/{result.model}",
+            style="dim",
+        )
+    )
+    return result.tier, now
 
 
 def _model_catalog(manager: ConfigManager) -> str:
