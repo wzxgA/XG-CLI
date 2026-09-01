@@ -20,6 +20,7 @@ from xg.tui.state import (
     PlanTaskSnapshot,
     SafetyInspectorSnapshot,
     SessionInspectorSnapshot,
+    SmartRouterSnapshot,
     TuiState,
     TranscriptItem,
 )
@@ -42,8 +43,19 @@ def _copy(state: TuiState) -> TuiState:
             plan=replace(state.inspector.plan),
             memory=replace(state.inspector.memory),
             safety=replace(state.inspector.safety),
+            smart_router=replace(state.inspector.smart_router),
         ),
     )
+
+
+def set_smart_router_snapshot(state: TuiState, snapshot: SmartRouterSnapshot) -> TuiState:
+    """Replace the inspector SmartRouter snapshot (routing result / toggle).
+
+    纯数据层替换（phase-02 步骤 A）：不产生 transcript 项、不影响 phase。
+    """
+    out = _copy(state)
+    out.inspector = replace(out.inspector, smart_router=snapshot)
+    return out
 
 
 def _append(state: TuiState, item: TranscriptItem) -> None:

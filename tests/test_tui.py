@@ -20,7 +20,13 @@ from xg.tool.builtin import build_registry
 from xg.tui.app import XgTuiApp
 from xg.tui.controller import SessionController
 from xg.tui.reducer import reduce_agent_event
-from xg.tui.state import TuiState, TranscriptItem
+from xg.tui.reducer import set_smart_router_snapshot
+from xg.tui.state import (
+    SmartRouterSnapshot,
+    SmartRouterTierSnapshot,
+    TuiState,
+    TranscriptItem,
+)
 from xg.tui.state import ApprovalRequest
 from xg.tui.widgets.approval_modal import ApprovalModal
 from xg.tui.widgets.collapsible_card import CollapsibleCard
@@ -101,6 +107,72 @@ def make_context(tmp_path: Path):
     settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
     agent = ReActAgent(DummyClient(), build_registry(base_dir=project), settings)
     return agent, settings, manager
+
+
+def _tier(tier: str, provider: str, model: str, *, is_active: bool = False, configured: bool = True) -> SmartRouterTierSnapshot:
+    return SmartRouterTierSnapshot(
+        tier=tier, provider=provider, model=model, is_active=is_active, configured=configured
+    )
+
+
+def test_smart_router_snapshot_defaults_do_not_change_state():
+    """phase-02 步骤 A：默认快照不改变现有状态（UI 无变化）。"""
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    assert state.inspector.smart_router.enabled is False
+    assert state.inspector.smart_router.tiers == ()
+    assert state.inspector.smart_router.active_tier == ""
+    assert state.inspector.smart_router.confidence is None
+
+
+def test_smart_router_snapshot_replaces_state():
+    snapshot = SmartRouterSnapshot(
+        enabled=True,
+        tiers=(
+            _tier("Basic", "openai", "gpt-4o-mini"),
+            _tier("Enhanced", "deepseek", "deepseek-chat", is_active=True),
+            _tier("Superior", "deepseek", "deepseek-chat", configured=False),
+            _tier("Ultimate", "glm", "glm-4-plus"),
+        ),
+        active_tier="Enhanced",
+    )
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    state = set_smart_router_snapshot(state, snapshot)
+    assert state.inspector.smart_router.enabled is True
+    assert state.inspector.smart_router.active_tier == "Enhanced"
+    assert [t.tier for t in state.inspector.smart_router.tiers] == [
+        "Basic", "Enhanced", "Superior", "Ultimate",
+    ]
+    assert [t.is_active for t in state.inspector.smart_router.tiers] == [
+        False, True, False, False,
+    ]
+
+
+def test_smart_router_snapshot_does_not_touch_transcript_or_phase():
+    """替换 snapshot 是纯数据层操作：不产生 transcript 项、不改 phase。"""
+    snapshot = SmartRouterSnapshot(enabled=True, active_tier="Basic", tiers=(_tier("Basic", "openai", "gpt-4o-mini", is_active=True),))
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    before_len = len(state.transcript)
+    state = set_smart_router_snapshot(state, snapshot)
+    assert len(state.transcript) == before_len
+    assert state.phase == "running"
+    # 原状态对象不被就地修改（替换式更新）
+    old = TuiState(active_turn_id="turn-1", phase="running")
+    set_smart_router_snapshot(old, snapshot)
+    assert old.inspector.smart_router.enabled is False
+
+
+def test_smart_router_snapshot_survives_agent_event_reduction():
+    """快照写入后，后续 Agent 事件归约不丢失 smart_router（_copy 深替换链）。"""
+    snapshot = SmartRouterSnapshot(enabled=True, active_tier="Ultimate", tiers=(_tier("Ultimate", "glm", "glm-4-plus", is_active=True),))
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    state = set_smart_router_snapshot(state, snapshot)
+    state = reduce_agent_event(state, AgentEvent(kind="content", text="hi"), "turn-1")
+    assert state.inspector.smart_router.enabled is True
+    assert state.inspector.smart_router.active_tier == "Ultimate"
+    # off 快照替换后回到默认
+    state = set_smart_router_snapshot(state, SmartRouterSnapshot())
+    assert state.inspector.smart_router.enabled is False
+    assert state.inspector.smart_router.tiers == ()
 
 
 def test_reducer_merges_streaming_content_and_ignores_stale_turn():
