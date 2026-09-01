@@ -239,6 +239,93 @@ def test_routing_row_highlight_styles():
     assert row.plain == "Basic: gpt-4o-mini  Ultimate: glm-4-plus"
 
 
+def _patch_controller_routing(monkeypatch):
+    """把 controller 的路由与模型切换替换为离线假实现，避免真实网络。"""
+    from xg.router import RouteResult, TIER_NAMES, TierTarget
+
+    def fake_resolve(idx, fallback_provider="", fallback_model="", tiers_config=None, manager=None):
+        return TierTarget(tier=TIER_NAMES[idx], provider="test", model=f"model-{idx}", configured=True)
+
+    def fake_route(text, **kwargs):
+        tier_idx = 0 if "你好" in text else 3
+        target = fake_resolve(tier_idx)
+        return RouteResult(
+            tier=target.tier, tier_idx=tier_idx, provider=target.provider, model=target.model,
+            configured=True, confidence=0.9, score=1.0, hard_rule=False,
+        )
+
+    def fake_attach(settings, manager, agent, provider_name, model):
+        settings.provider = provider_name
+        settings.model = model
+        return None
+
+    monkeypatch.setattr("xg.tui.controller.resolve_tier", fake_resolve)
+    monkeypatch.setattr("xg.tui.controller.route_turn", fake_route)
+    monkeypatch.setattr("xg.cli.app._attach_model", fake_attach)
+
+
+@pytest.mark.asyncio
+async def test_controller_no_routing_or_snapshot_when_disabled(tmp_path):
+    """phase-02 步骤 C：开关关闭时普通轮不路由、快照保持空。"""
+    agent, settings, manager = make_context(tmp_path)
+    controller = SessionController(agent, settings, manager)
+    assert await asyncio.wait_for(controller.submit("你好"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is False
+    assert snap.tiers == ()
+    assert snap.active_tier == ""
+
+
+@pytest.mark.asyncio
+async def test_controller_routes_and_updates_snapshot(tmp_path, monkeypatch):
+    """开启后每轮路由：切模型、高亮迁移到当前档、Header 主行同步。"""
+    _patch_controller_routing(monkeypatch)
+    agent, settings, manager = make_context(tmp_path)
+    settings.smart_router_enabled = True
+    controller = SessionController(agent, settings, manager)
+
+    # 构造时即同步四档快照（enabled 态）
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is True
+    assert [t.tier for t in snap.tiers] == ["Basic", "Enhanced", "Superior", "Ultimate"]
+    assert not any(t.is_active for t in snap.tiers)
+
+    # 第一轮：Basic 输入
+    assert await asyncio.wait_for(controller.submit("你好"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.active_tier == "Basic"
+    assert [t.is_active for t in snap.tiers] == [True, False, False, False]
+    assert settings.model == "model-0"
+    assert controller.state.inspector.model == "model-0"  # Header 主行同步
+
+    # 第二轮：Ultimate 输入，高亮迁移
+    assert await asyncio.wait_for(controller.submit("设计复杂架构"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.active_tier == "Ultimate"
+    assert [t.is_active for t in snap.tiers] == [False, False, False, True]
+    assert settings.model == "model-3"
+
+
+@pytest.mark.asyncio
+async def test_controller_command_toggle_updates_snapshot(tmp_path, monkeypatch):
+    """命令切换开关：on 建快照，off 清空快照（Header 回到单行渲染）。"""
+    _patch_controller_routing(monkeypatch)
+    agent, settings, manager = make_context(tmp_path)
+    controller = SessionController(agent, settings, manager)
+    assert controller.state.inspector.smart_router.enabled is False
+
+    assert await asyncio.wait_for(controller.submit("/smartRouter on"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is True
+    assert len(snap.tiers) == 4
+
+    assert await asyncio.wait_for(controller.submit("/smartRouter off"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is False
+    assert snap.tiers == ()
+    assert snap.active_tier == ""
+
+
 def test_reducer_merges_streaming_content_and_ignores_stale_turn():
     state = TuiState(active_turn_id="turn-1", phase="running")
     state.transcript.append(
