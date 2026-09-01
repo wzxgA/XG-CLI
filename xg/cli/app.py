@@ -28,6 +28,7 @@ from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.config.web import WebConfigManager
 from xg.config.skills import SkillConfigManager
+from xg.router import TIER_NAMES, resolve as resolve_tier
 from xg.cli.help import format_command_help, format_help
 from xg.input_history import HistoryConfig, InputHistory, PromptToolkitHistory
 from xg.llm.client import LlmClient, LlmError
@@ -711,6 +712,8 @@ def _handle_command(
         return result.message, False
     if cmd == "/model":
         return _cmd_model(agent, settings, manager, arg), False
+    if cmd == "/smartrouter":
+        return _cmd_smart_router(agent, settings, manager, arg), False
     if cmd == "/config":
         return _cmd_config(agent, settings, manager, arg), False
     if cmd == "/hitl":
@@ -722,7 +725,7 @@ def _handle_command(
     if cmd == "/mcp":
         mcp = getattr(agent, "mcp_manager", None)
         return (mcp.format_status() if mcp is not None else "MCP 未初始化。"), False
-    return f"未知命令: {cmd}。可用: /plan /team /model /config /mcp /init /save /memory /hitl /clear /exit", False
+    return f"未知命令: {cmd}。可用: /plan /team /model /config /mcp /smartRouter /init /save /memory /hitl /clear /exit", False
 
 
 def _memory_manager(agent: ReActAgent) -> MemoryManager | None:
@@ -862,11 +865,74 @@ def _cmd_model(
 
     if "/" in arg:
         provider_name, model = (x.strip() for x in arg.split("/", 1))
-        return _switch(agent, settings, manager, provider_name, model)
-    if arg in manager.provider_names():
-        return _switch(agent, settings, manager, arg, None)
-    # 不带 provider 前缀时，视为当前 provider 内的模型切换
-    return _switch(agent, settings, manager, settings.provider, arg)
+        result = _switch(agent, settings, manager, provider_name, model)
+    elif arg in manager.provider_names():
+        result = _switch(agent, settings, manager, arg, None)
+    else:
+        # 不带 provider 前缀时，视为当前 provider 内的模型切换
+        result = _switch(agent, settings, manager, settings.provider, arg)
+
+    # 手动优先接管：/model 切换成功即关闭 SmartRouter 并清除快照
+    if result.startswith("已切换:"):
+        _disable_smart_router(settings, manager)
+        return result + "\n→ SmartRouter 已自动关闭（手动 /model 优先）"
+    return result
+
+
+def _cmd_smart_router(
+    agent: ReActAgent, settings: Settings, manager: ConfigManager, arg: str
+) -> str:
+    """处理 /smartRouter on|off|status。default status。"""
+    parts = arg.split(maxsplit=1)
+    sub = parts[0].lower() if parts else "status"
+
+    if sub in ("on", "enable"):
+        if settings.smart_router_enabled:
+            return "SmartRouter 已开启。"
+        settings.smart_router_saved = (settings.provider, settings.model)
+        settings.smart_router_enabled = True
+        manager.set_smart_router_enabled(True)
+        return (
+            f"SmartRouter 已开启：每轮输入自动按档位选模型。"
+            f"（当前模型 {settings.provider}/{settings.model}，关闭时恢复）"
+        )
+
+    if sub in ("off", "disable"):
+        if not settings.smart_router_enabled:
+            return "SmartRouter 已关闭。"
+        settings.smart_router_enabled = False
+        manager.set_smart_router_enabled(False)
+        saved = settings.smart_router_saved
+        settings.smart_router_saved = None
+        if saved:
+            _switch(agent, settings, manager, saved[0], saved[1])
+        return "SmartRouter 已关闭，已恢复开启前的手动模型。"
+
+    if sub == "status" or arg.strip() in ("status", ""):
+        lines = [f"SmartRouter: {'开启' if settings.smart_router_enabled else '关闭'}"]
+        cfg = manager.smart_router_config()
+        tiers = cfg.get("tiers") or {}
+        for idx, name in enumerate(TIER_NAMES):
+            target = resolve_tier(idx, settings.provider, settings.model, tiers, manager)
+            raw_entry = tiers.get(name)
+            if target.configured:
+                mark = "OK"
+            else:
+                mark = "(x)" if raw_entry else "-"
+            lines.append(f"  {name:<9}→ {target.provider}/{target.model}  {mark}")
+        lines.append("  (OK=显式配置可用  (x)=配置但校验失败  -=未配回落 active)")
+        return "\n".join(lines)
+
+    return "用法: /smartRouter on|off|status"
+
+
+def _disable_smart_router(settings: Settings, manager: ConfigManager) -> None:
+    """手动 /model 切换后关闭 SmartRouter 并清除快照（手动优先）。"""
+    if not settings.smart_router_enabled:
+        return
+    settings.smart_router_enabled = False
+    settings.smart_router_saved = None
+    manager.set_smart_router_enabled(False)
 
 
 def _model_catalog(manager: ConfigManager) -> str:
