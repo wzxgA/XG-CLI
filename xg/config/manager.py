@@ -19,6 +19,9 @@ from xg.config.providers import Provider, ProviderRegistry
 USER_CONFIG = "config.json"
 DEFAULT_CONTEXT_WINDOW = 128_000
 
+# SmartRouter 档位固定名称（顺序即惯例展示顺序）
+_SMART_ROUTER_TIERS = ("Basic", "Enhanced", "Superior", "Ultimate")
+
 
 @dataclass
 class ActiveConfig:
@@ -292,6 +295,21 @@ class ConfigManager:
                         entry[key] = value.strip()
                 if entry:
                     tiers[str(tier_name)] = entry
+
+        # 环境变量 / .env 逐档逐键覆盖（优先级高于 config.json，最低层定义见模块 docstring）
+        # 键形如：XG_SMART_ROUTER_BASIC_PROVIDER / XG_SMART_ROUTER_BASIC_MODEL
+        for tier_name in _SMART_ROUTER_TIERS:
+            env_entry: dict[str, str] = {}
+            for field in ("provider", "model"):
+                var = f"XG_SMART_ROUTER_{tier_name.upper()}_{field.upper()}"
+                value = self.env.get(var, "")
+                if isinstance(value, str) and value.strip():
+                    env_entry[field] = value.strip()
+            if env_entry:
+                merged_entry = dict(tiers.get(tier_name) or {})
+                merged_entry.update(env_entry)
+                tiers[tier_name] = merged_entry
+
         return {"enabled": enabled, "tiers": tiers}
 
     def set_smart_router_enabled(self, enabled: bool) -> None:

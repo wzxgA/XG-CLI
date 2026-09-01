@@ -406,6 +406,46 @@ class TestSmartRouterConfig:
         assert cfg["tiers"]["Basic"]["model"] == "deepseek-chat"
 
 
+class TestSmartRouterEnvTiers:
+    """SmartRouter 档位可通过 .env 环境变量配置（覆盖 config.json 同档逐键）。"""
+
+    def test_env_only_provider_and_model(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={
+                "XG_SMART_ROUTER_BASIC_PROVIDER": "deepseek",
+                "XG_SMART_ROUTER_BASIC_MODEL": "deepseek-chat",
+                "XG_SMART_ROUTER_ULTIMATE_PROVIDER": "glm",
+                "XG_SMART_ROUTER_ULTIMATE_MODEL": "glm-4-plus",
+            },
+        )
+        cfg = manager.smart_router_config()
+        assert cfg["tiers"]["Basic"] == {"provider": "deepseek", "model": "deepseek-chat"}
+        assert cfg["tiers"]["Ultimate"] == {"provider": "glm", "model": "glm-4-plus"}
+        assert "Enhanced" not in cfg["tiers"]  # 未配置不产生条目
+        assert "Superior" not in cfg["tiers"]
+
+    def test_env_overrides_config_same_key(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_SMART_ROUTER_BASIC_PROVIDER": "deepseek"},
+            user_cfg={"smart_router": {"tiers": {"Basic": {"provider": "openai", "model": "gpt-4o-mini"}}}},
+        )
+        cfg = manager.smart_router_config()
+        # env 覆盖 provider，config 的 model 保留（逐键合并）
+        assert cfg["tiers"]["Basic"] == {"provider": "deepseek", "model": "gpt-4o-mini"}
+
+    def test_env_blank_value_ignored(self, tmp_path):
+        manager = make_manager(
+            tmp_path,
+            env={"XG_SMART_ROUTER_BASIC_PROVIDER": "  ", "XG_SMART_ROUTER_BASIC_MODEL": ""},
+            user_cfg={"smart_router": {"tiers": {"Basic": {"provider": "openai", "model": "gpt-4o-mini"}}}},
+        )
+        cfg = manager.smart_router_config()
+        # 空白 env 视作未设置，保留 config 值
+        assert cfg["tiers"]["Basic"] == {"provider": "openai", "model": "gpt-4o-mini"}
+
+
 class TestSmartRouterSettings:
     def test_smart_router_disabled_by_default(self, tmp_path):
         settings = load_settings(make_manager(tmp_path, env={}))
