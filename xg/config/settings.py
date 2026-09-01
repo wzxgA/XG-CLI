@@ -115,6 +115,11 @@ class Settings:
     extra: dict[str, str] = field(default_factory=dict)
     # Inspector UI language; this does not affect Agent prompts or responses.
     ui_language: UiLanguage = "en"
+    # SmartRouter（phase-01）：智能路由开关，默认关闭；开启后每轮输入自动路由换档。
+    # 路由结果只改内存中的 provider/model，不写回 active_provider/active_model。
+    smart_router_enabled: bool = False
+    # 开启前的手动模型快照 (provider, model)，/smartRouter off 时恢复；未开启时为 None。
+    smart_router_saved: tuple[str, str] | None = None
 
     @property
     def token_budget(self) -> int:
@@ -210,6 +215,7 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         input_history_max_entries=max(1, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_ENTRIES", 100)),
         input_history_max_chars=max(256, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_CHARS", 8_000)),
         input_history_max_bytes=max(4_096, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_BYTES", 1_048_576)),
+        smart_router_enabled=manager.env.get("XG_SMART_ROUTER", "off").lower() in ("on", "1", "true"),
     )
 
 

@@ -259,6 +259,51 @@ class ConfigManager:
             return str(node)
         return json.dumps(node, ensure_ascii=False)
 
+    # ---------- SmartRouter ----------
+
+    def smart_router_config(self) -> dict[str, Any]:
+        """读取合并配置中的 smart_router 节（用户级 < 项目级深合并）。
+
+        返回结构（缺省时）：
+            {"enabled": False, "tiers": {}}
+        tiers 中每个档位（Basic/Enhanced/Superior/Ultimate）形如：
+            {"provider": "deepseek", "model": "deepseek-chat"}
+        校验规则：非法结构/非法档位名/非法 provider-model 类型一律丢弃该条目，
+        绝不抛错（配置损坏时静默回退默认行为）。
+        """
+        merged = self._merged_config()
+        raw = merged.get("smart_router") or {}
+        if not isinstance(raw, dict):
+            return {"enabled": False, "tiers": {}}
+
+        enabled_raw = raw.get("enabled", False)
+        enabled = enabled_raw if isinstance(enabled_raw, bool) else str(enabled_raw).lower() in ("on", "1", "true")
+
+        tiers_raw = raw.get("tiers") or {}
+        tiers: dict[str, dict[str, str]] = {}
+        if isinstance(tiers_raw, dict):
+            for tier_name, tier_cfg in tiers_raw.items():
+                if not isinstance(tier_cfg, dict):
+                    continue
+                entry: dict[str, str] = {}
+                for key in ("provider", "model"):
+                    value = tier_cfg.get(key)
+                    if isinstance(value, str) and value.strip():
+                        entry[key] = value.strip()
+                if entry:
+                    tiers[str(tier_name)] = entry
+        return {"enabled": enabled, "tiers": tiers}
+
+    def set_smart_router_enabled(self, enabled: bool) -> None:
+        """持久化开关位到用户级配置（/smartRouter on|off 时调用）。"""
+        user = self._read_config(self.user_config_path)
+        node = user.get("smart_router")
+        if not isinstance(node, dict):
+            node = {}
+        node["enabled"] = bool(enabled)
+        user["smart_router"] = node
+        self._write_config(self.user_config_path, user)
+
     # ---------- UI 偏好 ----------
 
     def get_ui_language(self) -> str:

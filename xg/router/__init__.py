@@ -52,8 +52,12 @@ def route(text: str, *,
           context_tokens: int = 0,
           fallback_provider: str = "",
           fallback_model: str = "",
-          tiers_config: dict | None = None) -> RouteResult:
-    """对一段用户输入做完整路由：特征 → 规则打分 → 后处理 → 档位解析。"""
+          tiers_config: dict | None = None,
+          manager=None) -> RouteResult:
+    """对一段用户输入做完整路由：特征 → 规则打分 → 后处理 → 档位解析。
+
+    ``manager``（ConfigManager）可选，传入时对显式配置档做 provider/API Key 校验。
+    """
     f = extract(text)
     decision: RuleDecision = rule_route(f)
     final_idx = postprocess(
@@ -62,7 +66,8 @@ def route(text: str, *,
         ts=ts if ts is not None else time.time(),
         context_tokens=context_tokens,
     )
-    target: TierTarget = resolve(final_idx, fallback_provider, fallback_model, tiers_config)
+    target: TierTarget = resolve(final_idx, fallback_provider, fallback_model,
+                                 tiers_config, manager)
     return RouteResult(
         tier=target.tier,
         tier_idx=final_idx,

@@ -196,6 +196,72 @@ class TestModelTiers:
         assert t.configured is True
 
 
+class TestModelTiersValidation:
+    """子步骤 B：接入 ConfigManager 后的 provider/API Key 校验链。"""
+
+    @staticmethod
+    def _manager(tmp_path, env=None, user_cfg=None):
+        import json as _json
+
+        from xg.config.manager import ConfigManager
+
+        user_dir = tmp_path / "user_xg"
+        project_dir = tmp_path / "proj_xg"
+        user_dir.mkdir(exist_ok=True)
+        project_dir.mkdir(exist_ok=True)
+        if user_cfg is not None:
+            (user_dir / "config.json").write_text(_json.dumps(user_cfg), encoding="utf-8")
+        return ConfigManager(user_dir=user_dir, project_dir=project_dir,
+                             env=dict(env or {}), load_env=False)
+
+    def test_valid_provider_with_key_passes(self, tmp_path):
+        manager = self._manager(tmp_path, env={"XG_GLM_API_KEY": "gk"})
+        cfg = {"Superior": {"provider": "glm", "model": "glm-4-plus"}}
+        t = resolve(2, "deepseek", "deepseek-chat", cfg, manager)
+        assert t.provider == "glm"
+        assert t.model == "glm-4-plus"
+        assert t.configured is True
+
+    def test_provider_without_api_key_falls_back(self, tmp_path):
+        manager = self._manager(tmp_path, env={})   # 无任何 key
+        cfg = {"Superior": {"provider": "glm", "model": "glm-4-plus"}}
+        t = resolve(2, "deepseek", "deepseek-chat", cfg, manager)
+        assert t.provider == "deepseek"
+        assert t.model == "deepseek-chat"
+        assert t.configured is False
+
+    def test_placeholder_api_key_falls_back(self, tmp_path):
+        manager = self._manager(tmp_path, env={"XG_GLM_API_KEY": "sk-xxx"})
+        cfg = {"Superior": {"provider": "glm", "model": "glm-4-plus"}}
+        t = resolve(2, "deepseek", "deepseek-chat", cfg, manager)
+        assert t.provider == "deepseek"
+        assert t.configured is False
+
+    def test_unknown_provider_falls_back(self, tmp_path):
+        manager = self._manager(tmp_path, env={"XG_GLM_API_KEY": "gk"})
+        cfg = {"Superior": {"provider": "no-such-provider", "model": "whatever"}}
+        t = resolve(2, "deepseek", "deepseek-chat", cfg, manager)
+        assert t.provider == "deepseek"
+        assert t.configured is False
+
+    def test_same_as_fallback_skips_validation(self, tmp_path):
+        # 显式配置等于 fallback 时无需校验（active 本身可能也没 key，比如离线场景）
+        manager = self._manager(tmp_path, env={})
+        cfg = {"Basic": {"provider": "deepseek", "model": "deepseek-chat"}}
+        t = resolve(0, "deepseek", "deepseek-chat", cfg, manager)
+        assert t.configured is True
+
+    def test_route_passes_manager_through(self, tmp_path):
+        manager = self._manager(tmp_path, env={"XG_GLM_API_KEY": "gk"})
+        cfg = {"Ultimate": {"provider": "glm", "model": "glm-4-plus"}}
+        r = route("设计日活千万的推荐系统架构并给出部署回滚方案",
+                  fallback_provider="deepseek", fallback_model="deepseek-chat",
+                  tiers_config=cfg, manager=manager)
+        assert r.provider == "glm"
+        assert r.model == "glm-4-plus"
+        assert r.configured is True
+
+
 class TestRoute:
     def test_end_to_end_basic(self):
         r = route("你好", fallback_provider="deepseek", fallback_model="deepseek-chat")
