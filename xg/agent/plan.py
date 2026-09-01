@@ -99,6 +99,7 @@ class PlanEvent:
         "plan_generated", "review", "approved", "cancelled", "replanned",
         "batch_started", "subtask_started", "subtask_done", "subtask_failed",
         "subtask_event", "planner_usage", "plan_done", "plan_failed",
+        "plan_resume_requested",
     ]
     plan: Plan | None = None
     batch: list[str] = field(default_factory=list)
@@ -261,6 +262,7 @@ class PlanExecutor:
         self.mcp_manager = mcp_manager
         self._planner_context_event: AgentEvent | None = None
         self._planner_usage: Usage | None = None
+        self._last_plan: Plan | None = None
 
     async def run(self, goal: str) -> AsyncIterator[PlanEvent]:
         """执行完整流程：拆解 → 审阅（可循环重规划）→ 按批次执行 → 汇总。"""
@@ -322,6 +324,7 @@ class PlanExecutor:
             decision = await self.reviewer(plan)
 
             if decision.action == "execute":
+                self._last_plan = plan
                 yield PlanEvent(kind="approved", plan=plan)
                 break
             if decision.action == "cancel":
@@ -333,13 +336,18 @@ class PlanExecutor:
             previous = plan
 
         # ---- 按批次执行 ----
+        async for event in self._execute_batches(plan):
+            yield event
+
+    async def _execute_batches(self, plan: Plan, instruction: str = "") -> AsyncIterator[PlanEvent]:
+        """按已排序批次执行子任务；失败超限终止剩余批次。instruction 注入每个被执行子任务。"""
         failures = 0
         for batch_no, batch in enumerate(plan.batches):
             yield PlanEvent(
                 kind="batch_started", plan=plan, batch=batch,
                 message=f"第 {batch_no + 1} 轮 / 共 {len(plan.batches)} 轮",
             )
-            async for event in self._run_batch(plan, batch):
+            async for event in self._run_batch(plan, batch, instruction=instruction):
                 if event.kind == "subtask_failed":
                     failures += 1
                 yield event
@@ -359,6 +367,36 @@ class PlanExecutor:
             kind="plan_done", plan=plan,
             message=f"计划完成: {done}/{len(plan.tasks)} 个子任务成功",
         )
+
+    # ---- 断点续跑（V3）----
+
+    async def resume(self, instruction: str = "") -> AsyncIterator[PlanEvent]:
+        """从失败/未执行子任务断点续跑。计划已审阅批准过，跳过拆解与审阅。"""
+        plan = self._last_plan
+        if plan is None:
+            yield PlanEvent(kind="plan_failed", message="没有可恢复的计划")
+            return
+        done = sum(1 for t in plan.tasks if t.status == "done")
+        if done == len(plan.tasks):
+            yield PlanEvent(kind="plan_failed", plan=plan, message="计划已全部完成，无需恢复")
+            return
+        # 重置失败/运行中/待办子任务为 pending（done 保留 result 供下游复用）
+        for task in plan.tasks:
+            if task.status in ("failed", "running", "pending"):
+                task.status = "pending"
+                task.result = ""
+        plan.batches = build_batches(plan.tasks)
+        skipped = [t.id for t in plan.tasks if t.status == "done"]
+        yield PlanEvent(
+            kind="plan_resume_requested", plan=plan,
+            message=(
+                f"恢复执行：跳过 {len(skipped)} 个已完成子任务，"
+                f"重跑 {sum(1 for b in plan.batches for _ in b)} 个子任务"
+                + (f"；补充指令：{instruction}" if instruction else "")
+            ),
+        )
+        async for event in self._execute_batches(plan, instruction=instruction):
+            yield event
 
     # ---- 拆解（LLM 结构化输出 + 重试） ----
 
@@ -435,19 +473,25 @@ class PlanExecutor:
 
     # ---- 批次执行（批内并行） ----
 
-    async def _run_batch(self, plan: Plan, batch: list[str]) -> AsyncIterator[PlanEvent]:
-        """并发执行本批子任务，事件按到达顺序转发（含子任务内部 AgentEvent）。"""
+    async def _run_batch(self, plan: Plan, batch: list[str], instruction: str = "") -> AsyncIterator[PlanEvent]:
+        """并发执行本批子任务，事件按到达顺序转发（含子任务内部 AgentEvent）。
+
+        断点续跑时跳过已完成（done）的子任务，避免重复执行。
+        """
+        pending = [tid for tid in batch if plan.task_by_id(tid).status != "done"]
+        if not pending:
+            return
         queue: asyncio.Queue[PlanEvent | None] = asyncio.Queue()
 
         async def runner(tid: str) -> None:
             try:
-                await self._run_one(plan, batch, tid, queue)
+                await self._run_one(plan, batch, tid, queue, instruction=instruction)
             finally:
                 queue.put_nowait(None)
 
-        gather_task = asyncio.gather(*(runner(tid) for tid in batch), return_exceptions=True)
+        gather_task = asyncio.gather(*(runner(tid) for tid in pending), return_exceptions=True)
         completed = 0
-        while completed < len(batch):
+        while completed < len(pending):
             item = await queue.get()
             if item is None:
                 completed += 1
@@ -459,7 +503,8 @@ class PlanExecutor:
                 yield PlanEvent(kind="subtask_failed", plan=plan, message=f"内部错误: {result}")
 
     async def _run_one(
-        self, plan: Plan, batch: list[str], tid: str, queue: "asyncio.Queue[PlanEvent | None]"
+        self, plan: Plan, batch: list[str], tid: str, queue: "asyncio.Queue[PlanEvent | None]",
+        instruction: str = "",
     ) -> None:
         task = plan.task_by_id(tid)
         assert task is not None
@@ -469,7 +514,7 @@ class PlanExecutor:
 
         result, error = "", ""
         try:
-            result, error = await self._execute_subtask(plan, task, queue)
+            result, error = await self._execute_subtask(plan, task, queue, instruction=instruction)
         except Exception as e:  # 防御：子任务内部异常不拖垮整批
             error = f"{type(e).__name__}: {e}"
 
@@ -489,7 +534,8 @@ class PlanExecutor:
             ))
 
     async def _execute_subtask(
-        self, plan: Plan, task: PlanTask, queue: "asyncio.Queue[PlanEvent | None]"
+        self, plan: Plan, task: PlanTask, queue: "asyncio.Queue[PlanEvent | None]",
+        instruction: str = "",
     ) -> tuple[str, str]:
         """迷你 ReAct 循环执行单个子任务。返回 (result, error)，error 非空即失败。"""
         sub_settings = replace(self.settings, tool_steps=self.settings.plan_subtask_steps)
@@ -503,7 +549,7 @@ class PlanExecutor:
             memory_manager=self.memory_manager,
             mcp_manager=self.mcp_manager,
         )
-        async for event in agent.run(self._subtask_user_prompt(task)):
+        async for event in agent.run(self._subtask_user_prompt(task, instruction)):
             if event.kind in (
                 "thinking", "content", "tool_call", "approval", "tool_result",
                 "context_compacted", "context_warning", "context_usage", "usage",
@@ -570,12 +616,15 @@ class PlanExecutor:
             parts.append("依赖子任务的结果：\n" + "\n\n".join(dep_sections))
         return "\n".join(parts)
 
-    def _subtask_user_prompt(self, task: PlanTask) -> str:
-        return (
+    def _subtask_user_prompt(self, task: PlanTask, instruction: str = "") -> str:
+        base = (
             f"请执行子任务 {task.id}（{task.title}）：\n{task.description}\n\n"
             "只执行这一个子任务，不要处理计划中的其他子任务。"
             "完成后用一小段话汇报执行结果。"
         )
+        if instruction:
+            base = f"{base}\n\n恢复时补充指令：{instruction}"
+        return base
 
     def _audit(self, action: str, **fields) -> None:
         if self.audit is not None:

@@ -648,6 +648,22 @@ def reduce_plan_event(state: TuiState, event: PlanEvent, turn_id: str | None = N
             ),
         )
         return out
+    if kind == "plan_resume_requested":
+        out.phase = "running"
+        out.pending_plan = None
+        out.inspector = replace(
+            out.inspector,
+            plan_status="running",
+            plan=_plan_snapshot(event.plan, status="running", previous=out.inspector.plan),
+            session=replace(out.inspector.session, status="Working"),
+        )
+        _append(out, TranscriptItem(
+            id=f"plan-resume-{len(out.transcript)}", kind="system",
+            text=event.message, turn_id=turn_id,
+        ))
+        out.notification = event.message
+        out.notification_level = "info"
+        return out
     if kind in ("cancelled", "plan_done"):
         _collapse_turn(out, turn_id, status="cancelled" if kind == "cancelled" else "done")
         out.phase = "idle"
@@ -932,6 +948,23 @@ def reduce_team_event(state: TuiState, event: TeamEvent, turn_id: str | None = N
             repair_attempt=repair_attempt,
             latest_summary=event.message[:240] or "等待 Repairer 启动",
         )
+        return out
+    if kind == "team_resume_requested":
+        out.phase = "running"
+        out.pending_plan = None
+        if event.plan:
+            out.inspector = replace(
+                out.inspector,
+                plan_status="running",
+                plan=_plan_snapshot(event.plan, status="running", previous=out.inspector.plan),
+                session=replace(out.inspector.session, status="Working"),
+            )
+        _append(out, TranscriptItem(
+            id=f"team-resume-{len(out.transcript)}", kind="system",
+            text=event.message, turn_id=turn_id,
+        ))
+        out.notification = event.message
+        out.notification_level = "info"
         return out
     if kind in {"team_done", "cancelled"}:
         _collapse_turn(out, turn_id, status="cancelled" if kind == "cancelled" else "done")

@@ -58,6 +58,11 @@ class Settings:
     # 第 10 期：Team 协作限制
     team_max_agents: int = 4
     team_max_repairs: int = 2
+    # 第 V3 期：Plan/Team 任务自然语言断点续跑
+    # 单个任务最多自动恢复次数（防「失败→继续→失败」死循环消耗预算）
+    task_max_resumes: int = 3
+    # 恢复意图是否用 LLM 识别；关闭后仅用关键词白名单
+    resume_intent_llm: bool = True
     # Reviewer 输出协议重试次数；与 API 重试和 Repairer 次数分离。
     team_review_output_retries: int = 1
     # Team Worker role-specific execution budgets. None keeps the legacy fallback.
@@ -158,6 +163,8 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         plan_max_subtasks=_get_int(manager.env, "XG_PLAN_MAX_SUBTASKS", 12),
         plan_subtask_steps=_get_int(manager.env, "XG_PLAN_SUBTASK_STEPS", 10),
         plan_max_failures=_get_int(manager.env, "XG_PLAN_MAX_FAILURES", 3),
+        task_max_resumes=max(1, _get_int(manager.env, "XG_TASK_MAX_RESUMES", 3)),
+        resume_intent_llm=manager.env.get("XG_RESUME_INTENT_LLM", "on").lower() not in ("off", "0", "false"),
         team_max_agents=max(1, _get_int(manager.env, "XG_TEAM_MAX_AGENTS", 4)),
         team_max_repairs=max(0, _get_int(manager.env, "XG_TEAM_MAX_REPAIRS", 2)),
         team_review_output_retries=max(0, _get_int(manager.env, "XG_TEAM_REVIEW_OUTPUT_RETRIES", 1)),

@@ -620,3 +620,69 @@ class TestExecutorSafety:
 
         assert "subtask_started" in audit.actions
         assert "subtask_done" in audit.actions
+
+
+async def collect_resume(executor: PlanExecutor, instruction: str = "") -> list[PlanEvent]:
+    return [e async for e in executor.resume(instruction)]
+
+
+class TestExecutorResume:
+    async def test_resume_without_plan_fails(self, settings):
+        """尚未执行/生成计划就 resume → plan_failed。"""
+        llm = PlanScriptedClient(plan_script=[], subtask_script={})
+        ex = make_executor(llm, settings, reviewer=review_execute)
+        events = await collect_resume(ex)
+        assert [e.kind for e in events] == ["plan_failed"]
+        assert "没有可恢复" in events[0].message
+
+    async def test_resume_reruns_failed_skips_done(self, settings):
+        """断点续跑：重跑失败的 t1、跳过已完成的 t2、继续未执行的 t3。"""
+        settings = Settings(
+            api_base="https://api.test/v1", api_key="sk-test", model="m",
+            plan_max_failures=0,
+        )
+        plan = _plan_json([
+            {"id": "t1", "title": "易失败", "description": "-", "deps": []},
+            {"id": "t2", "title": "已成功", "description": "-", "deps": []},
+            {"id": "t3", "title": "依赖t1", "description": "-", "deps": ["t1"]},
+        ])
+        llm = PlanScriptedClient(
+            plan_script=[plan],
+            subtask_script={
+                "t1": [LlmError("boom")],
+                "t2": [("t2 完成", [])],
+            },
+        )
+        ex = make_executor(llm, settings, reviewer=review_execute)
+        events = await collect(ex, "做点事")
+        assert events[-1].kind == "plan_failed"
+        assert "t3" in events[-1].message  # 剩余子任务 t3 被终止
+        assert not any(e.kind == "subtask_started" and e.task.id == "t3" for e in events)
+
+        # 恢复：t1 修复成功，t2 保留结果，t3 继续执行
+        llm.subtask_script["t1"] = [("t1 修复后完成", [])]
+        llm.subtask_script["t3"] = [("t3 完成", [])]
+        resume_events = await collect_resume(ex)
+        started = [e.task.id for e in resume_events if e.kind == "subtask_started"]
+        assert any(e.kind == "plan_resume_requested" for e in resume_events)
+        assert started == ["t1", "t3"]  # t2 已 done，跳过
+        assert resume_events[-1].kind == "plan_done"
+        # 失败计数已重置（0 > 0 不触发，且 t1 本次成功）
+        assert sum(t.status == "done" for t in ex._last_plan.tasks) == 3
+
+    async def test_resume_injects_instruction(self, settings):
+        """补充指令被注入到被重跑子任务的 user 消息。"""
+        settings = Settings(
+            api_base="https://api.test/v1", api_key="sk-test", model="m",
+            plan_max_failures=0, plan_subtask_steps=5,
+        )
+        plan = _plan_json([{"id": "t1", "title": "失败", "description": "-", "deps": []}])
+        llm = PlanScriptedClient(plan_script=[plan], subtask_script={"t1": [LlmError("boom")]})
+        ex = make_executor(llm, settings, reviewer=review_execute)
+        await collect(ex, "做点事")
+
+        llm.subtask_script["t1"] = [("t1 完成", [])]
+        await collect_resume(ex, "改用 uv 安装依赖")
+        t1_request = llm.requests[-1]
+        user = next(m.content for m in t1_request if m.role == "user")
+        assert "改用 uv 安装依赖" in user

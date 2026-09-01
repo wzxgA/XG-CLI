@@ -828,3 +828,101 @@ async def test_writable_step_limit_is_not_automatically_retried(tmp_path, settin
     assert factory.calls == 1
     assert failed.failure_category == "step_limit"
     assert not any(event.kind == "task_retry_started" for event in events)
+
+
+async def collect_team_resume(executor: TeamExecutor, instruction: str = "") -> list:
+    return [event async for event in executor.resume(instruction)]
+
+
+async def test_team_resume_without_plan_fails(tmp_path, settings):
+    """尚未执行/生成计划就 resume → team_failed。"""
+    client = TeamScriptClient(worker_scripts={})
+    executor = TeamExecutor(
+        llm=client, tools=build_registry(base_dir=tmp_path), settings=settings,
+        reviewer=approve_team, project_root=tmp_path,
+    )
+    events = await collect_team_resume(executor)
+    assert [event.kind for event in events] == ["team_failed"]
+    assert "没有可恢复" in events[0].message
+
+
+async def test_team_resume_reruns_failed_and_blocked_skips_done(tmp_path, settings):
+    """断点续跑：重跑失败的 t1、重跑被阻塞的 t2、跳过已完成的独立任务 t3。"""
+    settings.plan_max_failures = 0
+    plan_json = json.dumps({"tasks": [
+        {
+            "id": "t1", "title": "根任务", "description": "执行根任务", "deps": [],
+            "owner_role": "coder", "acceptance_criteria": ["成功"],
+        },
+        {
+            "id": "t2", "title": "依赖任务", "description": "执行依赖任务", "deps": ["t1"],
+            "owner_role": "coder", "acceptance_criteria": ["成功"],
+        },
+        {
+            "id": "t3", "title": "独立任务", "description": "执行独立任务", "deps": [],
+            "owner_role": "researcher", "allowed_tools": ["read_file"],
+            "resource_scope_mode": "read_discovery",
+            "resource_claims": [{"pattern": "README.md", "access": "read"}],
+            "acceptance_criteria": ["成功"],
+        },
+    ]}, ensure_ascii=False)
+
+    class PlannerClient(LlmClient):
+        async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamEvent]:
+            if messages and "团队任务规划器" in messages[0].content:
+                yield StreamEvent(kind="content", text=plan_json)
+                yield StreamEvent(kind="done")
+
+    class FailingAgent:
+        messages: list = []
+
+        async def run(self, prompt):
+            yield AgentEvent(kind="error", text="模拟 Worker 失败")
+
+    class SuccessAgent:
+        messages: list
+
+        def __init__(self):
+            self.messages = [Message(role="assistant", content="执行成功")]
+
+        async def run(self, prompt):
+            yield AgentEvent(kind="done")
+
+    class Factory:
+        def __init__(self):
+            self.calls = {"t1": 0, "t2": 0, "t3": 0}
+
+        def create(self, profile, task):
+            self.calls[task.id] = self.calls.get(task.id, 0) + 1
+            # 首轮仅 t1 失败 → 阻塞 t2；t2 初次运行也让它失败以验证续跑跳过 done
+            if task.id == "t1" and self.calls["t1"] == 1:
+                return FailingAgent()
+            return SuccessAgent()
+
+    factory = Factory()
+
+    async def review_pass(task, artifacts):
+        return ReviewResult(task.id, "pass", [], [], ["测试通过"])
+
+    executor = TeamExecutor(
+        llm=PlannerClient(), tools=build_registry(base_dir=tmp_path), settings=settings,
+        reviewer=approve_team, task_reviewer=review_pass, agent_factory=factory,
+        project_root=tmp_path,
+    )
+
+    first = await collect(executor, "测试失败传播")
+    assert any(event.kind == "task_failed" and event.task.id == "t1" for event in first)
+    blocked = next(event for event in first if event.kind == "task_blocked" and event.task.id == "t2")
+    assert blocked.task.status == "blocked"
+    # t3 与 t1 同批并行，t1 失败前 t3 已完成
+    done_t3 = next(event for event in first if event.kind == "task_done" and event.task.id == "t3")
+    assert done_t3.task.status == "done"
+    assert first[-1].kind == "team_failed"
+
+    resumed = await collect_team_resume(executor, "补充指令")
+    assert any(event.kind == "team_resume_requested" for event in resumed)
+    started = [event.task.id for event in resumed if event.kind == "task_started"]
+    # t1 重跑、t2 解除阻塞重跑；t3 已 done 跳过
+    assert "t1" in started and "t2" in started and "t3" not in started
+    assert resumed[-1].kind == "team_done"
+    assert all(task.status == "done" for task in executor._last_plan.tasks)

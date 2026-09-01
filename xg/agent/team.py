@@ -230,7 +230,7 @@ class TeamEvent:
         "task_review_done", "repair_requested", "team_done", "team_failed",
         "review_output_invalid", "review_output_retry", "repair_scope_required",
         "repair_scope_validated", "task_needs_input", "task_resume_requested",
-        "cancelled",
+        "cancelled", "team_resume_requested",
     ]
     team_id: str = ""
     plan: TeamPlan | None = None
@@ -971,12 +971,17 @@ class TeamExecutor:
         yield TeamEvent(kind="approved", team_id=self.team_id, plan=plan, message="团队计划已批准，开始执行")
         self._last_plan = plan
         plan.batches = conflict_safe_batches(plan.tasks)
+        async for event in self._execute_plan_batches(plan):
+            yield event
+
+    async def _execute_plan_batches(self, plan: TeamPlan, instruction: str = "") -> AsyncIterator[TeamEvent]:
+        """按批次执行团队任务；遇 needs_input/failed/超限终止。instruction 注入每个被执行 worker。"""
         for batch_number, batch in enumerate(plan.batches, 1):
             yield TeamEvent(
                 kind="batch_started", team_id=self.team_id, plan=plan, batch=batch,
                 message=f"第 {batch_number} 轮 / 共 {len(plan.batches)} 轮",
             )
-            async for event in self._run_batch(plan, batch):
+            async for event in self._run_batch(plan, batch, instruction=instruction):
                 yield event
             waiting = [task for task in plan.tasks if task.status == "needs_input"]
             if waiting:
@@ -1015,6 +1020,49 @@ class TeamExecutor:
             return
         yield TeamEvent(kind="team_done", team_id=self.team_id, plan=plan, message=f"Team 完成：{done}/{len(plan.tasks)} 个任务通过")
 
+    # ---- 断点续跑（V3）----
+
+    async def resume(self, instruction: str = "") -> AsyncIterator[TeamEvent]:
+        """Team 级断点续跑：从失败/阻塞/待办任务继续。needs_input 任务需用户先补充范围。"""
+        plan = self._last_plan
+        if plan is None:
+            yield TeamEvent(kind="team_failed", team_id=self.team_id, message="没有可恢复的 Team 计划")
+            return
+        waiting = [task for task in plan.tasks if task.status == "needs_input"]
+        if waiting:
+            task = waiting[0]
+            yield TeamEvent(
+                kind="task_needs_input", team_id=self.team_id, plan=plan, task=task,
+                role=task.owner_role, failure_category=task.pending_input_category,
+                message="；".join(
+                    filter(None, [task.pending_input_message, "任务等待输入，请先通过 /team resume 或自然语言补充范围后再继续"])
+                ),
+            )
+            return
+        done = sum(task.status == "done" for task in plan.tasks)
+        if done == len(plan.tasks):
+            yield TeamEvent(kind="team_failed", team_id=self.team_id, plan=plan, message="团队计划已全部完成，无需恢复")
+            return
+        # 重置 failed/blocked/pending/running 任务为 pending（done 保留 Artifact/result 供复用）
+        for task in plan.tasks:
+            if task.status in ("failed", "blocked", "pending", "running"):
+                task.status = "pending"
+                task.result = ""
+                task.blocked_by = []
+                task.failure_category = ""
+        plan.batches = conflict_safe_batches(plan.tasks)
+        skipped = [task.id for task in plan.tasks if task.status == "done"]
+        yield TeamEvent(
+            kind="team_resume_requested", team_id=self.team_id, plan=plan,
+            message=(
+                f"Team 恢复执行：跳过 {len(skipped)} 个已完成任务，"
+                f"重跑 {sum(1 for b in plan.batches for _ in b)} 个任务"
+                + (f"；补充指令：{instruction}" if instruction else "")
+            ),
+        )
+        async for event in self._execute_plan_batches(plan, instruction=instruction):
+            yield event
+
     async def _generate_plan(
         self, goal: str, feedback: str = "", previous: TeamPlan | None = None
     ) -> tuple[TeamPlan | None, list[str]]:
@@ -1050,12 +1098,16 @@ class TeamExecutor:
             return TeamPlan(goal=goal, tasks=tasks, batches=conflict_safe_batches(tasks)), warnings
         return None, warnings
 
-    async def _run_batch(self, plan: TeamPlan, batch: list[str]) -> AsyncIterator[TeamEvent]:
+    async def _run_batch(self, plan: TeamPlan, batch: list[str], instruction: str = "") -> AsyncIterator[TeamEvent]:
+        # 断点续跑时跳过已完成（done）任务，避免重复执行
+        pending = [tid for tid in batch if plan.task_by_id(tid).status != "done"]
+        if not pending:
+            return
         queue: asyncio.Queue[TeamEvent | None] = asyncio.Queue()
 
         async def runner(task_id: str) -> None:
             try:
-                await self._run_task(plan, task_id, queue)
+                await self._run_task(plan, task_id, queue, instruction=instruction)
             finally:
                 queue.put_nowait(None)
 
@@ -1065,7 +1117,7 @@ class TeamExecutor:
             async with semaphore:
                 await runner(task_id)
 
-        jobs = [asyncio.create_task(limited_runner(task_id)) for task_id in batch]
+        jobs = [asyncio.create_task(limited_runner(task_id)) for task_id in pending]
         completed = 0
         while completed < len(jobs):
             item = await queue.get()
@@ -1269,7 +1321,7 @@ class TeamExecutor:
             if event is not None:
                 yield event
 
-    async def _run_task(self, plan: TeamPlan, task_id: str, queue: asyncio.Queue[TeamEvent | None]) -> None:
+    async def _run_task(self, plan: TeamPlan, task_id: str, queue: asyncio.Queue[TeamEvent | None], instruction: str = "") -> None:
         task = plan.task_by_id(task_id)
         if task is None:
             return
@@ -1293,7 +1345,7 @@ class TeamExecutor:
         queue.put_nowait(TeamEvent(kind="task_started", team_id=self.team_id, plan=plan, task=task, role=task.owner_role))
         profile = self.profiles.get(task.owner_role) or self.profiles["coder"]
         result, artifacts, agent_id, error, failure_category = await self._execute_worker(
-            plan, task, queue, attempt=1
+            plan, task, queue, attempt=1, instruction=instruction
         )
         first_agent_id = agent_id
         if error:
@@ -1536,6 +1588,7 @@ class TeamExecutor:
         attempt: int = 1,
         steps_override: int | None = None,
         recovery_summary: str = "",
+        instruction: str = "",
     ) -> tuple[str, list[Artifact], str, str, str]:
         profile = self.profiles.get(task.owner_role) or self.profiles["coder"]
         agent_id = f"agent-{uuid.uuid4().hex[:8]}"
@@ -1575,7 +1628,7 @@ class TeamExecutor:
             )
         artifacts: list[Artifact] = []
         try:
-            async for event in agent.run(self._worker_user_prompt(task, recovery_summary=recovery_summary)):
+            async for event in agent.run(self._worker_user_prompt(task, recovery_summary=recovery_summary, instruction=instruction)):
                 if event.kind in {
                     "thinking", "content", "tool_call", "approval", "tool_result", "retrying",
                     "context_compacted", "context_warning", "context_usage", "usage",
@@ -1723,9 +1776,10 @@ class TeamExecutor:
         return "\n".join(parts)
 
     @staticmethod
-    def _worker_user_prompt(task: TeamTask, *, recovery_summary: str = "") -> str:
+    def _worker_user_prompt(task: TeamTask, *, recovery_summary: str = "", instruction: str = "") -> str:
         prompt = f"请执行任务 {task.id}（{task.title}）：\n{task.description}\n完成后简要汇报结果和验证证据，只处理这个任务。"
-        return f"{prompt}\n\n{recovery_summary}" if recovery_summary else prompt
+        extra = [part for part in (recovery_summary, instruction) if part]
+        return f"{prompt}\n\n「{ '；'.join(extra) }」" if extra else prompt
 
     async def _llm_text(self, messages: list[Message]) -> str:
         parts: list[str] = []
