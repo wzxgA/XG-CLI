@@ -5,7 +5,7 @@ import os
 from rich.text import Text
 from textual.widgets import Static
 
-from xg.tui.state import TuiState
+from xg.tui.state import SmartRouterSnapshot, SmartRouterTierSnapshot, TuiState
 
 
 def _compact(value: int) -> str:
@@ -32,6 +32,29 @@ def _status_label(phase: str) -> str:
         "awaiting_team_input": "Waiting team input",
         "error": "Error",
     }.get(phase, phase)
+
+
+def _tier_segment(tier: SmartRouterTierSnapshot) -> Text:
+    """Render one tier entry on the routing row.
+
+    当前档 bold reverse；未配置档 dim + ``model (x)``；其余档 dim。
+    """
+    label = f"{tier.tier}: {tier.model}"
+    if not tier.configured:
+        label += " (x)"
+    if tier.is_active:
+        return Text(label, style="bold reverse")
+    return Text(label, style="dim")
+
+
+def _routing_row(snapshot: SmartRouterSnapshot) -> Text:
+    """Assemble the four-tier routing row (only when enabled)."""
+    row = Text()
+    for index, tier in enumerate(snapshot.tiers):
+        if index:
+            row.append("  ")
+        row.append(_tier_segment(tier))
+    return row
 
 
 class HeaderBar(Static):
@@ -79,6 +102,11 @@ class HeaderBar(Static):
         text.append("\n")
         text.append(provider_model, style="bold")
         text.append("\n")
+        # SmartRouter routing row (phase-02): rendered only when enabled so the
+        # off-state output stays byte-identical to the pre-feature Header.
+        if inspector.smart_router.enabled and inspector.smart_router.tiers:
+            text.append(_routing_row(inspector.smart_router))
+            text.append("\n")
         status_style = "red" if state.phase == "error" else "yellow" if state.phase != "idle" else "dim"
         text.append(status, style=status_style)
         text.append("  ·  ")

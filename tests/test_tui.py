@@ -19,6 +19,7 @@ from xg.safety.hitl import HITLPolicy
 from xg.tool.builtin import build_registry
 from xg.tui.app import XgTuiApp
 from xg.tui.controller import SessionController
+from xg.tui.widgets.header import HeaderBar, _routing_row, _tier_segment
 from xg.tui.reducer import reduce_agent_event
 from xg.tui.reducer import set_smart_router_snapshot
 from xg.tui.state import (
@@ -173,6 +174,69 @@ def test_smart_router_snapshot_survives_agent_event_reduction():
     state = set_smart_router_snapshot(state, SmartRouterSnapshot())
     assert state.inspector.smart_router.enabled is False
     assert state.inspector.smart_router.tiers == ()
+
+
+def test_header_off_state_has_no_routing_row():
+    """phase-02 步骤 B：off 态 Header 不含路由行（与改动前输出一致）。"""
+    state = TuiState(phase="idle")
+    header = HeaderBar(id="hdr")
+    # 直接调用内部渲染逻辑：模拟 update_state 后的 Text 内容
+    header.update_state(state)
+    rendered = header.render()
+    assert "Basic" not in str(rendered)
+    assert "Enhanced" not in str(rendered)
+    assert "Superior" not in str(rendered)
+    assert "Ultimate" not in str(rendered)
+
+
+def test_header_on_state_renders_routing_row_with_highlight():
+    """on 态渲染四档行：当前档高亮标记、未配置档 (x)。"""
+    snapshot = SmartRouterSnapshot(
+        enabled=True,
+        active_tier="Enhanced",
+        tiers=(
+            _tier("Basic", "openai", "gpt-4o-mini"),
+            _tier("Enhanced", "deepseek", "deepseek-chat", is_active=True),
+            _tier("Superior", "deepseek", "deepseek-chat", configured=False),
+            _tier("Ultimate", "glm", "glm-4-plus"),
+        ),
+    )
+    state = set_smart_router_snapshot(TuiState(phase="idle"), snapshot)
+    header = HeaderBar(id="hdr")
+    header.update_state(state)
+    rendered = str(header.render())
+    assert "Basic: gpt-4o-mini" in rendered
+    assert "Enhanced: deepseek-chat" in rendered
+    assert "Superior: deepseek-chat (x)" in rendered
+    assert "Ultimate: glm-4-plus" in rendered
+
+
+def test_routing_row_highlight_styles():
+    """高亮规则单元断言：当前档 bold reverse、其余 dim、未配置 (x)。"""
+    active = _tier_segment(_tier("Enhanced", "deepseek", "deepseek-chat", is_active=True))
+    assert active.plain == "Enhanced: deepseek-chat"
+    assert "bold" in active.style and "reverse" in active.style
+
+    inactive = _tier_segment(_tier("Basic", "openai", "gpt-4o-mini"))
+    assert "dim" in inactive.style
+    assert "bold" not in inactive.style
+
+    unconfigured = _tier_segment(_tier("Superior", "deepseek", "deepseek-chat", configured=False))
+    assert unconfigured.plain.endswith(" (x)")
+    assert "dim" in unconfigured.style
+
+    # 组装行为：档间两个空格分隔，首档无前导空格
+    row = _routing_row(
+        SmartRouterSnapshot(
+            enabled=True,
+            active_tier="Basic",
+            tiers=(
+                _tier("Basic", "openai", "gpt-4o-mini", is_active=True),
+                _tier("Ultimate", "glm", "glm-4-plus"),
+            ),
+        )
+    )
+    assert row.plain == "Basic: gpt-4o-mini  Ultimate: glm-4-plus"
 
 
 def test_reducer_merges_streaming_content_and_ignores_stale_turn():
