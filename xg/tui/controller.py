@@ -15,6 +15,8 @@ from typing import Awaitable, Callable, Literal
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, ReviewDecision
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.agent.team import ResourceClaim, TeamEvent, TeamExecutor, TeamPlan
+from xg.adaptive.feedback import FeedbackRecorder
+from xg.adaptive.signals import capture_turn_signals
 from xg.cli.commands import CommandContext, CommandResult, CommandService
 from xg.cli.help import parse_help_command
 from xg.config.manager import ConfigManager
@@ -143,6 +145,10 @@ class SessionController:
         # SmartRouter 防降级上下文（600s 内最多降一档），与 inline 主循环一致
         self._router_prev_tier: str | None = None
         self._router_prev_ts: float | None = None
+        # SmartRouter 反馈采集（phase-03 步骤 B）
+        self._feedback = FeedbackRecorder(
+            session=str(getattr(manager, "project_dir", "") or "")
+        )
         self._sync_smart_router_snapshot()
 
     @staticmethod
@@ -250,6 +256,7 @@ class SessionController:
         """SmartRouter：普通轮在执行前路由并切换模型（与 inline 主循环行为一致）。
 
         只在开关开启时执行；切换失败保持上一档防降级上下文并仍按结果档展示快照。
+        同时接入反馈信号采集（phase-03 步骤 B：clarify / cmd_retry / short_high_tier）。
         """
         if not self.settings.smart_router_enabled:
             return
@@ -265,6 +272,15 @@ class SessionController:
             tiers_config=tiers_cfg, manager=self.manager,
         )
         err: str | None = None
+        # 先按上一轮档位采集 clarify/cmd_retry/short_high_tier，并立即落盘
+        # （与 inline _route_user_turn 保持一致，不依赖本轮切换是否成功）
+        capture_turn_signals(
+            self._feedback, text, getattr(result, "features", None) or {},
+            self._router_prev_tier, result.tier, TIER_NAMES,
+        )
+        self._feedback.flush()
+        # 再执行模型切换；切换失败仅影响"当轮是否真的用了该档 + 快照展示"，
+        # 不阻断信号采集，也不阻断防降级上下文 prev_tier 的推进
         if (result.provider, result.model) != (self.settings.provider, self.settings.model):
             err = _attach_model(self.settings, self.manager, self.agent, result.provider, result.model)
         if err is None:

@@ -24,6 +24,8 @@ from rich.text import Text
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, PlanTask, ReviewDecision
 from xg.agent.react import DEFAULT_SYSTEM_PROMPT, AgentEvent, ReActAgent
 from xg.agent.team import TeamEvent, TeamExecutor, TeamPlan, TeamTask
+from xg.adaptive.feedback import FeedbackRecorder, text_hash
+from xg.adaptive.signals import capture_interrupt, capture_turn_signals
 from xg.config.manager import ConfigManager, mask_key
 from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
@@ -613,6 +615,8 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
     # SmartRouter 跨轮路由状态（phase-01 步骤 D）
     prev_tier: str | None = None
     prev_ts: float | None = None
+    # SmartRouter 反馈采集（phase-03 步骤 B）
+    _feedback = FeedbackRecorder(session=str(Path.cwd()))
 
     while True:
         try:
@@ -690,10 +694,15 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
         try:
             if settings.smart_router_enabled:
                 prev_tier, prev_ts = _route_user_turn(
-                    agent, settings, manager, user_input, prev_tier, prev_ts
+                    agent, settings, manager, user_input, prev_tier, prev_ts,
+                    feedback=_feedback,
                 )
             await handle_turn(agent, user_input, approval_ui)
         except KeyboardInterrupt:
+            # phase-03 步骤 B：回答问题中途 Ctrl+C 视为"该档不够强"
+            if settings.smart_router_enabled:
+                if capture_interrupt(_feedback, prev_tier):
+                    _feedback.flush()
             console.print(Text("（已中断本轮任务）", style="yellow"))
         except LlmError as e:
             console.print(Panel(Text(f"请求失败: {e}"), style="red"))
@@ -980,10 +989,12 @@ def _attach_model(
 def _route_user_turn(
     agent: ReActAgent, settings: Settings, manager: ConfigManager,
     user_input: str, prev_tier: str | None, prev_ts: float | None,
+    feedback: FeedbackRecorder | None = None,
 ) -> tuple[str, float]:
     """对一轮普通输入做路由并切换到目标模型（不持久化），打出行内日志。
 
     返回 (final_tier, ts)，供下一轮作为防降级上下文。
+    传入 ``feedback`` 时采集 clarify / cmd_retry / short_high_tier 反馈（phase-03 步骤 B）。
     """
     tiers = (manager.smart_router_config().get("tiers") or {})
     now = time.time()
@@ -993,6 +1004,11 @@ def _route_user_turn(
         fallback_provider=settings.provider, fallback_model=settings.model,
         tiers_config=tiers, manager=manager,
     )
+    if feedback is not None:
+        capture_turn_signals(
+            feedback, user_input, result.features, prev_tier, result.tier, TIER_NAMES,
+        )
+        feedback.flush()
     if (result.provider, result.model) != (settings.provider, settings.model):
         err = _attach_model(settings, manager, agent, result.provider, result.model)
         if err:
