@@ -94,15 +94,18 @@ def capture_turn_signals(
 
     clarify, _ = detect_clarify(text, prev_tier, TIER_NAMES)
     if clarify:
-        recorder.capture(SignalType.CLARIFY, model_tier=prev_tier or cur_tier, text=text)
+        recorder.capture(SignalType.CLARIFY, model_tier=prev_tier or cur_tier,
+                         text=text, features=features)
         emitted.append(SignalType.CLARIFY)
 
     if detect_cmd_retry(text, prev_tier):
-        recorder.capture(SignalType.CMD_RETRY, model_tier=prev_tier or cur_tier, text=text)
+        recorder.capture(SignalType.CMD_RETRY, model_tier=prev_tier or cur_tier,
+                         text=text, features=features)
         emitted.append(SignalType.CMD_RETRY)
 
     if detect_short_high_tier(text, features, cur_tier, TIER_NAMES):
-        recorder.capture(SignalType.SHORT_HIGH_TIER, model_tier=cur_tier, text=text)
+        recorder.capture(SignalType.SHORT_HIGH_TIER, model_tier=cur_tier,
+                         text=text, features=features)
         emitted.append(SignalType.SHORT_HIGH_TIER)
 
     return emitted

@@ -61,9 +61,10 @@ class FeedbackEvent:
     signal: str = ""  # 冗余命中类型名，聚合时用
     weight: float = 0.0
     ts: float = field(default_factory=time.time)
+    features: dict | None = None  # 当轮特征快照（第 4 期 A1 learned_rules 聚合用）
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "ts": self.ts,
             "session": self.session,
             "source": self.source.value,
@@ -73,6 +74,9 @@ class FeedbackEvent:
             "model_tier": self.model_tier,
             "weight": self.weight,
         }
+        if self.features:  # 仅当存在时落盘，向后兼容（旧记录无此字段）
+            d["features"] = self.features
+        return d
 
 
 class FeedbackRecorder:
@@ -101,6 +105,7 @@ class FeedbackRecorder:
         model_tier: str,
         text: str = "",
         ts: float | None = None,
+        features: dict | None = None,
     ) -> None:
         """入内存缓冲（不立即写盘）。"""
         meta = SIGNAL_META[source]
@@ -112,6 +117,7 @@ class FeedbackRecorder:
             signal="upgrade" if meta["upgrade"] else "downgrade",
             weight=meta["weight"],
             ts=ts if ts is not None else time.time(),
+            features=features,
         )
         self._buffer.append(ev)
 

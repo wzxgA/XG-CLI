@@ -54,12 +54,15 @@ def route(text: str, *,
           fallback_model: str = "",
           tiers_config: dict | None = None,
           manager=None,
-          calibration=None) -> RouteResult:
+          calibration=None,
+          learned_rules=None) -> RouteResult:
     """对一段用户输入做完整路由：特征 → 规则打分 → 校准 → 后处理 → 档位解析。
 
     ``manager``（ConfigManager）可选，传入时对显式配置档做 provider/API Key 校验。
     ``calibration``（adaptive.Calibration）可选，phase-03 步骤 C 只读注入：
     在规则打分后、安全后处理前应用档位偏置与置信门；不传即第 1 期纯规则行为。
+    ``learned_rules``（adaptive.LearnedRules）可选，phase-04 步骤 A1 只读注入：
+    postprocess 末尾对其命中的 ±1 档微调，硬规则强制时无效；不传即第 3 期行为。
     """
     f = extract(text)
     decision: RuleDecision = rule_route(f)
@@ -74,6 +77,7 @@ def route(text: str, *,
         prev_tier=_tier_index(prev_tier), prev_ts=prev_ts,
         ts=ts if ts is not None else time.time(),
         context_tokens=context_tokens,
+        learned_rules=learned_rules,
     )
     target: TierTarget = resolve(final_idx, fallback_provider, fallback_model,
                                  tiers_config, manager)
