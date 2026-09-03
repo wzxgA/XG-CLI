@@ -12,6 +12,15 @@ dependencies = [
     "textual>=0.70.0",
 ]
 
+[project.optional-dependencies]
+# SmartRouter ML 精判（第 5 期）：仅离线训练/推理需要，主进程不 import，不装不影响
+ml = [
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.0",
+    "joblib>=1.3",
+]
+
 [project.scripts]
 xg = "xg.cli.app:main"
 
