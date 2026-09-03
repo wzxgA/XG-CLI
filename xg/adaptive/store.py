@@ -19,7 +19,7 @@ from . import data_dir
 # 三个数据文件名
 FEEDBACK_LOG = "feedback.log"        # JSONL 追加，只增不改
 CALIBRATION_JSON = "calibration.json"  # 校准结果，原子写
-LEARNED_RULES_JSON = "learned_rules.json"  # 自学习规则，第 4 期消费，本期仅占位空文件
+LEARNED_RULES_JSON = "learned_rules.json"  # 自学习规则，re_learn 落盘（见 learned_rules.py）
 
 
 def feedback_log_path() -> Path:
@@ -32,6 +32,23 @@ def calibration_path() -> Path:
 
 def learned_rules_path() -> Path:
     return data_dir() / LEARNED_RULES_JSON
+
+
+def reset_adaptive_data() -> list[str]:
+    """清空校准与自学习规则（feedback.log 保留作历史）。返回被删除的文件名。
+
+    phase-04 A3 的 `/smartRouter reset`。删除后校准/规则回到空态，
+    等价于"删掉 calibration.json + learned_rules.json 即回第 1 期行为"。
+    """
+    removed: list[str] = []
+    for p in (calibration_path(), learned_rules_path()):
+        try:
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        except OSError:
+            pass
+    return removed
 
 
 def ensure_dir() -> Path:

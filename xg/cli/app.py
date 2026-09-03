@@ -617,9 +617,16 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
     prev_ts: float | None = None
     # SmartRouter 反馈采集（phase-03 步骤 B）
     _feedback = FeedbackRecorder(session=str(Path.cwd()))
-    # SmartRouter 校准（phase-03 步骤 C）：启动时聚合 feedback.log 并落盘 calibration.json
+    # SmartRouter 校准/自学习/稳定层（phase-03 C + phase-04 A1/A2/A3）
+    # 挂到 agent 上，供路由与 /smartRouter reset 重建共享同一份状态
     from xg.adaptive.calibrate import recalibrate
-    _calibration = recalibrate()
+    from xg.adaptive.learned_rules import re_learn
+    from xg.router.postprocess import Hysteresis
+
+    agent._smart_calibration = recalibrate()
+    agent._smart_learned = re_learn()
+    agent._smart_hysteresis = Hysteresis()
+    _calibration = agent._smart_calibration  # 兼容旧引用
 
     while True:
         try:
@@ -698,7 +705,9 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
             if settings.smart_router_enabled:
                 prev_tier, prev_ts = _route_user_turn(
                     agent, settings, manager, user_input, prev_tier, prev_ts,
-                    feedback=_feedback, calibration=_calibration,
+                    feedback=_feedback, calibration=agent._smart_calibration,
+                    learned_rules=agent._smart_learned,
+                    hysteresis=agent._smart_hysteresis,
                 )
             await handle_turn(agent, user_input, approval_ui)
         except KeyboardInterrupt:
@@ -929,6 +938,23 @@ def _cmd_smart_router(
             _switch(agent, settings, manager, saved[0], saved[1])
         return "SmartRouter 已关闭，已恢复开启前的手动模型。"
 
+    if sub in ("reset", "clear"):
+        from xg.adaptive.store import reset_adaptive_data
+        from xg.adaptive.calibrate import recalibrate
+        from xg.adaptive.learned_rules import re_learn
+        from xg.router.postprocess import Hysteresis
+
+        removed = reset_adaptive_data()
+        # 重建内存共享状态，使 reset 立即生效（不再用旧校准/规则）
+        agent._smart_calibration = recalibrate()
+        agent._smart_learned = re_learn()
+        agent._smart_hysteresis = Hysteresis()
+        detail = "、".join(removed) if removed else "（本轮无可清除项）"
+        return (
+            f"已清除校准与自学习规则：{detail}。feedback.log 保留为历史；"
+            f"之后会按新的 feedback 重新学习。"
+        )
+
     if sub == "status" or arg.strip() in ("status", ""):
         lines = [f"SmartRouter: {'开启' if settings.smart_router_enabled else '关闭'}"]
         cfg = manager.smart_router_config()
@@ -945,17 +971,32 @@ def _cmd_smart_router(
         # 校准状态（phase-03 步骤 C）：直接聚合 feedback.log 展示实时样本
         from xg.adaptive.calibrate import aggregate
         from xg.adaptive.feedback import read_feedback
+        from xg.adaptive.learned_rules import load_learned_rules, rule_hit_stats
 
-        cal = aggregate(read_feedback())
+        records = read_feedback()
+        cal = aggregate(records)
         parts = [f"{name}={cal.samples[i]:g}" for i, name in enumerate(TIER_NAMES)]
         lines.append(f"  校准样本: {' '.join(parts)}（单档满 20 才生效）")
         bias_parts = [
             f"{name}={cal.bias[i]:+.2f}" for i, name in enumerate(TIER_NAMES)
         ]
         lines.append(f"  档位偏置: {' '.join(bias_parts)}  阈值调整 {cal.threshold_adjust:+.2f}")
+        # 自学习规则（phase-04 A1/A3）：规则数量与在 feedback.log 上的命中情况
+        rules = getattr(agent, "_smart_learned", load_learned_rules())
+        stats = rule_hit_stats(records, rules)
+        lines.append(
+            f"  自学习规则: {stats['rule_count']} 条，"
+            f"命中样本 {stats['hit_records']} / 可命中样本 {stats['sample_records']}"
+        )
+        for pr in stats["per_rule"]:
+            pred = "、".join(f"{k}{v:g}" for k, v in pr["predicate"].items())
+            lines.append(
+                f"    [{pred}] action={pr['action']:+d} conf={pr['confidence']:.2f} "
+                f"support={pr['support']:g} 命中{pr['hits']}次"
+            )
         return "\n".join(lines)
 
-    return "用法: /smartRouter on|off|status"
+    return "用法: /smartRouter on|off|status|reset"
 
 
 def _disable_smart_router(settings: Settings, manager: ConfigManager) -> None:
@@ -1005,12 +1046,16 @@ def _route_user_turn(
     user_input: str, prev_tier: str | None, prev_ts: float | None,
     feedback: FeedbackRecorder | None = None,
     calibration=None,
+    learned_rules=None,
+    hysteresis=None,
 ) -> tuple[str, float]:
     """对一轮普通输入做路由并切换到目标模型（不持久化），打出行内日志。
 
     返回 (final_tier, ts)，供下一轮作为防降级上下文。
     传入 ``feedback`` 时采集 clarify / cmd_retry / short_high_tier 反馈（phase-03 步骤 B）。
     传入 ``calibration`` 时在规则打分后应用档位偏置与置信门（phase-03 步骤 C）。
+    传入 ``learned_rules`` / ``hysteresis`` 分别启用局部规则微调与会话内迟滞
+    （phase-04 A1/A2，均由 /smartRouter reset 重建的共享状态提供）。
     """
     tiers = (manager.smart_router_config().get("tiers") or {})
     now = time.time()
@@ -1019,6 +1064,7 @@ def _route_user_turn(
         prev_tier=prev_tier, prev_ts=prev_ts, ts=now,
         fallback_provider=settings.provider, fallback_model=settings.model,
         tiers_config=tiers, manager=manager, calibration=calibration,
+        learned_rules=learned_rules, hysteresis=hysteresis,
     )
     if feedback is not None:
         capture_turn_signals(

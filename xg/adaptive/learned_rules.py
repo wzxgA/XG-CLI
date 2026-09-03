@@ -237,3 +237,48 @@ def re_learn(log_path=None, rules_path=None) -> LearnedRules:
     rules = aggregate(records)
     save_learned_rules(rules, rules_path)
     return rules
+
+
+def rule_hit_stats(
+    records: Sequence[dict[str, Any]], rules: LearnedRules,
+) -> dict[str, Any]:
+    """统计规则集在 feedback.log 上的命中情况，供 `/smartRouter status` 展示。
+
+    返回 {"rule_count", "sample_records", "hit_records", "per_rule"}：
+    - rule_count：规则条数；
+    - sample_records：带 features 的可命中样本记录数；
+    - hit_records：命中至少一条规则的样本记录数；
+    - per_rule：每条规则的 predicate/action/confidence/support 及命中次数
+      （一条记录可能命中多条，各自累计）。
+    """
+    per: dict[int, int] = {id(r): 0 for r in rules.rules}
+    sample_records = 0
+    hit_records = 0
+    for rec in records:
+        feats = rec.get("features")
+        if not isinstance(feats, dict) or not feats:
+            continue
+        sample_records += 1
+        hit_any = False
+        for r in rules.rules:
+            if r.matches(feats):
+                per[id(r)] += 1
+                hit_any = True
+        if hit_any:
+            hit_records += 1
+    per_rule = [
+        {
+            "predicate": r.predicate,
+            "action": r.action,
+            "confidence": r.confidence,
+            "support": r.support,
+            "hits": per[id(r)],
+        }
+        for r in rules.rules
+    ]
+    return {
+        "rule_count": rules.count,
+        "sample_records": sample_records,
+        "hit_records": hit_records,
+        "per_rule": per_rule,
+    }
