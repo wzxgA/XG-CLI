@@ -56,8 +56,9 @@ def route(text: str, *,
           manager=None,
           calibration=None,
           learned_rules=None,
-          hysteresis=None) -> RouteResult:
-    """对一段用户输入做完整路由：特征 → 规则打分 → 校准 → 后处理 → 档位解析。
+          hysteresis=None,
+          ml_router=None) -> RouteResult:
+    """对一段用户输入做完整路由：特征 → 规则打分 → 校准/ML精判 → 后处理 → 档位解析。
 
     ``manager``（ConfigManager）可选，传入时对显式配置档做 provider/API Key 校验。
     ``calibration``（adaptive.Calibration）可选，phase-03 步骤 C 只读注入：
@@ -66,15 +67,26 @@ def route(text: str, *,
     postprocess 末尾对其命中的 ±1 档微调，硬规则强制时无效；不传即第 3 期行为。
     ``hysteresis``（router.postprocess.Hysteresis）可选，phase-04 步骤 A2 只读注入：
     作为最后一道闸抑制会话内短时跳档，硬规则强制时解冻；不传即 A1 行为。
+    ``ml_router``（router.ml_router.MLRouter）可选，phase-05 步骤 B2 只读注入：
+    规则打分后参与精判（概率最高档 + 置信门 + 校准偏置），不可用/信心不足时
+    静默回落规则档位；硬规则决策不参与精判；不传即 A1+A2 行为。
     """
     f = extract(text)
     decision: RuleDecision = rule_route(f)
     tier_idx = decision.tier_idx
-    if calibration is not None:
-        from xg.adaptive.calibrate import apply_calibration
-        tier_idx = apply_calibration(
-            tier_idx, confidence(decision), decision.hard_rule, calibration,
-        )
+    hard_rule = decision.hard_rule
+    from xg.adaptive.calibrate import apply_calibration
+
+    # 优先：ML 精判（仅软规则决策、且产物可用时）→ 置信门 + 校准偏置
+    if ml_router is not None and not hard_rule and ml_router.available:
+        ml_tier = ml_router.decide(text, f, calibration)
+        if ml_tier is not None:
+            tier_idx = ml_tier
+    else:
+        if calibration is not None:
+            tier_idx = apply_calibration(
+                tier_idx, confidence(decision), hard_rule, calibration,
+            )
     final_idx = postprocess(
         tier_idx, text, f,
         prev_tier=_tier_index(prev_tier), prev_ts=prev_ts,

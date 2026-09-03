@@ -622,10 +622,12 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
     from xg.adaptive.calibrate import recalibrate
     from xg.adaptive.learned_rules import re_learn
     from xg.router.postprocess import Hysteresis
+    from xg.router.ml_router import MLRouter
 
     agent._smart_calibration = recalibrate()
     agent._smart_learned = re_learn()
     agent._smart_hysteresis = Hysteresis()
+    agent._smart_ml = MLRouter()  # phase-05 B2：产物可用则参与精判，否则静默回落
     _calibration = agent._smart_calibration  # 兼容旧引用
 
     while True:
@@ -705,9 +707,11 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
             if settings.smart_router_enabled:
                 prev_tier, prev_ts = _route_user_turn(
                     agent, settings, manager, user_input, prev_tier, prev_ts,
-                    feedback=_feedback, calibration=agent._smart_calibration,
+                    feedback=_feedback,
+                    calibration=agent._smart_calibration,
                     learned_rules=agent._smart_learned,
                     hysteresis=agent._smart_hysteresis,
+                    ml_router=agent._smart_ml,
                 )
             await handle_turn(agent, user_input, approval_ui)
         except KeyboardInterrupt:
@@ -994,6 +998,15 @@ def _cmd_smart_router(
                 f"    [{pred}] action={pr['action']:+d} conf={pr['confidence']:.2f} "
                 f"support={pr['support']:g} 命中{pr['hits']}次"
             )
+        # ML 精判（phase-05 B2）：产物可用性观测；缺失/缺依赖时显示离线
+        ml = getattr(agent, "_smart_ml", None)
+        if ml is not None:
+            if ml.available:
+                n = ml.n_samples
+                suffix = f"，样本 {n}" if n is not None else ""
+                lines.append(f"  ML 精判: 可用{suffix}")
+            else:
+                lines.append("  ML 精判: 离线（未训练 / 未装依赖，回落规则路由）")
         return "\n".join(lines)
 
     return "用法: /smartRouter on|off|status|reset"
@@ -1048,6 +1061,7 @@ def _route_user_turn(
     calibration=None,
     learned_rules=None,
     hysteresis=None,
+    ml_router=None,
 ) -> tuple[str, float]:
     """对一轮普通输入做路由并切换到目标模型（不持久化），打出行内日志。
 
@@ -1056,6 +1070,8 @@ def _route_user_turn(
     传入 ``calibration`` 时在规则打分后应用档位偏置与置信门（phase-03 步骤 C）。
     传入 ``learned_rules`` / ``hysteresis`` 分别启用局部规则微调与会话内迟滞
     （phase-04 A1/A2，均由 /smartRouter reset 重建的共享状态提供）。
+    传入 ``ml_router``（phase-05 B2）时软规则决策参与 ML 精判，不可用/信心
+    不足静默回落规则档位。
     """
     tiers = (manager.smart_router_config().get("tiers") or {})
     now = time.time()
@@ -1064,7 +1080,7 @@ def _route_user_turn(
         prev_tier=prev_tier, prev_ts=prev_ts, ts=now,
         fallback_provider=settings.provider, fallback_model=settings.model,
         tiers_config=tiers, manager=manager, calibration=calibration,
-        learned_rules=learned_rules, hysteresis=hysteresis,
+        learned_rules=learned_rules, hysteresis=hysteresis, ml_router=ml_router,
     )
     if feedback is not None:
         capture_turn_signals(
