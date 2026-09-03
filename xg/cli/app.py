@@ -617,6 +617,9 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
     prev_ts: float | None = None
     # SmartRouter 反馈采集（phase-03 步骤 B）
     _feedback = FeedbackRecorder(session=str(Path.cwd()))
+    # SmartRouter 校准（phase-03 步骤 C）：启动时聚合 feedback.log 并落盘 calibration.json
+    from xg.adaptive.calibrate import recalibrate
+    _calibration = recalibrate()
 
     while True:
         try:
@@ -695,7 +698,7 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
             if settings.smart_router_enabled:
                 prev_tier, prev_ts = _route_user_turn(
                     agent, settings, manager, user_input, prev_tier, prev_ts,
-                    feedback=_feedback,
+                    feedback=_feedback, calibration=_calibration,
                 )
             await handle_turn(agent, user_input, approval_ui)
         except KeyboardInterrupt:
@@ -939,6 +942,17 @@ def _cmd_smart_router(
                 mark = "(x)" if raw_entry else "-"
             lines.append(f"  {name:<9}→ {target.provider}/{target.model}  {mark}")
         lines.append("  (OK=显式配置可用  (x)=配置但校验失败  -=未配回落 active)")
+        # 校准状态（phase-03 步骤 C）：直接聚合 feedback.log 展示实时样本
+        from xg.adaptive.calibrate import aggregate
+        from xg.adaptive.feedback import read_feedback
+
+        cal = aggregate(read_feedback())
+        parts = [f"{name}={cal.samples[i]:g}" for i, name in enumerate(TIER_NAMES)]
+        lines.append(f"  校准样本: {' '.join(parts)}（单档满 20 才生效）")
+        bias_parts = [
+            f"{name}={cal.bias[i]:+.2f}" for i, name in enumerate(TIER_NAMES)
+        ]
+        lines.append(f"  档位偏置: {' '.join(bias_parts)}  阈值调整 {cal.threshold_adjust:+.2f}")
         return "\n".join(lines)
 
     return "用法: /smartRouter on|off|status"
@@ -990,11 +1004,13 @@ def _route_user_turn(
     agent: ReActAgent, settings: Settings, manager: ConfigManager,
     user_input: str, prev_tier: str | None, prev_ts: float | None,
     feedback: FeedbackRecorder | None = None,
+    calibration=None,
 ) -> tuple[str, float]:
     """对一轮普通输入做路由并切换到目标模型（不持久化），打出行内日志。
 
     返回 (final_tier, ts)，供下一轮作为防降级上下文。
     传入 ``feedback`` 时采集 clarify / cmd_retry / short_high_tier 反馈（phase-03 步骤 B）。
+    传入 ``calibration`` 时在规则打分后应用档位偏置与置信门（phase-03 步骤 C）。
     """
     tiers = (manager.smart_router_config().get("tiers") or {})
     now = time.time()
@@ -1002,7 +1018,7 @@ def _route_user_turn(
         user_input,
         prev_tier=prev_tier, prev_ts=prev_ts, ts=now,
         fallback_provider=settings.provider, fallback_model=settings.model,
-        tiers_config=tiers, manager=manager,
+        tiers_config=tiers, manager=manager, calibration=calibration,
     )
     if feedback is not None:
         capture_turn_signals(

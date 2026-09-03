@@ -149,6 +149,9 @@ class SessionController:
         self._feedback = FeedbackRecorder(
             session=str(getattr(manager, "project_dir", "") or "")
         )
+        # SmartRouter 校准（phase-03 步骤 C）：启动时聚合 feedback.log 并落盘
+        from xg.adaptive.calibrate import recalibrate
+        self._calibration = recalibrate()
         self._sync_smart_router_snapshot()
 
     @staticmethod
@@ -269,7 +272,7 @@ class SessionController:
             text,
             prev_tier=self._router_prev_tier, prev_ts=self._router_prev_ts, ts=now,
             fallback_provider=self.settings.provider, fallback_model=self.settings.model,
-            tiers_config=tiers_cfg, manager=self.manager,
+            tiers_config=tiers_cfg, manager=self.manager, calibration=self._calibration,
         )
         err: str | None = None
         # 先按上一轮档位采集 clarify/cmd_retry/short_high_tier，并立即落盘

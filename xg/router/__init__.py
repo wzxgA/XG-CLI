@@ -53,15 +53,24 @@ def route(text: str, *,
           fallback_provider: str = "",
           fallback_model: str = "",
           tiers_config: dict | None = None,
-          manager=None) -> RouteResult:
-    """对一段用户输入做完整路由：特征 → 规则打分 → 后处理 → 档位解析。
+          manager=None,
+          calibration=None) -> RouteResult:
+    """对一段用户输入做完整路由：特征 → 规则打分 → 校准 → 后处理 → 档位解析。
 
     ``manager``（ConfigManager）可选，传入时对显式配置档做 provider/API Key 校验。
+    ``calibration``（adaptive.Calibration）可选，phase-03 步骤 C 只读注入：
+    在规则打分后、安全后处理前应用档位偏置与置信门；不传即第 1 期纯规则行为。
     """
     f = extract(text)
     decision: RuleDecision = rule_route(f)
+    tier_idx = decision.tier_idx
+    if calibration is not None:
+        from xg.adaptive.calibrate import apply_calibration
+        tier_idx = apply_calibration(
+            tier_idx, confidence(decision), decision.hard_rule, calibration,
+        )
     final_idx = postprocess(
-        decision.tier_idx, text, f,
+        tier_idx, text, f,
         prev_tier=_tier_index(prev_tier), prev_ts=prev_ts,
         ts=ts if ts is not None else time.time(),
         context_tokens=context_tokens,
