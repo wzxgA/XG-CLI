@@ -947,12 +947,14 @@ def _cmd_smart_router(
         from xg.adaptive.calibrate import recalibrate
         from xg.adaptive.learned_rules import re_learn
         from xg.router.postprocess import Hysteresis
+        from xg.router.ml_router import MLRouter
 
         removed = reset_adaptive_data()
         # 重建内存共享状态，使 reset 立即生效（不再用旧校准/规则）
         agent._smart_calibration = recalibrate()
         agent._smart_learned = re_learn()
         agent._smart_hysteresis = Hysteresis()
+        agent._smart_ml = MLRouter()
         detail = "、".join(removed) if removed else "（本轮无可清除项）"
         return (
             f"已清除校准与自学习规则：{detail}。feedback.log 保留为历史；"

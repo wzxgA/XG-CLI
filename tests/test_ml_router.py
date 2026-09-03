@@ -57,7 +57,9 @@ class TestFallback:
         assert r.predict("随便聊聊") is None
         assert r.decide("随便聊聊") is None
 
-    def test_none_path_unavailable(self):
+    def test_none_path_unavailable(self, monkeypatch):
+        # MLRouter(None) 回退默认目录；隔离地指向不存在的目录，避免读到真实产物
+        monkeypatch.setenv("XG_ADAPTIVE_DIR", "C:/__xg_never_exists__")
         assert not MLRouter(None).available
 
     def test_available_preserves_import(self):
