@@ -83,30 +83,40 @@ def _atomic_copy(src: Path, dst: Path) -> None:
         raise
 
 
-def ensure_default_artifacts() -> None:
-    """首启把随包语义产物复制到数据目录；目标已存在则跳过（不覆盖用户数据）。
+# 随包默认产物（xg/assets/，hatch wheel 打包自带）：包内名称 -> 数据目录的目标路径
+_BUNDLED_BASENAMES = (ML_ROUTER_BIN, SEMANTIC_ONNX, SEMANTIC_ONNX_TOK)
 
-    随包资源在 ``xg/assets/``（router_semantics.onnx + .json）。无随包资源、
-    目标已存在或复制失败时静默跳过——语义通道维持离线回落，绝不影响启动。
+
+def _bundled_target(name: str) -> Path:
+    """随包产物在数据目录里的对应目标路径（与默认文件名一致）。"""
+    return data_dir() / name
+
+
+def ensure_default_artifacts() -> None:
+    """首启把随包产物复制到数据目录；目标已存在则跳过（不覆盖用户数据）。
+
+    随包资源在 ``xg/assets/``：``router.lgb``（ML 精判兜底）与
+    ``router_semantics.onnx`` + ``.json``（语义编码器）。无随包资源、
+    目标已存在或复制失败时静默跳过——对应功能维持离线回落，绝不影响启动。
     """
-    target = semantic_onnx_path()
-    if target.exists():
-        return
     try:
         from importlib.resources import as_file, files  # noqa: PLC0415
         root = files("xg").joinpath("assets")
-        src_onnx = root.joinpath(SEMANTIC_ONNX)
-        if not src_onnx.is_file():
-            return
-        with as_file(src_onnx) as p_src:
-            _atomic_copy(Path(p_src), target)
-        src_tok = root.joinpath(SEMANTIC_ONNX_TOK)
-        if src_tok.is_file():
-            with as_file(src_tok) as p_src:
-                _atomic_copy(Path(p_src), target.with_suffix(".json"))
     except Exception:
-        # 内存/沙箱/只读等任何失败都静默，绝不打断启动
-        pass
+        return
+    for name in _BUNDLED_BASENAMES:
+        target = _bundled_target(name)
+        if target.exists():
+            continue  # 用户已有产物 → 不覆盖
+        src = root.joinpath(name)
+        if not src.is_file():
+            continue
+        try:
+            with as_file(src) as p_src:
+                _atomic_copy(Path(p_src), target)
+        except Exception:
+            # 内存/沙箱/只读等任何失败都静默，绝不打断启动
+            pass
 
 
 def _atomic_replace(path: Path, payload: str) -> None:

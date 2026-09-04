@@ -44,7 +44,15 @@ class MLRouter:
         # 预测需语义列；语义不可用则整个静默回落（无法提供既定列宽）。
         self._semantic = semantic
         self._sem_dim = 0
+        # 随包兜底：默认产物缺失时首启自动落位（clone 后开箱可用）
+        if artifact_path is None:
+            self._ensure_bundled()
         self._load(artifact_path)
+
+    def _ensure_bundled(self) -> None:
+        """把随包默认产物（router.lgb 等）复制到数据目录；已存在则跳过。"""
+        from ..adaptive.store import ensure_default_artifacts
+        ensure_default_artifacts()
 
     # -- 加载 -----------------------------------------------------------
     def _load(self, artifact_path: Path | None) -> None:

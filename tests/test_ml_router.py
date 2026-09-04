@@ -49,18 +49,20 @@ def _samples(n=40):
 # ---------------------------------------------------------------------------
 
 class TestFallback:
-    def test_no_artifact_unavailable(self, tmp_path, monkeypatch):
-        # 指向不存在的产物目录 → available=False，predict/decide 均 None
-        monkeypatch.setenv("XG_ADAPTIVE_DIR", str(tmp_path / "nope"))
-        r = MLRouter()
+    def test_no_artifact_unavailable(self, tmp_path):
+        # 显式指向不存在的产物路径（不触发随包落位）→ 回落，predict/decide 均 None
+        p = tmp_path / "nope" / "router.lgb"
+        assert not p.exists()
+        r = MLRouter(p)
         assert not r.available
         assert r.predict("随便聊聊") is None
         assert r.decide("随便聊聊") is None
 
-    def test_none_path_unavailable(self, monkeypatch):
-        # MLRouter(None) 回退默认目录；隔离地指向不存在的目录，避免读到真实产物
-        monkeypatch.setenv("XG_ADAPTIVE_DIR", "C:/__xg_never_exists__")
-        assert not MLRouter(None).available
+    def test_none_path_unavailable(self, tmp_path):
+        # 默认目录指向隔离空目录且显式不可写时回落；此处用显式缺失路径保证隔离，
+        # 避免随包兜底把产物写入真实目录或 C 盘根（原用例会污染 C:/__xg_never_exists__）
+        r = MLRouter(tmp_path / "no_such" / "router.lgb")
+        assert not r.available
 
     def test_available_preserves_import(self):
         """即便产物缺失，import MLRouter 也不触发 ML 依赖导入（主进程零硬依赖）。"""
@@ -142,3 +144,29 @@ class TestRouteIntegration:
         res = route("写个函数把两个数相加",
                     fallback_provider="p", fallback_model="m")
         assert res.hard_rule is False  # 软规则路径仍走规则
+
+
+def _semantic_available() -> bool:
+    try:
+        import onnxruntime  # noqa: F401
+        import tokenizers  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(
+    not (_ml_available() and _semantic_available()), reason="未安装 ml + semantic 依赖"
+)
+class TestBundledBootstrap:
+    def test_default_dir_uses_bundled_artifacts(self, tmp_path, monkeypatch):
+        """空数据目录首启：随包 router.lgb + 语义编码器自动落位，ML 精判开箱可用。"""
+        monkeypatch.setenv("XG_ADAPTIVE_DIR", str(tmp_path))
+        from xg.router.semantic import load_semantic_encoder
+        sem = load_semantic_encoder(None)
+        r = MLRouter(None, semantic=sem)  # 默认路径 → 触发随包落位
+        assert r.available
+        assert r.sem_dim == 512  # 随包兜底绑定语义列
+        # 兜底模型仅 34 样本，未见文本可能不达置信门 → decide 允许回落 None
+        assert r.decide("设计生产环境分布式部署架构方案") in (None, 0, 1, 2, 3)
+        assert r.predict("写个函数把两个数相加") is not None

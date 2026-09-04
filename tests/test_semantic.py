@@ -74,6 +74,8 @@ def test_factory_bundles_artifact_to_empty_dir(tmp_path, monkeypatch):
     assert enc.available
     assert enc.artifact_exists
     assert (tmp_path / "router_semantics.json").exists()
+    # ML 精判兜底产物（router.lgb）也应随包落位
+    assert (tmp_path / "router.lgb").exists()
 
 
 @pytest.mark.skipif(not _semantic_available(), reason="未安装 semantic extras")
