@@ -7,6 +7,7 @@ import itertools
 import json
 import re
 import shlex
+import time
 from collections import deque
 from dataclasses import dataclass, replace
 from typing import Awaitable, Callable, Literal
@@ -14,13 +15,22 @@ from typing import Awaitable, Callable, Literal
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, ReviewDecision
 from xg.agent.react import AgentEvent, ReActAgent
 from xg.agent.team import ResourceClaim, TeamEvent, TeamExecutor, TeamPlan
+from xg.adaptive.feedback import FeedbackRecorder
+from xg.adaptive.signals import capture_turn_signals
 from xg.cli.commands import CommandContext, CommandResult, CommandService
 from xg.cli.help import parse_help_command
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.llm.types import Message
+from xg.router import TIER_NAMES, resolve as resolve_tier, route as route_turn
 from xg.safety.hitl import ApprovalDecision
-from xg.tui.reducer import finalize_trace, reduce_agent_event, reduce_plan_event, reduce_team_event
+from xg.tui.reducer import (
+    finalize_trace,
+    reduce_agent_event,
+    reduce_plan_event,
+    reduce_team_event,
+    set_smart_router_snapshot,
+)
 from xg.tui.state import (
     ApprovalRequest,
     ConfirmationRequest,
@@ -30,6 +40,8 @@ from xg.tui.state import (
     MemoryInspectorSnapshot,
     SafetyInspectorSnapshot,
     SessionInspectorSnapshot,
+    SmartRouterSnapshot,
+    SmartRouterTierSnapshot,
     TuiState,
     TranscriptItem,
     UsageSnapshot,
@@ -130,6 +142,28 @@ class SessionController:
             mcp_manager.add_listener(self._on_mcp_event)
         if agent.approval_policy is not None:
             agent.approval_policy.requester = self._request_approval
+        # SmartRouter 防降级上下文（600s 内最多降一档），与 inline 主循环一致
+        self._router_prev_tier: str | None = None
+        self._router_prev_ts: float | None = None
+        # SmartRouter 反馈采集（phase-03 步骤 B）
+        self._feedback = FeedbackRecorder(
+            session=str(getattr(manager, "project_dir", "") or "")
+        )
+        # SmartRouter 校准（phase-03 步骤 C）：启动时聚合 feedback.log 并落盘
+        from xg.adaptive.calibrate import recalibrate
+        self._calibration = recalibrate()
+        # SmartRouter 自学习/稳定/ML（phase-04 A1/A2 + phase-05 B2）：挂到 agent 上，
+        # 与 inline 主循环自洽；learned_rules 供路由局部微调、hysteresis 供稳定层、
+        # ml 供 status 显示与精判。产物存在可用则参与精判，否则静默回落。
+        from xg.adaptive.learned_rules import re_learn
+        from xg.router.ml_router import MLRouter
+        from xg.router.postprocess import Hysteresis
+        from xg.router.semantic import load_semantic_encoder
+        self.agent._smart_calibration = self._calibration
+        self.agent._smart_learned = re_learn()
+        self.agent._smart_hysteresis = Hysteresis()
+        self.agent._smart_ml = MLRouter(semantic=load_semantic_encoder())
+        self._sync_smart_router_snapshot()
 
     @staticmethod
     def _read_memory_snapshot(memory, *, last_operation: str = "") -> MemoryInspectorSnapshot:
@@ -194,6 +228,80 @@ class SessionController:
     def _publish(self) -> None:
         if self.on_state_change is not None:
             self.on_state_change(self.state)
+
+    def _sync_smart_router_snapshot(self, active_tier: str = "") -> None:
+        """按当前开关与档位配置重建 Header 快照（phase-02 步骤 C）。
+
+        off 态写入空快照（Header 回到单行渲染）；已同步为 off 时不重复写。
+        """
+        current = self.state.inspector.smart_router
+        if not self.settings.smart_router_enabled:
+            if current.enabled or current.tiers:
+                self._set_state(set_smart_router_snapshot(self.state, SmartRouterSnapshot()))
+            return
+        tiers_cfg = self.manager.smart_router_config().get("tiers") or {}
+        entries: list[SmartRouterTierSnapshot] = []
+        for idx, name in enumerate(TIER_NAMES):
+            target = resolve_tier(idx, self.settings.provider, self.settings.model, tiers_cfg, self.manager)
+            entries.append(SmartRouterTierSnapshot(
+                tier=name,
+                provider=target.provider,
+                model=target.model,
+                is_active=(name == active_tier),
+                configured=target.configured,
+            ))
+        # 路由可能已切换模型：同步 Header 主行与上下文窗口，避免显示滞后
+        state = replace(
+            self.state,
+            inspector=replace(
+                self.state.inspector,
+                provider=self.settings.provider,
+                model=self.settings.model,
+                usage=replace(self.state.inspector.usage, context_window=self.settings.context_window),
+                context_window=self.settings.context_window,
+            ),
+        )
+        self._set_state(set_smart_router_snapshot(
+            state,
+            SmartRouterSnapshot(enabled=True, tiers=tuple(entries), active_tier=active_tier),
+        ))
+
+    def _route_user_turn(self, text: str) -> None:
+        """SmartRouter：普通轮在执行前路由并切换模型（与 inline 主循环行为一致）。
+
+        只在开关开启时执行；切换失败保持上一档防降级上下文并仍按结果档展示快照。
+        同时接入反馈信号采集（phase-03 步骤 B：clarify / cmd_retry / short_high_tier）。
+        """
+        if not self.settings.smart_router_enabled:
+            return
+        # 延迟导入避免环：xg.cli.app → xg.tui.app → 本模块
+        from xg.cli.app import _attach_model
+
+        tiers_cfg = self.manager.smart_router_config().get("tiers") or {}
+        now = time.time()
+        result = route_turn(
+            text,
+            prev_tier=self._router_prev_tier, prev_ts=self._router_prev_ts, ts=now,
+            fallback_provider=self.settings.provider, fallback_model=self.settings.model,
+            tiers_config=tiers_cfg, manager=self.manager, calibration=self._calibration,
+            learned_rules=getattr(self.agent, "_smart_learned", None),
+            ml_router=getattr(self.agent, "_smart_ml", None),
+        )
+        err: str | None = None
+        # 先按上一轮档位采集 clarify/cmd_retry/short_high_tier，并立即落盘
+        # （与 inline _route_user_turn 保持一致，不依赖本轮切换是否成功）
+        capture_turn_signals(
+            self._feedback, text, getattr(result, "features", None) or {},
+            self._router_prev_tier, result.tier, TIER_NAMES,
+        )
+        self._feedback.flush()
+        # 再执行模型切换；切换失败仅影响"当轮是否真的用了该档 + 快照展示"，
+        # 不阻断信号采集，也不阻断防降级上下文 prev_tier 的推进
+        if (result.provider, result.model) != (self.settings.provider, self.settings.model):
+            err = _attach_model(self.settings, self.manager, self.agent, result.provider, result.model)
+        if err is None:
+            self._router_prev_tier, self._router_prev_ts = result.tier, now
+        self._sync_smart_router_snapshot(result.tier)
 
     def _set_state(self, state: TuiState) -> None:
         self.state = state
@@ -500,6 +608,8 @@ class SessionController:
                 result = await self.execute_command(text)
                 if result.message and not result.open_modal:
                     self._append_system(result.message)
+                # /smartRouter、/model 等命令可能改变开关或档位配置，同步 Header 快照
+                self._sync_smart_router_snapshot()
                 return True
             finally:
                 if self._active_task is current:
@@ -540,6 +650,8 @@ class SessionController:
             elif is_team:
                 await self._run_team(goal, turn_id)
             else:
+                # 普通轮执行前路由（与 inline _run_loop_body 一致；/plan、/team 不路由）
+                self._route_user_turn(text)
                 await self._run_agent(text, turn_id)
         except asyncio.CancelledError:
             cancelled = finalize_trace(self.state, turn_id, status="cancelled")

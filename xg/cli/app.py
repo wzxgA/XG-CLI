@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,11 +24,14 @@ from rich.text import Text
 from xg.agent.plan import Plan, PlanEvent, PlanExecutor, PlanTask, ReviewDecision
 from xg.agent.react import DEFAULT_SYSTEM_PROMPT, AgentEvent, ReActAgent
 from xg.agent.team import TeamEvent, TeamExecutor, TeamPlan, TeamTask
+from xg.adaptive.feedback import FeedbackRecorder, text_hash
+from xg.adaptive.signals import capture_interrupt, capture_turn_signals
 from xg.config.manager import ConfigManager, mask_key
 from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.config.web import WebConfigManager
 from xg.config.skills import SkillConfigManager
+from xg.router import TIER_NAMES, resolve as resolve_tier, route as route_turn
 from xg.cli.help import format_command_help, format_help
 from xg.input_history import HistoryConfig, InputHistory, PromptToolkitHistory
 from xg.llm.client import LlmClient, LlmError
@@ -608,6 +612,25 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
     if agent.approval_policy is not None:
         agent.approval_policy.requester = approval_ui
 
+    # SmartRouter 跨轮路由状态（phase-01 步骤 D）
+    prev_tier: str | None = None
+    prev_ts: float | None = None
+    # SmartRouter 反馈采集（phase-03 步骤 B）
+    _feedback = FeedbackRecorder(session=str(Path.cwd()))
+    # SmartRouter 校准/自学习/稳定层（phase-03 C + phase-04 A1/A2/A3）
+    # 挂到 agent 上，供路由与 /smartRouter reset 重建共享同一份状态
+    from xg.adaptive.calibrate import recalibrate
+    from xg.adaptive.learned_rules import re_learn
+    from xg.router.postprocess import Hysteresis
+    from xg.router.ml_router import MLRouter
+    from xg.router.semantic import load_semantic_encoder
+
+    agent._smart_calibration = recalibrate()
+    agent._smart_learned = re_learn()
+    agent._smart_hysteresis = Hysteresis()
+    agent._smart_ml = MLRouter(semantic=load_semantic_encoder())  # 第6期 C2：语义列可选，缺则回落
+    _calibration = agent._smart_calibration  # 兼容旧引用
+
     while True:
         try:
             if history_adapter is not None:
@@ -682,8 +705,21 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
             continue
 
         try:
+            if settings.smart_router_enabled:
+                prev_tier, prev_ts = _route_user_turn(
+                    agent, settings, manager, user_input, prev_tier, prev_ts,
+                    feedback=_feedback,
+                    calibration=agent._smart_calibration,
+                    learned_rules=agent._smart_learned,
+                    hysteresis=agent._smart_hysteresis,
+                    ml_router=agent._smart_ml,
+                )
             await handle_turn(agent, user_input, approval_ui)
         except KeyboardInterrupt:
+            # phase-03 步骤 B：回答问题中途 Ctrl+C 视为"该档不够强"
+            if settings.smart_router_enabled:
+                if capture_interrupt(_feedback, prev_tier):
+                    _feedback.flush()
             console.print(Text("（已中断本轮任务）", style="yellow"))
         except LlmError as e:
             console.print(Panel(Text(f"请求失败: {e}"), style="red"))
@@ -711,6 +747,8 @@ def _handle_command(
         return result.message, False
     if cmd == "/model":
         return _cmd_model(agent, settings, manager, arg), False
+    if cmd == "/smartrouter":
+        return _cmd_smart_router(agent, settings, manager, arg), False
     if cmd == "/config":
         return _cmd_config(agent, settings, manager, arg), False
     if cmd == "/hitl":
@@ -722,7 +760,7 @@ def _handle_command(
     if cmd == "/mcp":
         mcp = getattr(agent, "mcp_manager", None)
         return (mcp.format_status() if mcp is not None else "MCP 未初始化。"), False
-    return f"未知命令: {cmd}。可用: /plan /team /model /config /mcp /init /save /memory /hitl /clear /exit", False
+    return f"未知命令: {cmd}。可用: /plan /team /model /config /mcp /smartRouter /init /save /memory /hitl /clear /exit", False
 
 
 def _memory_manager(agent: ReActAgent) -> MemoryManager | None:
@@ -862,11 +900,221 @@ def _cmd_model(
 
     if "/" in arg:
         provider_name, model = (x.strip() for x in arg.split("/", 1))
-        return _switch(agent, settings, manager, provider_name, model)
-    if arg in manager.provider_names():
-        return _switch(agent, settings, manager, arg, None)
-    # 不带 provider 前缀时，视为当前 provider 内的模型切换
-    return _switch(agent, settings, manager, settings.provider, arg)
+        result = _switch(agent, settings, manager, provider_name, model)
+    elif arg in manager.provider_names():
+        result = _switch(agent, settings, manager, arg, None)
+    else:
+        # 不带 provider 前缀时，视为当前 provider 内的模型切换
+        result = _switch(agent, settings, manager, settings.provider, arg)
+
+    # 手动优先接管：/model 切换成功即关闭 SmartRouter 并清除快照
+    if result.startswith("已切换:"):
+        _disable_smart_router(settings, manager)
+        return result + "\n→ SmartRouter 已自动关闭（手动 /model 优先）"
+    return result
+
+
+def _cmd_smart_router(
+    agent: ReActAgent, settings: Settings, manager: ConfigManager, arg: str
+) -> str:
+    """处理 /smartRouter on|off|status。default status。"""
+    parts = arg.split(maxsplit=1)
+    sub = parts[0].lower() if parts else "status"
+
+    if sub in ("on", "enable"):
+        if settings.smart_router_enabled:
+            return "SmartRouter 已开启。"
+        settings.smart_router_saved = (settings.provider, settings.model)
+        settings.smart_router_enabled = True
+        manager.set_smart_router_enabled(True)
+        return (
+            f"SmartRouter 已开启：每轮输入自动按档位选模型。"
+            f"（当前模型 {settings.provider}/{settings.model}，关闭时恢复）"
+        )
+
+    if sub in ("off", "disable"):
+        if not settings.smart_router_enabled:
+            return "SmartRouter 已关闭。"
+        settings.smart_router_enabled = False
+        manager.set_smart_router_enabled(False)
+        saved = settings.smart_router_saved
+        settings.smart_router_saved = None
+        if saved:
+            _switch(agent, settings, manager, saved[0], saved[1])
+        return "SmartRouter 已关闭，已恢复开启前的手动模型。"
+
+    if sub in ("reset", "clear"):
+        from xg.adaptive.store import reset_adaptive_data
+        from xg.adaptive.calibrate import recalibrate
+        from xg.adaptive.learned_rules import re_learn
+        from xg.router.postprocess import Hysteresis
+        from xg.router.ml_router import MLRouter
+
+        removed = reset_adaptive_data()
+        # 重建内存共享状态，使 reset 立即生效（不再用旧校准/规则）
+        agent._smart_calibration = recalibrate()
+        agent._smart_learned = re_learn()
+        agent._smart_hysteresis = Hysteresis()
+        from xg.router.semantic import load_semantic_encoder
+        agent._smart_ml = MLRouter(semantic=load_semantic_encoder())  # 与主循环一致
+        detail = "、".join(removed) if removed else "（本轮无可清除项）"
+        return (
+            f"已清除校准与自学习规则：{detail}。feedback.log 保留为历史；"
+            f"之后会按新的 feedback 重新学习。"
+        )
+
+    if sub == "status" or arg.strip() in ("status", ""):
+        lines = [f"SmartRouter: {'开启' if settings.smart_router_enabled else '关闭'}"]
+        cfg = manager.smart_router_config()
+        tiers = cfg.get("tiers") or {}
+        for idx, name in enumerate(TIER_NAMES):
+            target = resolve_tier(idx, settings.provider, settings.model, tiers, manager)
+            raw_entry = tiers.get(name)
+            if target.configured:
+                mark = "OK"
+            else:
+                mark = "(x)" if raw_entry else "-"
+            lines.append(f"  {name:<9}→ {target.provider}/{target.model}  {mark}")
+        lines.append("  (OK=显式配置可用  (x)=配置但校验失败  -=未配回落 active)")
+        # 校准状态（phase-03 步骤 C）：直接聚合 feedback.log 展示实时样本
+        from xg.adaptive.calibrate import aggregate
+        from xg.adaptive.feedback import read_feedback
+        from xg.adaptive.learned_rules import load_learned_rules, rule_hit_stats
+
+        records = read_feedback()
+        cal = aggregate(records)
+        parts = [f"{name}={cal.samples[i]:g}" for i, name in enumerate(TIER_NAMES)]
+        lines.append(f"  校准样本: {' '.join(parts)}（单档满 20 才生效）")
+        bias_parts = [
+            f"{name}={cal.bias[i]:+.2f}" for i, name in enumerate(TIER_NAMES)
+        ]
+        lines.append(f"  档位偏置: {' '.join(bias_parts)}  阈值调整 {cal.threshold_adjust:+.2f}")
+        # 自学习规则（phase-04 A1/A3）：规则数量与在 feedback.log 上的命中情况
+        rules = getattr(agent, "_smart_learned", load_learned_rules())
+        stats = rule_hit_stats(records, rules)
+        lines.append(
+            f"  自学习规则: {stats['rule_count']} 条，"
+            f"命中样本 {stats['hit_records']} / 可命中样本 {stats['sample_records']}"
+        )
+        for pr in stats["per_rule"]:
+            pred = "、".join(f"{k}{v:g}" for k, v in pr["predicate"].items())
+            lines.append(
+                f"    [{pred}] action={pr['action']:+d} conf={pr['confidence']:.2f} "
+                f"support={pr['support']:g} 命中{pr['hits']}次"
+            )
+        # ML 精判（phase-05 B2）：产物可用性观测；缺失/缺依赖时显示离线
+        ml = getattr(agent, "_smart_ml", None)
+        if ml is not None:
+            if ml.available:
+                n = ml.n_samples
+                suffix = f"，样本 {n}" if n is not None else ""
+                lines.append(f"  ML 精判: 可用{suffix}")
+            else:
+                lines.append("  ML 精判: 离线（未训练 / 未装依赖，回落规则路由）")
+            # 语义通道（phase-06 C3）：可用性/产物/耗时/有效样本 观测
+            sem = ml.semantic
+            if sem is not None:
+                if sem.available:
+                    lines.append(
+                        f"  语义通道: 可用（{sem.dim}维，已编码 {sem.calls} 次，"
+                        f"平均 {sem.avg_ms:.1f}ms/次，最近 {sem.last_ms:.1f}ms）"
+                    )
+                elif sem.artifact_exists:
+                    lines.append("  语义通道: 不可用（产物存在但加载失败 / 缺依赖，回落纯 TF-IDF）")
+                else:
+                    lines.append("  语义通道: 未安装（无产物，回落纯 TF-IDF 精判）")
+        return "\n".join(lines)
+
+    return "用法: /smartRouter on|off|status|reset"
+
+
+def _disable_smart_router(settings: Settings, manager: ConfigManager) -> None:
+    """手动 /model 切换后关闭 SmartRouter 并清除快照（手动优先）。"""
+    if not settings.smart_router_enabled:
+        return
+    settings.smart_router_enabled = False
+    settings.smart_router_saved = None
+    manager.set_smart_router_enabled(False)
+
+
+def _attach_model(
+    settings: Settings, manager: ConfigManager, agent: ReActAgent,
+    provider_name: str, model: str,
+) -> str | None:
+    """仅重建 agent.llm 与内存配置（provider/model/base），不写回持久化。
+
+    SmartRouter 路由用——避免把自动路由到的模型写进 active_provider/active_model。
+    返回错误消息；成功返回 None。
+    """
+    provider = manager.resolve_provider(provider_name)
+    if provider is None:
+        return f"未知 provider: {provider_name}"
+    key = manager.resolve_api_key(provider)
+    if not key:
+        return f"缺少 {provider.api_key_env} 配置，无法使用 {provider.name}。"
+    agent.llm = create_client(
+        manager.resolve_api_base(provider), key, model,
+        retry_enabled=settings.llm_retry_enabled,
+        max_retries=settings.llm_max_retries,
+        retry_base_delay=settings.llm_retry_base_delay,
+        retry_max_delay=settings.llm_retry_max_delay,
+        retry_jitter=settings.llm_retry_jitter,
+        retry_total_timeout=settings.llm_retry_total_timeout,
+        respect_retry_after=settings.llm_respect_retry_after,
+    )
+    settings.provider = provider.name
+    settings.model = model
+    settings.api_base = manager.resolve_api_base(provider)
+    settings.api_key = key
+    settings.context_window = manager.resolve_window(provider)
+    return None
+
+
+def _route_user_turn(
+    agent: ReActAgent, settings: Settings, manager: ConfigManager,
+    user_input: str, prev_tier: str | None, prev_ts: float | None,
+    feedback: FeedbackRecorder | None = None,
+    calibration=None,
+    learned_rules=None,
+    hysteresis=None,
+    ml_router=None,
+) -> tuple[str, float]:
+    """对一轮普通输入做路由并切换到目标模型（不持久化），打出行内日志。
+
+    返回 (final_tier, ts)，供下一轮作为防降级上下文。
+    传入 ``feedback`` 时采集 clarify / cmd_retry / short_high_tier 反馈（phase-03 步骤 B）。
+    传入 ``calibration`` 时在规则打分后应用档位偏置与置信门（phase-03 步骤 C）。
+    传入 ``learned_rules`` / ``hysteresis`` 分别启用局部规则微调与会话内迟滞
+    （phase-04 A1/A2，均由 /smartRouter reset 重建的共享状态提供）。
+    传入 ``ml_router``（phase-05 B2）时软规则决策参与 ML 精判，不可用/信心
+    不足静默回落规则档位。
+    """
+    tiers = (manager.smart_router_config().get("tiers") or {})
+    now = time.time()
+    result = route_turn(
+        user_input,
+        prev_tier=prev_tier, prev_ts=prev_ts, ts=now,
+        fallback_provider=settings.provider, fallback_model=settings.model,
+        tiers_config=tiers, manager=manager, calibration=calibration,
+        learned_rules=learned_rules, hysteresis=hysteresis, ml_router=ml_router,
+    )
+    if feedback is not None:
+        capture_turn_signals(
+            feedback, user_input, result.features, prev_tier, result.tier, TIER_NAMES,
+        )
+        feedback.flush()
+    if (result.provider, result.model) != (settings.provider, settings.model):
+        err = _attach_model(settings, manager, agent, result.provider, result.model)
+        if err:
+            console.print(Text(f"→ SmartRouter 路由失败: {err}", style="dim"))
+            return prev_tier or result.tier, now
+    console.print(
+        Text(
+            f"→ SmartRouter: {result.tier} → {result.provider}/{result.model}",
+            style="dim",
+        )
+    )
+    return result.tier, now
 
 
 def _model_catalog(manager: ConfigManager) -> str:

@@ -286,6 +286,19 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
         examples=("/hitl", "/hitl on", "/hitl reset"),
     ),
     SlashCommandSpec("/clear", usage="/clear", description="清空当前上下文", category="session", examples=("/clear",)),
+    SlashCommandSpec(
+        "/smartRouter",
+        usage="/smartRouter on|off|status|reset",
+        description="智能路由开关：每轮输入自动按档位选模型",
+        category="general",
+        subcommands=(
+            SlashSubcommandSpec("status", "/smartRouter status", "查看开关状态、四档模型配置、校准与自学习规则"),
+            SlashSubcommandSpec("on", "/smartRouter on", "开启智能路由"),
+            SlashSubcommandSpec("off", "/smartRouter off", "关闭并恢复开启前的手动模型"),
+            SlashSubcommandSpec("reset", "/smartRouter reset", "清空校准与自学习规则（feedback.log 保留）"),
+        ),
+        examples=("/smartRouter", "/smartRouter on", "/smartRouter status", "/smartRouter reset"),
+    ),
     SlashCommandSpec("/cancel", aliases=("/c",), usage="/cancel", description="取消当前任务", category="control", examples=("/cancel",)),
     SlashCommandSpec("/exit", aliases=("/quit",), usage="/exit", description="退出程序", category="control", examples=("/exit",)),
 )

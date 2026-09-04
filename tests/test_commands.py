@@ -253,6 +253,175 @@ class TestOtherCommands:
         assert len(agent.messages) == 1
 
 
+class TestSmartRouterCommand:
+    """phase-01 子步骤 C：/smartRouter 命令 + 手动 /model 优先接管。"""
+
+    def test_status_when_off_by_default(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/smartRouter")
+        assert "SmartRouter: 关闭" in output
+        assert "Basic" in output and "Ultimate" in output
+
+    def test_on_saves_snapshot_and_persists(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/smartRouter on")
+        assert "已开启" in output
+        assert settings.smart_router_enabled is True
+        assert settings.smart_router_saved == ("openai", "gpt-4o-mini")
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert cfg["smart_router"]["enabled"] is True
+
+    def test_on_again_is_idempotent(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        run_cmd(agent, settings, manager, "/smartRouter on")
+        output = run_cmd(agent, settings, manager, "/smartRouter on")
+        assert "已开启" in output  # 幂等提示
+        assert settings.smart_router_saved == ("openai", "gpt-4o-mini")  # 快照未被覆盖
+
+    def test_off_restores_saved_model(self, tmp_path):
+        agent, settings, manager = make_context(
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
+        )
+        # 先切到 deepseek，再开启 smartRouter（快照为 deepseek/deepseek-chat）
+        run_cmd(agent, settings, manager, "/model deepseek")
+        run_cmd(agent, settings, manager, "/smartRouter on")
+        assert settings.provider == "deepseek"
+        # 手动用 /model 再切到 glm（不应走 smartRouter 关闭还原逻辑，这里直接用 off 验证恢复快照）
+        run_cmd(agent, settings, manager, "/smartRouter off")
+        assert settings.smart_router_enabled is False
+        # 快照恢复：回到开启前的 deepseek
+        assert settings.provider == "deepseek"
+        assert settings.model == "deepseek-chat"
+        assert settings.smart_router_saved is None
+
+    def test_off_when_already_off(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/smartRouter off")
+        assert "已关闭" in output
+        assert settings.smart_router_enabled is False
+
+    def test_status_shows_configured_and_fallback(self, tmp_path):
+        # 配置 Basic 用 deepseek（配了 key），Ultimate 用 glm（无 key → 校验失败回落 openai）
+        user_cfg = tmp_path / "user_xg" / "config.json"
+        user_cfg.parent.mkdir(exist_ok=True)
+        user_cfg.write_text(
+            json.dumps(
+                {
+                    "smart_router": {
+                        "tiers": {
+                            "Basic": {"provider": "deepseek", "model": "deepseek-chat"},
+                            "Ultimate": {"provider": "glm", "model": "glm-4-plus"},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        agent, settings, manager = make_context(
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
+        )
+        output = run_cmd(agent, settings, manager, "/smartRouter status")
+        assert "Basic    → deepseek/deepseek-chat  OK" in output
+        # Ultimate 配置了 glm 但无 key → 回落 openai/gpt-4o-mini 并标 (x)
+        assert "Ultimate → openai/gpt-4o-mini  (x)" in output
+
+    def test_manual_model_switch_disables_smart_router(self, tmp_path):
+        """手动 /model 优先：切换成功自动关闭 SmartRouter 并清除快照。"""
+        agent, settings, manager = make_context(
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
+        )
+        run_cmd(agent, settings, manager, "/smartRouter on")
+        assert settings.smart_router_enabled is True
+
+        output = run_cmd(agent, settings, manager, "/model deepseek")
+        assert "已切换: DeepSeek" in output
+        assert "SmartRouter 已自动关闭" in output
+        assert settings.smart_router_enabled is False
+        assert settings.smart_router_saved is None
+        # 持久化同步关闭
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert cfg["smart_router"]["enabled"] is False
+
+    def test_failed_switch_keeps_smart_router(self, tmp_path):
+        """/model 切换失败（缺 key）不应关闭 SmartRouter。"""
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        run_cmd(agent, settings, manager, "/smartRouter on")
+        output = run_cmd(agent, settings, manager, "/model deepseek")  # 无 deepseek key
+        assert "缺少 XG_DEEPSEEK_API_KEY" in output
+        assert settings.smart_router_enabled is True  # 保持开启
+
+
+class TestSmartRouterRouting:
+    """phase-01 子步骤 D：主循环路由挂点 + 不持久化换模型。"""
+
+    def test_route_switches_model_and_does_not_persist(self, tmp_path):
+        from xg.cli.app import _route_user_turn
+
+        user_cfg = tmp_path / "user_xg" / "config.json"
+        user_cfg.parent.mkdir(exist_ok=True)
+        user_cfg.write_text(
+            json.dumps(
+                {
+                    "smart_router": {
+                        "enabled": True,
+                        "tiers": {
+                            "Superior": {"provider": "deepseek", "model": "deepseek-chat"},
+                            "Ultimate": {"provider": "glm", "model": "glm-4-plus"},
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        agent, settings, manager = make_context(
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_GLM_API_KEY": "gk"}
+        )
+        # 输入命中架构+风险 → Ultimate，配置用 glm → 应切到 glm/glm-4-plus
+        tier, ts = _route_user_turn(
+            agent, settings, manager, "设计日活千万的推荐系统架构并给出部署回滚方案",
+            prev_tier=None, prev_ts=None,
+        )
+        assert tier == "Ultimate"
+        assert settings.provider == "glm"
+        assert settings.model == "glm-4-plus"
+        assert agent.llm.model == "glm-4-plus"  # type: ignore[attr-defined]
+        # 关键：不写回持久化 active_provider/active_model
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert "active_provider" not in cfg
+
+    def test_route_same_model_keeps_client(self, tmp_path):
+        from xg.cli.app import _route_user_turn
+
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        orig_llm = agent.llm
+        tier, _ = _route_user_turn(agent, settings, manager, "你好", None, None)
+        assert tier == "Basic"
+        # fallback 与当前相同 → 不重建客户端
+        assert agent.llm is orig_llm
+        assert settings.provider == "openai"
+
+    def test_route_unknown_provider_falls_back_on_error(self, tmp_path):
+        from xg.cli.app import _route_user_turn
+
+        user_cfg = tmp_path / "user_xg" / "config.json"
+        user_cfg.parent.mkdir(exist_ok=True)
+        user_cfg.write_text(
+            json.dumps(
+                {
+                    "smart_router": {"tiers": {"Ultimate": {"provider": "nope", "model": "x"}}}
+                }
+            ),
+            encoding="utf-8",
+        )
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        tier, _ = _route_user_turn(
+            agent, settings, manager, "设计日活千万的推荐系统架构并给出部署回滚方案", None, None
+        )
+        # Ultimate 配置了 nope（无 key）→ 回落 active openai，路由仍给出 Ultiimate，客户端不换
+        assert settings.provider == "openai"
+        assert isinstance(agent.llm, DummyClient)
+
+
 def test_slash_command_catalog_is_stable_and_prefix_filtered():
     assert [spec.name for spec in filter_slash_commands("/")][:5] == [
         "/plan", "/team", "/model", "/config", "/mcp"

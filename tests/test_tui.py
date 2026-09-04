@@ -19,8 +19,15 @@ from xg.safety.hitl import HITLPolicy
 from xg.tool.builtin import build_registry
 from xg.tui.app import XgTuiApp
 from xg.tui.controller import SessionController
+from xg.tui.widgets.header import HeaderBar, _routing_row, _tier_segment
 from xg.tui.reducer import reduce_agent_event
-from xg.tui.state import TuiState, TranscriptItem
+from xg.tui.reducer import set_smart_router_snapshot
+from xg.tui.state import (
+    SmartRouterSnapshot,
+    SmartRouterTierSnapshot,
+    TuiState,
+    TranscriptItem,
+)
 from xg.tui.state import ApprovalRequest
 from xg.tui.widgets.approval_modal import ApprovalModal
 from xg.tui.widgets.collapsible_card import CollapsibleCard
@@ -101,6 +108,283 @@ def make_context(tmp_path: Path):
     settings = Settings(provider="test", model="test-model", api_base="https://example.test", context_window=128_000)
     agent = ReActAgent(DummyClient(), build_registry(base_dir=project), settings)
     return agent, settings, manager
+
+
+def _tier(tier: str, provider: str, model: str, *, is_active: bool = False, configured: bool = True) -> SmartRouterTierSnapshot:
+    return SmartRouterTierSnapshot(
+        tier=tier, provider=provider, model=model, is_active=is_active, configured=configured
+    )
+
+
+def test_smart_router_snapshot_defaults_do_not_change_state():
+    """phase-02 步骤 A：默认快照不改变现有状态（UI 无变化）。"""
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    assert state.inspector.smart_router.enabled is False
+    assert state.inspector.smart_router.tiers == ()
+    assert state.inspector.smart_router.active_tier == ""
+    assert state.inspector.smart_router.confidence is None
+
+
+def test_smart_router_snapshot_replaces_state():
+    snapshot = SmartRouterSnapshot(
+        enabled=True,
+        tiers=(
+            _tier("Basic", "openai", "gpt-4o-mini"),
+            _tier("Enhanced", "deepseek", "deepseek-chat", is_active=True),
+            _tier("Superior", "deepseek", "deepseek-chat", configured=False),
+            _tier("Ultimate", "glm", "glm-4-plus"),
+        ),
+        active_tier="Enhanced",
+    )
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    state = set_smart_router_snapshot(state, snapshot)
+    assert state.inspector.smart_router.enabled is True
+    assert state.inspector.smart_router.active_tier == "Enhanced"
+    assert [t.tier for t in state.inspector.smart_router.tiers] == [
+        "Basic", "Enhanced", "Superior", "Ultimate",
+    ]
+    assert [t.is_active for t in state.inspector.smart_router.tiers] == [
+        False, True, False, False,
+    ]
+
+
+def test_smart_router_snapshot_does_not_touch_transcript_or_phase():
+    """替换 snapshot 是纯数据层操作：不产生 transcript 项、不改 phase。"""
+    snapshot = SmartRouterSnapshot(enabled=True, active_tier="Basic", tiers=(_tier("Basic", "openai", "gpt-4o-mini", is_active=True),))
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    before_len = len(state.transcript)
+    state = set_smart_router_snapshot(state, snapshot)
+    assert len(state.transcript) == before_len
+    assert state.phase == "running"
+    # 原状态对象不被就地修改（替换式更新）
+    old = TuiState(active_turn_id="turn-1", phase="running")
+    set_smart_router_snapshot(old, snapshot)
+    assert old.inspector.smart_router.enabled is False
+
+
+def test_smart_router_snapshot_survives_agent_event_reduction():
+    """快照写入后，后续 Agent 事件归约不丢失 smart_router（_copy 深替换链）。"""
+    snapshot = SmartRouterSnapshot(enabled=True, active_tier="Ultimate", tiers=(_tier("Ultimate", "glm", "glm-4-plus", is_active=True),))
+    state = TuiState(active_turn_id="turn-1", phase="running")
+    state = set_smart_router_snapshot(state, snapshot)
+    state = reduce_agent_event(state, AgentEvent(kind="content", text="hi"), "turn-1")
+    assert state.inspector.smart_router.enabled is True
+    assert state.inspector.smart_router.active_tier == "Ultimate"
+    # off 快照替换后回到默认
+    state = set_smart_router_snapshot(state, SmartRouterSnapshot())
+    assert state.inspector.smart_router.enabled is False
+    assert state.inspector.smart_router.tiers == ()
+
+
+def test_header_off_state_has_no_routing_row():
+    """phase-02 步骤 B：off 态 Header 不含路由行（与改动前输出一致）。"""
+    state = TuiState(phase="idle")
+    header = HeaderBar(id="hdr")
+    # 直接调用内部渲染逻辑：模拟 update_state 后的 Text 内容
+    header.update_state(state)
+    rendered = header.render()
+    assert "Basic" not in str(rendered)
+    assert "Enhanced" not in str(rendered)
+    assert "Superior" not in str(rendered)
+    assert "Ultimate" not in str(rendered)
+
+
+def test_header_on_state_renders_routing_row_with_highlight():
+    """on 态渲染四档行：当前档高亮标记、未配置档 (x)。"""
+    snapshot = SmartRouterSnapshot(
+        enabled=True,
+        active_tier="Enhanced",
+        tiers=(
+            _tier("Basic", "openai", "gpt-4o-mini"),
+            _tier("Enhanced", "deepseek", "deepseek-chat", is_active=True),
+            _tier("Superior", "deepseek", "deepseek-chat", configured=False),
+            _tier("Ultimate", "glm", "glm-4-plus"),
+        ),
+    )
+    state = set_smart_router_snapshot(TuiState(phase="idle"), snapshot)
+    header = HeaderBar(id="hdr")
+    header.update_state(state)
+    rendered = str(header.render())
+    assert "Basic: gpt-4o-mini" in rendered
+    assert "Enhanced: deepseek-chat" in rendered
+    assert "Superior: deepseek-chat (x)" in rendered
+    assert "Ultimate: glm-4-plus" in rendered
+
+
+def test_routing_row_highlight_styles():
+    """高亮规则单元断言：当前档 bold reverse、其余 dim、未配置 (x)。"""
+    active = _tier_segment(_tier("Enhanced", "deepseek", "deepseek-chat", is_active=True))
+    assert active.plain == "Enhanced: deepseek-chat"
+    assert "bold" in active.style and "reverse" in active.style
+
+    inactive = _tier_segment(_tier("Basic", "openai", "gpt-4o-mini"))
+    assert "dim" in inactive.style
+    assert "bold" not in inactive.style
+
+    unconfigured = _tier_segment(_tier("Superior", "deepseek", "deepseek-chat", configured=False))
+    assert unconfigured.plain.endswith(" (x)")
+    assert "dim" in unconfigured.style
+
+    # 组装行为：档间两个空格分隔，首档无前导空格
+    row = _routing_row(
+        SmartRouterSnapshot(
+            enabled=True,
+            active_tier="Basic",
+            tiers=(
+                _tier("Basic", "openai", "gpt-4o-mini", is_active=True),
+                _tier("Ultimate", "glm", "glm-4-plus"),
+            ),
+        )
+    )
+    assert row.plain == "Basic: gpt-4o-mini  Ultimate: glm-4-plus"
+
+
+def _patch_controller_routing(monkeypatch):
+    """把 controller 的路由与模型切换替换为离线假实现，避免真实网络。"""
+    from xg.router import RouteResult, TIER_NAMES, TierTarget
+
+    def fake_resolve(idx, fallback_provider="", fallback_model="", tiers_config=None, manager=None):
+        return TierTarget(tier=TIER_NAMES[idx], provider="test", model=f"model-{idx}", configured=True)
+
+    def fake_route(text, **kwargs):
+        tier_idx = 0 if "你好" in text else 3
+        target = fake_resolve(tier_idx)
+        return RouteResult(
+            tier=target.tier, tier_idx=tier_idx, provider=target.provider, model=target.model,
+            configured=True, confidence=0.9, score=1.0, hard_rule=False,
+        )
+
+    def fake_attach(settings, manager, agent, provider_name, model):
+        settings.provider = provider_name
+        settings.model = model
+        return None
+
+    monkeypatch.setattr("xg.tui.controller.resolve_tier", fake_resolve)
+    monkeypatch.setattr("xg.tui.controller.route_turn", fake_route)
+    monkeypatch.setattr("xg.cli.app._attach_model", fake_attach)
+
+
+@pytest.mark.asyncio
+async def test_controller_no_routing_or_snapshot_when_disabled(tmp_path):
+    """phase-02 步骤 C：开关关闭时普通轮不路由、快照保持空。"""
+    agent, settings, manager = make_context(tmp_path)
+    controller = SessionController(agent, settings, manager)
+    assert await asyncio.wait_for(controller.submit("你好"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is False
+    assert snap.tiers == ()
+    assert snap.active_tier == ""
+
+
+@pytest.mark.asyncio
+async def test_controller_routes_and_updates_snapshot(tmp_path, monkeypatch):
+    """开启后每轮路由：切模型、高亮迁移到当前档、Header 主行同步。"""
+    _patch_controller_routing(monkeypatch)
+    agent, settings, manager = make_context(tmp_path)
+    settings.smart_router_enabled = True
+    controller = SessionController(agent, settings, manager)
+
+    # 构造时即同步四档快照（enabled 态）
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is True
+    assert [t.tier for t in snap.tiers] == ["Basic", "Enhanced", "Superior", "Ultimate"]
+    assert not any(t.is_active for t in snap.tiers)
+
+    # 第一轮：Basic 输入
+    assert await asyncio.wait_for(controller.submit("你好"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.active_tier == "Basic"
+    assert [t.is_active for t in snap.tiers] == [True, False, False, False]
+    assert settings.model == "model-0"
+    assert controller.state.inspector.model == "model-0"  # Header 主行同步
+
+    # 第二轮：Ultimate 输入，高亮迁移
+    assert await asyncio.wait_for(controller.submit("设计复杂架构"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.active_tier == "Ultimate"
+    assert [t.is_active for t in snap.tiers] == [False, False, False, True]
+    assert settings.model == "model-3"
+
+
+@pytest.mark.asyncio
+async def test_controller_command_toggle_updates_snapshot(tmp_path, monkeypatch):
+    """命令切换开关：on 建快照，off 清空快照（Header 回到单行渲染）。"""
+    _patch_controller_routing(monkeypatch)
+    agent, settings, manager = make_context(tmp_path)
+    controller = SessionController(agent, settings, manager)
+    assert controller.state.inspector.smart_router.enabled is False
+
+    assert await asyncio.wait_for(controller.submit("/smartRouter on"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is True
+    assert len(snap.tiers) == 4
+
+    assert await asyncio.wait_for(controller.submit("/smartRouter off"), 1) is True
+    snap = controller.state.inspector.smart_router
+    assert snap.enabled is False
+    assert snap.tiers == ()
+    assert snap.active_tier == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_smart_router_header_highlight_follows_route(tmp_path):
+    """phase-02 步骤 D：pilot 集成测试。
+
+    真实规则路由（纯函数，不联网）：on 后四档行出现，Basic/Ultimate 输入交替
+    高亮随之迁移，off 后路由行消失恢复单行渲染。
+    """
+    agent, settings, manager = make_context(tmp_path)
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(120, 30)) as pilot:
+        header = app.query_one("#header", HeaderBar)
+        # 默认 off：Header 无路由行
+        assert "Basic:" not in header.render().plain
+
+        assert await asyncio.wait_for(app.controller.submit("/smartRouter on"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.enabled is True
+        assert len(snap.tiers) == 4
+        assert "Basic:" in header.render().plain
+
+        # Basic 输入 → 高亮 Basic
+        assert await asyncio.wait_for(app.controller.submit("你好"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.active_tier == "Basic"
+        assert [t.is_active for t in snap.tiers] == [True, False, False, False]
+
+        # Ultimate 输入 → 高亮迁移到 Ultimate
+        assert await asyncio.wait_for(app.controller.submit("设计日活千万的推荐系统架构"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.active_tier == "Ultimate"
+        assert [t.is_active for t in snap.tiers] == [False, False, False, True]
+
+        # off：路由行消失，恢复单行
+        assert await asyncio.wait_for(app.controller.submit("/smartRouter off"), 1) is True
+        await pilot.pause(0.1)
+        snap = app.controller.state.inspector.smart_router
+        assert snap.enabled is False
+        assert snap.tiers == ()
+        assert "Basic:" not in header.render().plain
+
+
+@pytest.mark.asyncio
+async def test_tui_smart_router_header_narrow_width_does_not_crash(tmp_path):
+    """phase-02 步骤 D：窄终端下 on 态路由行由 Static 自然折行，不崩溃、不挤压布局。"""
+    agent, settings, manager = make_context(tmp_path)
+    settings.smart_router_enabled = True
+    app = XgTuiApp(agent, settings, manager)
+    async with app.run_test(size=(60, 18)) as pilot:
+        header = app.query_one("#header", HeaderBar)
+        # on 态构造即同步快照，窄宽下应正常渲染出路由行文本
+        await pilot.pause(0.1)
+        assert "Basic:" in header.render().plain
+        # 提交一轮输入，路由/渲染全流程在窄宽下不抛异常
+        assert await asyncio.wait_for(app.controller.submit("你好"), 1) is True
+        await pilot.pause()
+        assert app.controller.state.inspector.smart_router.active_tier == "Basic"
 
 
 def test_reducer_merges_streaming_content_and_ignores_stale_turn():

@@ -1,0 +1,32 @@
+{"text": "你好", "tier": "Basic"}
+{"text": "早上好呀", "tier": "Basic"}
+{"text": "今天天气怎么样", "tier": "Basic"}
+{"text": "谢谢你了", "tier": "Basic"}
+{"text": "在吗？随便聊聊", "tier": "Basic"}
+{"text": "哈哈哈太好笑了", "tier": "Basic"}
+{"text": "周末吃点什么好", "tier": "Basic"}
+{"text": "给我讲个冷笑话", "tier": "Basic"}
+{"text": "写个函数把两个数相加", "tier": "Enhanced"}
+{"text": "把列表倒序排列一下", "tier": "Enhanced"}
+{"text": "怎么写一个简单的 for 循环", "tier": "Enhanced"}
+{"text": "把这句话翻译成英文", "tier": "Enhanced"}
+{"text": "Python 里字符串怎么替换", "tier": "Enhanced"}
+{"text": "帮我定义一个简单的类", "tier": "Enhanced"}
+{"text": "两个列表怎么合并去重", "tier": "Enhanced"}
+{"text": "写个正则匹配邮箱", "tier": "Enhanced"}
+{"text": "这个函数的性能要怎么优化", "tier": "Superior"}
+{"text": "帮我检查这段代码为什么一直报错", "tier": "Superior"}
+{"text": "怎么给这个模块补上单元测试", "tier": "Superior"}
+{"text": "把这几个重复的逻辑块重构一下", "tier": "Superior"}
+{"text": "解释一下这条复杂的正则表达式", "tier": "Superior"}
+{"text": "给这个小项目设计一个简单的缓存方案", "tier": "Superior"}
+{"text": "这个并发问题要怎么定位和排查", "tier": "Superior"}
+{"text": "这段代码的复杂度能不能再降一降", "tier": "Superior"}
+{"text": "设计生产环境分布式部署的整体架构", "tier": "Ultimate"}
+{"text": "规划微服务拆分与边界划分方案", "tier": "Ultimate"}
+{"text": "如何设计高可用、可扩展的消息队列", "tier": "Ultimate"}
+{"text": "制定大型业务库的分库分表与迁移方案", "tier": "Ultimate"}
+{"text": "设计一套多租户隔离与权限体系", "tier": "Ultimate"}
+{"text": "规划 K8s 集群的弹性扩容与容灾策略", "tier": "Ultimate"}
+{"text": "设计跨地域数据同步与最终一致性方案", "tier": "Ultimate"}
+{"text": "规划大促活动的容量评估与降级预案", "tier": "Ultimate"}

@@ -19,6 +19,9 @@ from xg.config.providers import Provider, ProviderRegistry
 USER_CONFIG = "config.json"
 DEFAULT_CONTEXT_WINDOW = 128_000
 
+# SmartRouter 档位固定名称（顺序即惯例展示顺序）
+_SMART_ROUTER_TIERS = ("Basic", "Enhanced", "Superior", "Ultimate")
+
 
 @dataclass
 class ActiveConfig:
@@ -258,6 +261,66 @@ class ConfigManager:
         if isinstance(node, (str, int, float, bool)):
             return str(node)
         return json.dumps(node, ensure_ascii=False)
+
+    # ---------- SmartRouter ----------
+
+    def smart_router_config(self) -> dict[str, Any]:
+        """读取合并配置中的 smart_router 节（用户级 < 项目级深合并）。
+
+        返回结构（缺省时）：
+            {"enabled": False, "tiers": {}}
+        tiers 中每个档位（Basic/Enhanced/Superior/Ultimate）形如：
+            {"provider": "deepseek", "model": "deepseek-chat"}
+        校验规则：非法结构/非法档位名/非法 provider-model 类型一律丢弃该条目，
+        绝不抛错（配置损坏时静默回退默认行为）。
+        """
+        merged = self._merged_config()
+        raw = merged.get("smart_router") or {}
+        if not isinstance(raw, dict):
+            return {"enabled": False, "tiers": {}}
+
+        enabled_raw = raw.get("enabled", False)
+        enabled = enabled_raw if isinstance(enabled_raw, bool) else str(enabled_raw).lower() in ("on", "1", "true")
+
+        tiers_raw = raw.get("tiers") or {}
+        tiers: dict[str, dict[str, str]] = {}
+        if isinstance(tiers_raw, dict):
+            for tier_name, tier_cfg in tiers_raw.items():
+                if not isinstance(tier_cfg, dict):
+                    continue
+                entry: dict[str, str] = {}
+                for key in ("provider", "model"):
+                    value = tier_cfg.get(key)
+                    if isinstance(value, str) and value.strip():
+                        entry[key] = value.strip()
+                if entry:
+                    tiers[str(tier_name)] = entry
+
+        # 环境变量 / .env 逐档逐键覆盖（优先级高于 config.json，最低层定义见模块 docstring）
+        # 键形如：XG_SMART_ROUTER_BASIC_PROVIDER / XG_SMART_ROUTER_BASIC_MODEL
+        for tier_name in _SMART_ROUTER_TIERS:
+            env_entry: dict[str, str] = {}
+            for field in ("provider", "model"):
+                var = f"XG_SMART_ROUTER_{tier_name.upper()}_{field.upper()}"
+                value = self.env.get(var, "")
+                if isinstance(value, str) and value.strip():
+                    env_entry[field] = value.strip()
+            if env_entry:
+                merged_entry = dict(tiers.get(tier_name) or {})
+                merged_entry.update(env_entry)
+                tiers[tier_name] = merged_entry
+
+        return {"enabled": enabled, "tiers": tiers}
+
+    def set_smart_router_enabled(self, enabled: bool) -> None:
+        """持久化开关位到用户级配置（/smartRouter on|off 时调用）。"""
+        user = self._read_config(self.user_config_path)
+        node = user.get("smart_router")
+        if not isinstance(node, dict):
+            node = {}
+        node["enabled"] = bool(enabled)
+        user["smart_router"] = node
+        self._write_config(self.user_config_path, user)
 
     # ---------- UI 偏好 ----------
 

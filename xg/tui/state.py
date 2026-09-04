@@ -155,6 +155,31 @@ class SafetyInspectorSnapshot:
     last_rejection: str = ""
 
 
+@dataclass(frozen=True)
+class SmartRouterTierSnapshot:
+    """One tier entry rendered on the Header routing row."""
+
+    tier: str
+    provider: str
+    model: str
+    is_active: bool = False
+    configured: bool = False
+
+
+@dataclass(frozen=True)
+class SmartRouterSnapshot:
+    """SmartRouter routing state consumed by HeaderBar (phase-02).
+
+    Off 态 Header 渲染不读取该快照，因此默认值不影响既有渲染路径。
+    """
+
+    enabled: bool = False
+    tiers: tuple[SmartRouterTierSnapshot, ...] = ()
+    active_tier: str = ""
+    # 第 3 期校准后的置信度展示位，本期恒为 None。
+    confidence: float | None = None
+
+
 @dataclass
 class InspectorState:
     active_view: InspectorView = "session"
@@ -162,6 +187,7 @@ class InspectorState:
     plan: PlanInspectorSnapshot = field(default_factory=PlanInspectorSnapshot)
     memory: MemoryInspectorSnapshot = field(default_factory=MemoryInspectorSnapshot)
     safety: SafetyInspectorSnapshot = field(default_factory=SafetyInspectorSnapshot)
+    smart_router: SmartRouterSnapshot = field(default_factory=SmartRouterSnapshot)
     provider: str = ""
     model: str = ""
     usage: UsageSnapshot = field(default_factory=UsageSnapshot)
