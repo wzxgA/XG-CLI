@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from xg.config.manager import ConfigManager
+from xg.config.manager import ConfigManager, ProviderNotConfigured
 from xg.config.skills import SkillConfigManager
 from xg.tui.i18n import UiLanguage, normalize_language
 
@@ -120,6 +120,8 @@ class Settings:
     smart_router_enabled: bool = False
     # 开启前的手动模型快照 (provider, model)，/smartRouter off 时恢复；未开启时为 None。
     smart_router_saved: tuple[str, str] | None = None
+    # base provider 未配置时置 True（active() 触发 ProviderNotConfigured），供启动提示。
+    provider_missing: bool = False
 
     @property
     def token_budget(self) -> int:
@@ -137,18 +139,24 @@ class Settings:
 def load_settings(manager: ConfigManager | None = None) -> Settings:
     """加载配置并产出运行时快照。"""
     manager = manager or ConfigManager()
-    active = manager.active()
+    try:
+        active = manager.active()
+        provider_missing = False
+    except ProviderNotConfigured:
+        active = None
+        provider_missing = True
     skill_config = SkillConfigManager(
         user_dir=manager.user_dir,
         project_root=manager.project_dir.parent,
         env=manager.env,
     ).load()
     return Settings(
-        provider=active.provider_name,
-        api_base=active.api_base,
-        api_key=active.api_key,
-        model=active.model,
-        context_window=active.context_window,
+        provider=active.provider_name if active else "",
+        api_base=active.api_base if active else "",
+        api_key=active.api_key if active else "",
+        model=active.model if active else "",
+        context_window=active.context_window if active else 128_000,
+        provider_missing=provider_missing,
         tool_steps=_get_int(manager.env, "XG_TOOL_STEPS", 20),
         llm_retry_enabled=manager.env.get("XG_LLM_RETRY_ENABLED", "on").lower() not in ("off", "0", "false"),
         llm_max_retries=max(0, _get_int(manager.env, "XG_LLM_MAX_RETRIES", 2)),

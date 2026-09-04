@@ -13,6 +13,8 @@ from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.tool.builtin import build_registry
 
+from tests.conftest import seed_config
+
 BASE_A = "https://api.openai.com/v1"
 BASE_B = "https://api.deepseek.com/v1"
 
@@ -51,6 +53,10 @@ def make_manager(tmp_path, env: dict) -> ConfigManager:
     project_dir = tmp_path / "proj_xg"
     user_dir.mkdir(exist_ok=True)
     project_dir.mkdir(exist_ok=True)
+    # 注入默认自定义 providers（openai/deepseek/glm/kimi），保证 /model 可解析。
+    cfg_path = user_dir / "config.json"
+    if not cfg_path.exists():
+        cfg_path.write_text(json.dumps(seed_config({})), encoding="utf-8")
     return ConfigManager(user_dir=user_dir, project_dir=project_dir, env=dict(env), load_env=False)
 
 

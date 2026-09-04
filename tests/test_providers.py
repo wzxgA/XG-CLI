@@ -1,31 +1,17 @@
-"""Provider 注册表单元测试。"""
+"""Provider 注册表单元测试。
+
+provider 无内置预设，全部由用户自定义。
+"""
 
 from __future__ import annotations
 
-from xg.config.providers import BUILTIN_PROVIDERS, Provider, ProviderRegistry
-
-
-class TestBuiltin:
-    def test_four_builtin_providers(self):
-        assert {p.name for p in BUILTIN_PROVIDERS} == {"openai", "deepseek", "glm", "kimi"}
-
-    def test_required_fields_present(self):
-        for p in BUILTIN_PROVIDERS:
-            assert p.api_base
-            assert p.api_key_env
-            assert p.default_model
-            assert p.context_window > 0
-
-    def test_capability_flags(self):
-        openai = next(p for p in BUILTIN_PROVIDERS if p.name == "openai")
-        deepseek = next(p for p in BUILTIN_PROVIDERS if p.name == "deepseek")
-        assert openai.supports_cache and openai.supports_vision
-        assert not deepseek.supports_cache and not deepseek.supports_vision
+from xg.config.providers import Provider, ProviderRegistry
 
 
 class TestRegistry:
-    def test_get_known(self):
-        assert ProviderRegistry().get("deepseek").default_model == "deepseek-chat"
+    def test_empty_by_default(self):
+        """注册表初始为空——不再内置 openai/deepseek/glm/kimi。"""
+        assert ProviderRegistry().all() == []
 
     def test_get_unknown_returns_none(self):
         assert ProviderRegistry().get("nope") is None
@@ -37,3 +23,14 @@ class TestRegistry:
         )
         assert "custom" in registry.names()
         assert registry.get("custom").api_base == "https://x/v1"
+
+    def test_create_from_seed_list(self):
+        p = Provider("local", "Local", "http://localhost:8080/v1", "XG_LOCAL_API_KEY", "m", 8192)
+        registry = ProviderRegistry([p])
+        assert registry.get("local").display_name == "Local"
+
+    def test_register_overwrites(self):
+        registry = ProviderRegistry()
+        registry.register(Provider("a", "A", "u", "k", "m", 1))
+        registry.register(Provider("a", "A2", "u", "k", "m", 1))
+        assert registry.get("a").display_name == "A2"

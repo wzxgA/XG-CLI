@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from xg.config.manager import ConfigManager, mask_key
+from xg.config.manager import ConfigManager, ProviderNotConfigured, mask_key
 from xg.config.settings import load_settings
+
+from tests.conftest import seed_config
 
 
 def make_manager(
@@ -21,10 +23,18 @@ def make_manager(
     project_dir = tmp_path / "proj_xg"
     user_dir.mkdir(exist_ok=True)
     project_dir.mkdir(exist_ok=True)
-    if user_cfg is not None:
-        (user_dir / "config.json").write_text(json.dumps(user_cfg), encoding="utf-8")
+    # 用户配置：仅在显式提供 user_cfg 或该文件尚未存在时写入（注入默认自定义 providers）。
+    # 已存在时（如 set_active/set_config_value 持久化后重载）保留文件原状，避免冲掉测试改动。
+    cfg_path = user_dir / "config.json"
+    if user_cfg is not None or not cfg_path.exists():
+        cfg_path.write_text(
+            json.dumps(seed_config(user_cfg if user_cfg is not None else {})),
+            encoding="utf-8",
+        )
     if project_cfg is not None:
-        (project_dir / "config.json").write_text(json.dumps(project_cfg), encoding="utf-8")
+        (project_dir / "config.json").write_text(
+            json.dumps(seed_config(project_cfg)), encoding="utf-8"
+        )
     return ConfigManager(
         user_dir=user_dir,
         project_dir=project_dir,
@@ -33,25 +43,33 @@ def make_manager(
     )
 
 
-class TestLegacyEnv:
-    def test_implicit_openai_provider(self, tmp_path):
+class TestBaseProvider:
+    def test_missing_provider_fails_fast(self, tmp_path):
+        """未配置 XG_PROVIDER / active_provider 时不再隐式用 openai，而是抛错提示。"""
         manager = make_manager(
             tmp_path,
-            env={"XG_API_BASE": "https://legacy.test/v1", "XG_OPENAI_API_KEY": "k-123", "XG_MODEL": "old-model"},
+            env={"XG_API_BASE": "https://legacy.test/v1", "XG_OPENAI_API_KEY": "k-123"},
+        )
+        with pytest.raises(ProviderNotConfigured):
+            manager.active()
+
+    def test_empty_env_requires_explicit_provider(self, tmp_path):
+        manager = make_manager(tmp_path, env={})
+        with pytest.raises(ProviderNotConfigured):
+            manager.active()
+
+    def test_explicit_base_provider_uses_legacy_base_for_openai(self, tmp_path):
+        """显式 XG_PROVIDER=openai 时，旧 XG_API_BASE 兼容兜底仍生效。"""
+        manager = make_manager(
+            tmp_path,
+            env={"XG_PROVIDER": "openai", "XG_API_BASE": "https://legacy.test/v1",
+                 "XG_OPENAI_API_KEY": "k-123", "XG_MODEL": "old-model"},
         )
         active = manager.active()
         assert active.provider_name == "openai"
         assert active.api_base == "https://legacy.test/v1"
         assert active.api_key == "k-123"
         assert active.model == "old-model"
-
-    def test_empty_env_falls_back_to_defaults(self, tmp_path):
-        manager = make_manager(tmp_path, env={})
-        active = manager.active()
-        assert active.provider_name == "openai"
-        assert active.api_key == ""
-        assert active.model == "gpt-4o-mini"
-        assert active.api_base == "https://api.openai.com/v1"
 
 
 class TestProviderKeyEnv:
@@ -77,7 +95,7 @@ class TestProviderKeyEnv:
         assert manager.active().api_key == ""
 
     def test_openai_requires_specific_key(self, tmp_path):
-        manager = make_manager(tmp_path, env={"XG_API_KEY": "legacy-key"})
+        manager = make_manager(tmp_path, env={"XG_PROVIDER": "openai", "XG_API_KEY": "legacy-key"})
         assert manager.active().api_key == ""
 
 
@@ -128,9 +146,10 @@ class TestEnvProviderSelection:
         assert active.provider_name == "glm"
         assert active.api_key == "gk"
 
-    def test_env_provider_unknown_falls_back(self, tmp_path):
+    def test_env_provider_unknown_fails_fast(self, tmp_path):
         manager = make_manager(tmp_path, env={"XG_PROVIDER": "nope", "XG_API_KEY": "k"})
-        assert manager.active().provider_name == "openai"
+        with pytest.raises(ProviderNotConfigured):
+            manager.active()
 
 
 class TestMergePriority:
@@ -160,7 +179,7 @@ class TestMergePriority:
     def test_env_overrides_project_for_openai(self, tmp_path):
         manager = make_manager(
             tmp_path,
-            env={"XG_API_BASE": "https://env.test/v1", "XG_API_KEY": "k"},
+            env={"XG_PROVIDER": "openai", "XG_API_BASE": "https://env.test/v1", "XG_API_KEY": "k"},
             project_cfg={"providers": {"openai": {"api_base": "https://project.test/v1"}}},
         )
         assert manager.active().api_base == "https://env.test/v1"
@@ -187,7 +206,7 @@ class TestPerProviderUrl:
     def test_openai_specific_url_beats_legacy(self, tmp_path):
         manager = make_manager(
             tmp_path,
-            env={"XG_API_KEY": "k", "XG_API_BASE": "https://legacy.test/v1",
+            env={"XG_PROVIDER": "openai", "XG_API_KEY": "k", "XG_API_BASE": "https://legacy.test/v1",
                  "XG_OPENAI_API_BASE": "https://openai-proxy.test/v1"},
         )
         assert manager.active().api_base == "https://openai-proxy.test/v1"

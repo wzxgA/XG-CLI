@@ -12,6 +12,8 @@ from xg.agent.react import ReActAgent
 from xg.cli.app import _handle_command
 from xg.cli.commands import CommandContext, CommandService, SLASH_COMMANDS, filter_slash_commands
 from xg.cli.help import format_command_help, format_help
+
+from tests.conftest import seed_config
 from xg.config.manager import ConfigManager
 from xg.config.settings import Settings
 from xg.llm.client import LlmClient
@@ -30,8 +32,14 @@ def make_context(tmp_path: Path, env: dict) -> tuple[ReActAgent, Settings, Confi
     project_dir = tmp_path / "proj_xg"
     user_dir.mkdir(exist_ok=True)
     project_dir.mkdir(exist_ok=True)
+    # 命令测试以 openai 作为显式 base provider；未提供时默认 openai（不再隐式兜底）。
+    # 注入默认自定义 providers 保证 manager 可解析；已有配置（如 smart_router）保留。
+    cfg_path = user_dir / "config.json"
+    existing = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    cfg_path.write_text(json.dumps(seed_config(existing)), encoding="utf-8")
+    full_env = {"XG_PROVIDER": "openai", **dict(env)}
     manager = ConfigManager(
-        user_dir=user_dir, project_dir=project_dir, env=dict(env), load_env=False
+        user_dir=user_dir, project_dir=project_dir, env=dict(full_env), load_env=False
     )
     settings = Settings(
         provider="openai",
@@ -121,7 +129,8 @@ class TestModelCommand:
         assert "缺少 XG_DEEPSEEK_API_KEY" in output
         assert settings.provider == "openai"
         assert isinstance(agent.llm, DummyClient)
-        assert not (tmp_path / "user_xg" / "config.json").exists()
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert "active_provider" not in cfg  # 拒绝的切换不应持久化
 
     def test_switch_without_any_key_rejected(self, tmp_path):
         """完全没有 Key 时拒绝切换。"""
@@ -130,7 +139,8 @@ class TestModelCommand:
         assert "缺少" in output
         assert settings.provider == "openai"
         assert isinstance(agent.llm, DummyClient)
-        assert not (tmp_path / "user_xg" / "config.json").exists()
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert "active_provider" not in cfg  # 拒绝的切换不应持久化
 
     def test_unknown_token_treated_as_model_name(self, tmp_path):
         """不在 provider 列表中的参数，按当前 provider 内切换模型处理。"""

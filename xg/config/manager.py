@@ -19,6 +19,15 @@ from xg.config.providers import Provider, ProviderRegistry
 USER_CONFIG = "config.json"
 DEFAULT_CONTEXT_WINDOW = 128_000
 
+
+class ProviderNotConfigured(Exception):
+    """未配置可用的 base provider 时抛出，提示用户先配置。"""
+
+
+def _api_key_env_for(name: str) -> str:
+    """由 provider 名称自动推导对应的 API Key 环境变量名。"""
+    return f"XG_{name.upper()}_API_KEY"
+
 # SmartRouter 档位固定名称（顺序即惯例展示顺序）
 _SMART_ROUTER_TIERS = ("Basic", "Enhanced", "Superior", "Ultimate")
 
@@ -145,14 +154,14 @@ class ConfigManager:
             return None
 
         if base is None:
-            required = ("api_base", "api_key_env", "default_model")
+            required = ("api_base", "default_model")
             if not cfg or not all(cfg.get(k) for k in required):
                 return None
             return Provider(
                 name=name,
                 display_name=str(cfg.get("display_name", name)),
                 api_base=str(cfg["api_base"]),
-                api_key_env=str(cfg["api_key_env"]),
+                api_key_env=str(cfg.get("api_key_env") or _api_key_env_for(name)),
                 default_model=str(cfg["default_model"]),
                 context_window=int(cfg.get("context_window", DEFAULT_CONTEXT_WINDOW)),
                 supports_cache=bool(cfg.get("supports_cache", False)),
@@ -202,12 +211,15 @@ class ConfigManager:
 
     def active(self) -> ActiveConfig:
         merged = self._merged_config()
-        # 激活 provider：环境变量 XG_PROVIDER > 配置文件 active_provider > 默认 openai
-        provider_name = self.env.get("XG_PROVIDER", "") or str(merged.get("active_provider", "") or "") or "openai"
-        provider = self.resolve_provider(provider_name) or self.registry.get("openai")
+        # 激活的 base provider：环境变量 XG_PROVIDER > 配置文件 active_provider。
+        # 不再有隐式 openai 兜底——未配置可用的 provider 时 fail-fast 提示。
+        provider_name = self.env.get("XG_PROVIDER", "") or str(merged.get("active_provider", "") or "")
+        provider = self.resolve_provider(provider_name) if provider_name else None
         if provider is None:
-            provider = self.registry.all()[0]
-            provider_name = provider.name
+            raise ProviderNotConfigured(
+                f"未配置可用的 base provider。请设置 XG_PROVIDER（或配置 active_provider）"
+                f"，并在 providers 中定义；API Key 通过 {_api_key_env_for(provider_name) if provider_name else "XG_<NAME>_API_KEY"} 提供。"
+            )
 
         # 模型：配置 active_model > 环境变量 XG_MODEL > provider 默认
         model = (

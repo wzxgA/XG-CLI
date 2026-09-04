@@ -38,17 +38,31 @@ def resolve(tier_idx: int, fallback_provider: str, fallback_model: str,
             manager: "ConfigManager | None" = None) -> TierTarget:
     """把档位索引解析成 (provider, model)。
 
-    回落顺序：显式配置的 provider/model → fallback（当前 active）。
-    传入 ``manager`` 时对显式配置做校验：
-    1. provider 必须在 ``manager.provider_names()`` 中（内置 + 自定义）；
-    2. ``manager.resolve_api_key()`` 必须返回非空（占位值视为未配置）。
-    校验不过 → 整档回落 fallback，``configured=False``。
+    结算规则：
+    1. 档位指定了 ``provider``：model 缺省时用该 provider 的默认模型（D5），
+       需 ``manager`` 解析；传 None 时无法取默认模型，回落 fallback_model。
+    2. 档位未指定 ``provider``：整体回落 fallback（base provider 及其生效模型），
+       model 取档位显式 ``model`` 或 fallback_model。
+    3. 显式配置经 ``manager`` 校验：provider 必须可解析、API Key 必须已配置，
+       否则整档回落 fallback 并标记 ``configured=False``。
     """
     tier_name = TIER_NAMES[tier_idx]
     cfg = (tiers_config or {}).get(tier_name) or {}
-    provider = str(cfg.get("provider") or "") or fallback_provider
-    model = str(cfg.get("model") or "") or fallback_model
-    configured = bool(cfg.get("provider") or cfg.get("model"))
+    provided_provider = str(cfg.get("provider") or "")
+
+    if provided_provider:
+        provider = provided_provider
+        default_model = fallback_model
+        if manager is not None:
+            prov = manager.resolve_provider(provider)
+            if prov is not None and prov.default_model:
+                default_model = prov.default_model
+        model = str(cfg.get("model") or "") or default_model
+        configured = bool(cfg.get("provider") or cfg.get("model"))
+    else:
+        provider = fallback_provider
+        model = str(cfg.get("model") or "") or fallback_model
+        configured = bool(cfg.get("model"))
 
     if configured and manager is not None and (provider, model) != (fallback_provider, fallback_model):
         prov = manager.resolve_provider(provider)

@@ -1260,6 +1260,18 @@ def main(argv: list[str] | None = None) -> None:
         return
     manager = ConfigManager()
     settings = load_settings(manager)
+    if settings.provider_missing:
+        console.print(
+            Panel(
+                Text(
+                    "未配置 base provider。请在 config.json 的 providers 中自定义服务商"
+                    "（name / api_base / default_model），设置 XG_PROVIDER（或 active_provider）"
+                    "选中 base，并为其配置 XG_<NAME>_API_KEY。"
+                ),
+                style="red",
+            )
+        )
+        sys.exit(1)
     if not settings.api_base or not settings.api_key:
         console.print(
             Panel(

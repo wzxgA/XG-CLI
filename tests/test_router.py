@@ -19,6 +19,8 @@ from xg.router.keywords import KEYWORDS
 from xg.router.postprocess import hit
 from xg.router.rule_router import confidence
 
+from tests.conftest import seed_config
+
 
 class TestKeywords:
     def test_categories_present(self):
@@ -174,6 +176,22 @@ class TestPostprocess:
 
 
 class TestModelTiers:
+    @staticmethod
+    def _manager(tmp_path, env=None):
+        import json as _json
+
+        from xg.config.manager import ConfigManager
+
+        user_dir = tmp_path / "user_xg"
+        project_dir = tmp_path / "proj_xg"
+        user_dir.mkdir(exist_ok=True)
+        project_dir.mkdir(exist_ok=True)
+        (user_dir / "config.json").write_text(
+            _json.dumps(seed_config({})), encoding="utf-8"
+        )
+        return ConfigManager(user_dir=user_dir, project_dir=project_dir,
+                             env=dict(env or {}), load_env=False)
+
     def test_fallback_when_not_configured(self):
         t = resolve(0, "deepseek", "deepseek-chat")
         assert t.tier == TIER_NAMES[0]
@@ -195,6 +213,24 @@ class TestModelTiers:
         assert t.model == "deepseek-chat"
         assert t.configured is True
 
+    def test_provider_without_model_uses_provider_default(self, tmp_path):
+        """D5：档位只配 provider 不配 model → 用该 provider 默认模型。
+        需要 manager 解析 provider 的 default_model。"""
+        manager = self._manager(tmp_path, env={"XG_GLM_API_KEY": "gk"})
+        cfg = {"Basic": {"provider": "glm"}}
+        t = resolve(0, "deepseek", "deepseek-chat", cfg, manager)
+        assert t.provider == "glm"
+        assert t.model == "glm-4-flash"                # glm 内置默认模型
+        assert t.configured is True
+
+    def test_empty_tier_falls_back_to_base(self, tmp_path):
+        """D4：档位完全未配置 → 回落 base provider 及其生效模型。"""
+        manager = self._manager(tmp_path, env={"XG_GLM_API_KEY": "gk"})
+        t = resolve(3, "deepseek", "deepseek-chat", {}, manager)
+        assert t.provider == "deepseek"
+        assert t.model == "deepseek-chat"
+        assert t.configured is False
+
 
 class TestModelTiersValidation:
     """子步骤 B：接入 ConfigManager 后的 provider/API Key 校验链。"""
@@ -209,8 +245,9 @@ class TestModelTiersValidation:
         project_dir = tmp_path / "proj_xg"
         user_dir.mkdir(exist_ok=True)
         project_dir.mkdir(exist_ok=True)
-        if user_cfg is not None:
-            (user_dir / "config.json").write_text(_json.dumps(user_cfg), encoding="utf-8")
+        (user_dir / "config.json").write_text(
+            _json.dumps(seed_config(user_cfg or {})), encoding="utf-8"
+        )
         return ConfigManager(user_dir=user_dir, project_dir=project_dir,
                              env=dict(env or {}), load_env=False)
 
