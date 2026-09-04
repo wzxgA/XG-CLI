@@ -34,11 +34,16 @@ class MLPrediction:
 class MLRouter:
     """产物加载与精判；不可用时全链路静默回落。"""
 
-    def __init__(self, artifact_path: Path | None = None) -> None:
+    def __init__(self, artifact_path: Path | None = None,
+                 semantic=None) -> None:
         self._payload = None
         self._vectorizer = None
         self._model = None
         self._feature_keys: tuple[str, ...] = ()
+        # 第 6 期 C2：可选语义编码器（bge 512 维）。训练产物带 sem_dim>0 时，
+        # 预测需语义列；语义不可用则整个静默回落（无法提供既定列宽）。
+        self._semantic = semantic
+        self._sem_dim = 0
         self._load(artifact_path)
 
     # -- 加载 -----------------------------------------------------------
@@ -56,20 +61,24 @@ class MLRouter:
             model = payload.get("model")
             vec = payload.get("vectorizer")
             keys = payload.get("feature_keys") or ()
-            # 做一次轻量自检：模型具备 predict_proba，且特征键形如合法
             if not hasattr(model, "predict_proba"):
                 return
             check_is_fitted(model)
+            sem_dim = payload.get("sem_dim", 0) or 0
+            # 产物声明需要语义列，但语义编码器不可用 → 整链静默回落
+            if sem_dim > 0 and (self._semantic is None or not self._semantic.available):
+                return
             self._vectorizer = vec
             self._model = model
             self._feature_keys = tuple(keys)
+            self._sem_dim = int(sem_dim)
             self._payload = payload
         except Exception:
-            # 产物缺失、损坏、依赖未装、格式不符 → 静默不可用
             self._payload = None
             self._vectorizer = None
             self._model = None
             self._feature_keys = ()
+            self._sem_dim = 0
 
     def _default_path(self) -> Path | None:
         from ..adaptive.store import data_dir
@@ -84,17 +93,34 @@ class MLRouter:
     def n_samples(self) -> int | None:
         return self._payload.get("n_samples") if self._payload else None
 
+    @property
+    def sem_dim(self) -> int:
+        """训练时并入的语义特征维度（0=无语义，纯第 5 期行为）。"""
+        return self._sem_dim
+
     # -- 预测 -----------------------------------------------------------
     def _encode(self, text: str, features: dict | None):
-        """把 text + features 拼成 (TF-IDF, 数值) 稀疏输入；无文本时零宽列。"""
+        """把 text + 数值特征 拼成 (TF-IDF, 数值) 稀疏输入；无需义时行为同第 5 期。
+
+        语义列（sem_dim>0，第 6 期）追加在数值列之后，顺序为
+        [TF-IDF] + [数值] + [语义512]，与 train_router 训练矩阵严格一致。
+        """
         import numpy as np  # noqa: PLC0415
         from scipy.sparse import csr_matrix, hstack  # noqa: PLC0415
         if self._vectorizer is not None:
-            x_text = self._vectorizer.transform([text or " "])  # 空串兜底字符列
+            x_text = self._vectorizer.transform([text or " "])
         else:
             x_text = csr_matrix((1, 0))
         row = [float((features or {}).get(k, 0.0)) for k in self._feature_keys]
-        return hstack([x_text, csr_matrix(np.array([row]))]).tocsr()
+        cols = [x_text, csr_matrix(np.array([row]))]
+        if self._sem_dim > 0:
+            import numpy as _np  # noqa: PLC0415
+            sem = self._semantic.encode(text)
+            if sem is None:
+                # 语义列不可得（理论上 available 已兜底，防御万一）
+                sem = [0.0] * self._sem_dim
+            cols.append(csr_matrix(_np.array([sem[:self._sem_dim]])))
+        return hstack(cols).tocsr()
 
     def predict(self, text: str, features: dict | None = None) -> MLPrediction | None:
         """训练产物预测：返回概率最高档；不可用返回 None（静默回落）。"""

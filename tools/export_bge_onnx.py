@@ -84,14 +84,22 @@ def check_latency(elapsed_ms: float, max_ms: float = MAX_LATENCY_MS) -> None:
 # ---------------------------------------------------------------------------
 
 def _encode(texts: list[str], sess, tokenizer) -> list[list[float]]:
-    """用 ONNX session + tokenizers 对文本编码，取 [CLS] 向量。"""
+    """用 ONNX session + tokenizers 对文本编码，取 [CLS] 向量。
+
+    按 session 实际输入名动态构造 feed（bge/BERT 常要求 token_type_ids，
+    单段输入给全零），避免缺失必需输入导致校验/编码失败。
+    """
     enc = tokenizer(texts, padding=True, truncation=True, max_length=512,
                     return_tensors="np")
     import numpy as np  # noqa: PLC0415
-    outputs = sess.run(None, {
-        "input_ids": enc["input_ids"].astype(np.int64),
+    input_ids = enc["input_ids"].astype(np.int64)
+    feed = {
+        "input_ids": input_ids,
         "attention_mask": enc["attention_mask"].astype(np.int64),
-    })
+    }
+    if "token_type_ids" in {i.name for i in sess.get_inputs()}:
+        feed["token_type_ids"] = np.zeros_like(input_ids)
+    outputs = sess.run(None, feed)
     # bge：取 last_hidden_state 的 first token（[CLS]），再 L2 归一化
     emb = outputs[0][:, 0, :]
     norms = np.linalg.norm(emb, axis=1, keepdims=True)
@@ -120,23 +128,36 @@ def export_and_quantize(
             f"缺少导出依赖：{exc}\n请先安装：pip install \".[semantic]\""
         ) from exc
 
-    # 1) 用 optimum 导出并（可选）int8 量化
-    model = ORTModelForFeatureExtraction.from_pretrained(
-        model_name, export=True, quantize=quantize,
-    )
+    # 1) 用 optimum 导出 ONNX（fp32）。新版 optimum（>=2.x）已移除 quantize=，
+    #    int8 量化改在导出后用 onnxruntime.quantization.quantize_dynamic 进行。
+    model = ORTModelForFeatureExtraction.from_pretrained(model_name, export=True)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # 2) 落盘到临时路径，完成校验后再替换（损坏安全）
+    # 2) 落盘到临时路径，完成校验后再替换（损坏安全）；tokenizer.json 一并暂存
     tmp_path = out_path.with_name(out_path.name + ".tmp")
+    if tmp_path.exists():  # 清理上次残留，避免旧产物干扰
+        import shutil  # noqa: PLC0415
+        shutil.rmtree(tmp_path, ignore_errors=True)
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
 
     onnx_file = next(tmp_path.glob("model.onnx"), None)
-    if onnx_file is None:  # pragma: no cover
-        onnx_file = tmp_path / "model_qint8.onnx"
-    ort_path = tmp_path / "model_quantized.onnx"
-    if onnx_file != ort_path:
-        ort_path.write_bytes(onnx_file.read_bytes())
+    if onnx_file is None or not onnx_file.exists():  # pragma: no cover
+        onnx_file = next(tmp_path.glob("*.onnx"))
+    if quantize:
+        # int8 动态量化；失败则回退 fp32（语义通道仍可用，仅未压缩）
+        from onnxruntime.quantization import QuantType, quantize_dynamic  # noqa: PLC0415
+        int8_path = tmp_path / "model_int8.onnx"
+        try:
+            quantize_dynamic(str(onnx_file), str(int8_path),
+                             weight_type=QuantType.QInt8)
+            ort_path = int8_path
+        except Exception:  # pragma: no cover
+            ort_path = onnx_file
+            quantize = False  # 记录实际未量化
+    else:
+        ort_path = onnx_file
 
     sess = onnxruntime.InferenceSession(str(ort_path),
                                         providers=["CPUExecutionProvider"])
@@ -164,10 +185,14 @@ def export_and_quantize(
     elapsed = (time.perf_counter() - t0) / 10 * 1000
     check_latency(elapsed)
 
-    # 4) 校验通过 → 原子落盘正式产物
+    # 4) 校验通过 → 原子落盘正式产物 + 伴生 tokenizer.json（semantic.py 约定）
     out_path.write_bytes(ort_path.read_bytes())
+    tok_src = tmp_path / "tokenizer.json"
+    if tok_src.exists():
+        out_path.with_suffix(".json").write_bytes(tok_src.read_bytes())
     return {
         "dim": len(results[0]),
+        "quantized": bool(quantize),
         "cosine_note": "int8 dim/norm 校验通过（严格余弦见 C2）",
         "latency_ms": round(elapsed, 1),
         "artifact_bytes": out_path.stat().st_size,

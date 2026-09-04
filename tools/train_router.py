@@ -180,10 +180,16 @@ def train_and_save(
     val_size: float = 0.2,
     n_estimators: int = 200,
     seed: int = 42,
+    semantic=None,
 ) -> dict[str, Any]:
     """TF-IDF + LightGBM 训练并落盘产物（joblib 单文件容器）。
 
-    返回训练报告 dict（样本量/验证准确率/产物大小）。
+    ``semantic``（router.semantic.SemanticEncoder）可选，第 6 期 C2：
+    提供且可用时把每个有原文样本编码成 512 维语义向量并入特征矩阵
+    （[TF-IDF] + [数值] + [语义512]），并在产物写入 ``sem_dim``；
+    预测端 ml_router 以相同列序拼语义列。无用例时行为与第 5 期完全一致。
+
+    返回训练报告 dict（样本量/验证准确率/产物大小/语义列维度）。
     """
     try:
         import joblib
@@ -234,8 +240,30 @@ def train_and_save(
         vectorizer = None
         x_text_tr = csr_matrix((len(tr), 0))
         x_text_va = csr_matrix((len(va), 0))
-    x_tr = hstack([x_text_tr, csr_matrix(feats[tr])]).tocsr()
-    x_va = hstack([x_text_va, csr_matrix(feats[va])]).tocsr()
+
+    # 语义列（第 6 期 C2）：有原文的样本拼 512 维编码，feedback 无原文用零行。
+    sem_dim = 0
+    if semantic is not None and semantic.available and has_text:
+        sem_dim = semantic.dim
+        sem_rows_tr = np.zeros((len(tr), sem_dim), dtype=float)
+        sem_rows_va = np.zeros((len(va), sem_dim), dtype=float)
+        for i in tr:
+            vec = semantic.encode(texts[i])
+            if vec is not None:
+                sem_rows_tr[list(tr).index(i)] = vec[:sem_dim]
+        for i in va:
+            vec = semantic.encode(texts[i])
+            if vec is not None:
+                sem_rows_va[list(va).index(i)] = vec[:sem_dim]
+        x_sem_tr = csr_matrix(sem_rows_tr)
+        x_sem_va = csr_matrix(sem_rows_va)
+        x_tr = hstack([x_text_tr, csr_matrix(feats[tr]),
+                       x_sem_tr]).tocsr()
+        x_va = hstack([x_text_va, csr_matrix(feats[va]),
+                       x_sem_va]).tocsr()
+    else:
+        x_tr = hstack([x_text_tr, csr_matrix(feats[tr])]).tocsr()
+        x_va = hstack([x_text_va, csr_matrix(feats[va])]).tocsr()
 
     model = lgb.LGBMClassifier(
         objective="multiclass", num_class=4, n_estimators=n_estimators,
@@ -255,12 +283,14 @@ def train_and_save(
         "trained_at": time.time(),
         "n_samples": len(samples),
         "val_accuracy": acc,
+        "sem_dim": sem_dim,  # 第 6 期 C2：绑定语义列宽，0=无语义
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(payload, out_path)
     return {
         "n_samples": len(samples), "n_train": len(tr), "n_val": len(va),
         "val_accuracy": acc, "artifact_bytes": out_path.stat().st_size,
+        "sem_dim": sem_dim,
     }
 
 
@@ -286,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--val-size", type=float, default=0.2)
     parser.add_argument("--n-estimators", type=int, default=200)
+    parser.add_argument(
+        "--semantic-onnx", default=None,
+        help="bge 语义编码器产物 .onnx 路径（可选，第 6 期）；提供时并入 512 维语义列",
+    )
     args = parser.parse_args(argv)
 
     if not args.feedback_only and not args.labeled:
@@ -308,14 +342,24 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
+    # 第 6 期 C2：可选语义编码器（--semantic-onnx），可就可用性打印提示
+    semantic = None
+    if args.semantic_onnx:
+        from xg.router.semantic import SemanticEncoder  # noqa: PLC0415
+        semantic = SemanticEncoder(Path(args.semantic_onnx))
+        if not semantic.available:
+            print("提示：语义编码器不可用（产物/依赖缺失），本次训练不含语义列",
+                  file=sys.stderr)
+
     report = train_and_save(
         samples, out_path, val_size=args.val_size,
-        n_estimators=args.n_estimators,
+        n_estimators=args.n_estimators, semantic=semantic,
     )
     acc = f"{report['val_accuracy']:.3f}" if report["val_accuracy"] is not None else "N/A"
+    sem_note = f"，语义列 {report['sem_dim']} 维" if report["sem_dim"] else ""
     print(f"训练完成：{report['n_samples']} 样本"
           f"（训练 {report['n_train']} / 验证 {report['n_val']}），"
-          f"验证准确率 {acc}")
+          f"验证准确率 {acc}{sem_note}")
     print(f"产物：{out_path}（{report['artifact_bytes'] / 1024:.0f} KB）")
     return 0
 

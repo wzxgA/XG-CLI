@@ -623,11 +623,12 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
     from xg.adaptive.learned_rules import re_learn
     from xg.router.postprocess import Hysteresis
     from xg.router.ml_router import MLRouter
+    from xg.router.semantic import load_semantic_encoder
 
     agent._smart_calibration = recalibrate()
     agent._smart_learned = re_learn()
     agent._smart_hysteresis = Hysteresis()
-    agent._smart_ml = MLRouter()  # phase-05 B2：产物可用则参与精判，否则静默回落
+    agent._smart_ml = MLRouter(semantic=load_semantic_encoder())  # 第6期 C2：语义列可选，缺则回落
     _calibration = agent._smart_calibration  # 兼容旧引用
 
     while True:
@@ -954,7 +955,8 @@ def _cmd_smart_router(
         agent._smart_calibration = recalibrate()
         agent._smart_learned = re_learn()
         agent._smart_hysteresis = Hysteresis()
-        agent._smart_ml = MLRouter()
+        from xg.router.semantic import load_semantic_encoder
+        agent._smart_ml = MLRouter(semantic=load_semantic_encoder())  # 与主循环一致
         detail = "、".join(removed) if removed else "（本轮无可清除项）"
         return (
             f"已清除校准与自学习规则：{detail}。feedback.log 保留为历史；"

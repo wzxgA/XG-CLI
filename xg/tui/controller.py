@@ -158,10 +158,11 @@ class SessionController:
         from xg.adaptive.learned_rules import re_learn
         from xg.router.ml_router import MLRouter
         from xg.router.postprocess import Hysteresis
+        from xg.router.semantic import load_semantic_encoder
         self.agent._smart_calibration = self._calibration
         self.agent._smart_learned = re_learn()
         self.agent._smart_hysteresis = Hysteresis()
-        self.agent._smart_ml = MLRouter()
+        self.agent._smart_ml = MLRouter(semantic=load_semantic_encoder())
         self._sync_smart_router_snapshot()
 
     @staticmethod
