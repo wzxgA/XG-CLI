@@ -172,6 +172,31 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
         ),
     ),
     SlashCommandSpec(
+        "/tier",
+        usage="/tier [list|show|set|clear]",
+        description="配置 SmartRouter 档位（provider/model，写入 config.json）",
+        category="config",
+        details=(
+            "档位固定为 Basic/Enhanced/Superior/Ultimate 四档。",
+            "set 缺省 model 时取该 provider 的 default_model；宽松校验："
+            "provider 需存在，model 非空且无非法字符即可。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("list", "/tier", "列出四档 provider/model（未配回落主动 active）"),
+            SlashSubcommandSpec("show", "/tier show <tier>", "查看单个档位"),
+            SlashSubcommandSpec("set", "/tier set <tier> <provider> [model]", "设置档位 provider/model"),
+            SlashSubcommandSpec("clear", "/tier clear <tier>", "清空档位，回落到手动 active"),
+        ),
+        examples=(
+            "/tier",
+            "/tier list",
+            "/tier set Basic deepseek deepseek-chat",
+            "/tier set Ultimate deepseek",
+            "/tier clear Superior",
+            "/tier show Enhanced",
+        ),
+    ),
+    SlashCommandSpec(
         "/mcp",
         usage="/mcp status|restart|logs|enable|disable|resources",
         description="管理 MCP Server",
@@ -408,6 +433,9 @@ class CommandService:
                 from xg.cli.app import _reapply_active
 
                 _reapply_active(self.context.agent, self.context.settings, self.context.manager)
+            return CommandResult(ok=ok, message=message)
+        if parts[0].lower() == "/tier":
+            message, ok = execute_tier_command(self.context.manager, raw)
             return CommandResult(ok=ok, message=message)
         if parts[0].lower() == "/mcp":
             message, ok = await execute_mcp_command(self.context.agent, raw)
@@ -777,3 +805,66 @@ def _render_provider_list(service: Any) -> str:
             f"{row['layer']}"
         )
     return "\n".join(lines)
+
+
+def execute_tier_command(manager: Any, raw: str) -> tuple[str, bool]:
+    """执行 /tier 子命令（list/show/set/clear）。"""
+    from xg.config.smart_router_service import (  # 延迟导入避免环
+        SmartRouterConfigService,
+        _SMART_ROUTER_TIERS,
+    )
+
+    parts = raw.split()
+    sub = parts[1].lower() if len(parts) > 1 else "list"
+    service = SmartRouterConfigService(manager)
+
+    if sub in {"list", ""}:
+        rows = service.list_tiers()
+        lines = ["TIER       PROVIDER       MODEL"] 
+        for row in rows:
+            mark = "*" if row["configured"] else "-"
+            provider = row["provider"] or "（回落 active）"
+            model = row["model"] or ""
+            lines.append(f"{mark} {row['name']:<9}{provider:<14}{model}")
+        lines.append("*=显式配置  -=未配回落手动 active")
+        return "\n".join(lines), True
+
+    if sub == "show":
+        if len(parts) < 3:
+            return "/tier show <tier>  （tier: " + _tiers_join() + "）", False
+        result, row = service.get_tier(parts[2])
+        if not result.ok:
+            return result.message, False
+        state = "已配置" if row["provider"] else "未配置（回落 active）"
+        return (f"tier:    {row['name']}\nprovider: {row['provider'] or '-'}\nmodel:    {row['model'] or '-'}\n状态:     {state}", True)
+
+    if sub == "set":
+        if len(parts) < 4:
+            return "/tier set <tier> <provider> [model]", False
+        tier = parts[2]
+        provider = parts[3]
+        model = parts[4] if len(parts) > 4 else None
+        result = service.set_tier(tier, provider, model)
+        return result.message, result.ok
+
+    if sub == "clear":
+        if len(parts) < 3:
+            return "/tier clear <tier>", False
+        result = service.clear_tier(parts[2])
+        return result.message, result.ok
+
+    return _tier_usage(""), False
+
+
+def _tiers_join() -> str:
+    return "/".join(_SMART_ROUTER_TIERS)
+
+
+def _tier_usage(sub: str) -> str:
+    usage = {
+        "list": "/tier",
+        "show": "/tier show <tier>",
+        "set": "/tier set <tier> <provider> [model]",
+        "clear": "/tier clear <tier>",
+    }
+    return usage.get(sub, "/tier [list|show|set|clear]")

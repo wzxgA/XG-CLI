@@ -62,7 +62,8 @@ class ProviderForm(ModalScreen[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
-            return self.dismiss(None)
+            self.dismiss(None)
+            return
         if event.button.id == "save":
             self._save()
             return

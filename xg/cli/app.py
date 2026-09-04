@@ -700,6 +700,10 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
                 from xg.cli.commands import execute_provider_command
 
                 message, _ok = execute_provider_command(manager, settings, user_input)
+            elif user_input.split(maxsplit=1)[0].lower() == "/tier":
+                from xg.cli.commands import execute_tier_command
+
+                message, _ok = execute_tier_command(manager, user_input)
             else:
                 message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:

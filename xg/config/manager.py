@@ -371,20 +371,6 @@ class ConfigManager:
                 if entry:
                     tiers[str(tier_name)] = entry
 
-        # 环境变量 / .env 逐档逐键覆盖（优先级高于 config.json，最低层定义见模块 docstring）
-        # 键形如：XG_SMART_ROUTER_BASIC_PROVIDER / XG_SMART_ROUTER_BASIC_MODEL
-        for tier_name in _SMART_ROUTER_TIERS:
-            env_entry: dict[str, str] = {}
-            for field in ("provider", "model"):
-                var = f"XG_SMART_ROUTER_{tier_name.upper()}_{field.upper()}"
-                value = self.env.get(var, "")
-                if isinstance(value, str) and value.strip():
-                    env_entry[field] = value.strip()
-            if env_entry:
-                merged_entry = dict(tiers.get(tier_name) or {})
-                merged_entry.update(env_entry)
-                tiers[tier_name] = merged_entry
-
         return {"enabled": enabled, "tiers": tiers}
 
     def set_smart_router_enabled(self, enabled: bool) -> None:
@@ -396,6 +382,36 @@ class ConfigManager:
         node["enabled"] = bool(enabled)
         user["smart_router"] = node
         self._write_config(self.user_config_path, user)
+
+    def set_smart_router_tier(self, tier_name: str, provider: str, model: str) -> None:
+        """持久化一个档位的 provider/model 到用户级配置（/tier set 时调用）。"""
+        user = self._read_config(self.user_config_path)
+        node = user.get("smart_router")
+        if not isinstance(node, dict):
+            node = {}
+        tiers = node.get("tiers")
+        if not isinstance(tiers, dict):
+            tiers = {}
+        tiers[tier_name] = {"provider": provider, "model": model}
+        node["tiers"] = tiers
+        user["smart_router"] = node
+        self._write_config(self.user_config_path, user)
+
+    def remove_smart_router_tier(self, tier_name: str) -> bool:
+        """清空一个档位（删除其配置，回落到手动 active）；返回是否有实际配置被删。"""
+        user = self._read_config(self.user_config_path)
+        node = user.get("smart_router")
+        if not isinstance(node, dict):
+            return False
+        tiers = node.get("tiers")
+        if not isinstance(tiers, dict) or tier_name not in tiers:
+            return False
+        del tiers[tier_name]
+        if not tiers:
+            node.pop("tiers", None)
+        user["smart_router"] = node
+        self._write_config(self.user_config_path, user)
+        return True
 
     # ---------- UI 偏好 ----------
 

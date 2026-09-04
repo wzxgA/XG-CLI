@@ -63,6 +63,7 @@ class XgTuiApp(App[None]):
         ("ctrl+tab", "inspector_next", "下一个 Inspector 视图"),
         ("ctrl+shift+tab", "inspector_previous", "上一个 Inspector 视图"),
         ("ctrl+p", "provider_panel", "Provider 面板"),
+        ("ctrl+t", "smart_router_panel", "SmartRouter 面板"),
     ]
 
     def __init__(self, agent, settings: Settings, manager: ConfigManager) -> None:
@@ -589,7 +590,12 @@ class XgTuiApp(App[None]):
     def action_provider_panel(self) -> None:
         from xg.tui.widgets.provider_panel import open_provider_screen
 
-        open_provider_screen(self, self.manager, self.settings)
+        open_provider_screen(self, self.controller.manager, self.settings)
+
+    def action_smart_router_panel(self) -> None:
+        from xg.tui.widgets.smart_router_panel import open_smart_router_screen
+
+        open_smart_router_screen(self, self.controller.manager)
 
     async def on_unmount(self) -> None:
         self._stop_progress_timer()

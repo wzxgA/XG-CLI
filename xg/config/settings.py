@@ -223,7 +223,7 @@ def load_settings(manager: ConfigManager | None = None) -> Settings:
         input_history_max_entries=max(1, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_ENTRIES", 100)),
         input_history_max_chars=max(256, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_CHARS", 8_000)),
         input_history_max_bytes=max(4_096, _get_int(manager.env, "XG_INPUT_HISTORY_MAX_BYTES", 1_048_576)),
-        smart_router_enabled=manager.env.get("XG_SMART_ROUTER", "off").lower() in ("on", "1", "true"),
+        smart_router_enabled=bool(manager.smart_router_config().get("enabled", False)),
     )
 
 

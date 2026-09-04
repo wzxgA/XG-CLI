@@ -456,10 +456,10 @@ class TestSmartRouterConfig:
         assert cfg["tiers"]["Basic"]["model"] == "deepseek-chat"
 
 
-class TestSmartRouterEnvTiers:
-    """SmartRouter 档位可通过 .env 环境变量配置（覆盖 config.json 同档逐键）。"""
+class TestSmartRouterEnvIgnored:
+    """环境变量 XG_SMART_ROUTER* 不再参与档位配置（配置只在 config.json）。"""
 
-    def test_env_only_provider_and_model(self, tmp_path):
+    def test_env_tiers_ignored(self, tmp_path):
         manager = make_manager(
             tmp_path,
             env={
@@ -470,30 +470,28 @@ class TestSmartRouterEnvTiers:
             },
         )
         cfg = manager.smart_router_config()
-        assert cfg["tiers"]["Basic"] == {"provider": "deepseek", "model": "deepseek-chat"}
-        assert cfg["tiers"]["Ultimate"] == {"provider": "glm", "model": "glm-4-plus"}
-        assert "Enhanced" not in cfg["tiers"]  # 未配置不产生条目
-        assert "Superior" not in cfg["tiers"]
+        # env 不再写入 tiers：始终为空
+        assert cfg["tiers"] == {}
 
-    def test_env_overrides_config_same_key(self, tmp_path):
+    def test_env_does_not_override_config(self, tmp_path):
         manager = make_manager(
             tmp_path,
             env={"XG_SMART_ROUTER_BASIC_PROVIDER": "deepseek"},
             user_cfg={"smart_router": {"tiers": {"Basic": {"provider": "openai", "model": "gpt-4o-mini"}}}},
         )
         cfg = manager.smart_router_config()
-        # env 覆盖 provider，config 的 model 保留（逐键合并）
-        assert cfg["tiers"]["Basic"] == {"provider": "deepseek", "model": "gpt-4o-mini"}
-
-    def test_env_blank_value_ignored(self, tmp_path):
-        manager = make_manager(
-            tmp_path,
-            env={"XG_SMART_ROUTER_BASIC_PROVIDER": "  ", "XG_SMART_ROUTER_BASIC_MODEL": ""},
-            user_cfg={"smart_router": {"tiers": {"Basic": {"provider": "openai", "model": "gpt-4o-mini"}}}},
-        )
-        cfg = manager.smart_router_config()
-        # 空白 env 视作未设置，保留 config 值
+        # config 值保留，env 不生效
         assert cfg["tiers"]["Basic"] == {"provider": "openai", "model": "gpt-4o-mini"}
+
+    def test_set_and_remove_tier_persists(self, tmp_path):
+        manager = make_manager(tmp_path, env={})
+        manager.set_smart_router_tier("Basic", "deepseek", "deepseek-chat")
+        assert manager.smart_router_config()["tiers"]["Basic"] == {
+            "provider": "deepseek", "model": "deepseek-chat",
+        }
+        assert manager.remove_smart_router_tier("Basic") is True
+        assert "Basic" not in manager.smart_router_config()["tiers"]
+        assert manager.remove_smart_router_tier("Basic") is False
 
 
 class TestSmartRouterSettings:
@@ -502,11 +500,16 @@ class TestSmartRouterSettings:
         assert settings.smart_router_enabled is False
         assert settings.smart_router_saved is None
 
-    @pytest.mark.parametrize("raw", ["on", "1", "true"])
-    def test_smart_router_env_enables(self, tmp_path, raw):
-        settings = load_settings(make_manager(tmp_path, env={"XG_SMART_ROUTER": raw}))
+    def test_smart_router_from_config_enables(self, tmp_path):
+        manager = make_manager(
+            tmp_path, env={"XG_SMART_ROUTER": "off"},
+            user_cfg={"smart_router": {"enabled": True}},
+        )
+        settings = load_settings(manager)
+        # 开关来自 config.json，env XG_SMART_ROUTER 不再生效
         assert settings.smart_router_enabled is True
 
-    def test_smart_router_env_off(self, tmp_path):
-        settings = load_settings(make_manager(tmp_path, env={"XG_SMART_ROUTER": "off"}))
+    def test_smart_router_env_ignored(self, tmp_path):
+        manager = make_manager(tmp_path, env={"XG_SMART_ROUTER": "on"})
+        settings = load_settings(manager)
         assert settings.smart_router_enabled is False

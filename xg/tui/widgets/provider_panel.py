@@ -66,7 +66,8 @@ class ProviderScreen(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
         if bid == "close":
-            return self.dismiss(None)
+            self.dismiss(None)
+            return
         if bid == "refresh":
             self._refresh()
             return
