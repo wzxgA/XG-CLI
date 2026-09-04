@@ -1808,27 +1808,23 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
-    { name = "prompt-toolkit" },
-    { name = "python-dotenv" },
-    { name = "rich" },
-    { name = "textual" },
-]
-
-[package.optional-dependencies]
-ml = [
     { name = "joblib" },
     { name = "lightgbm" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "scikit-learn" },
-]
-semantic = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "onnxruntime" },
+    { name = "prompt-toolkit" },
+    { name = "python-dotenv" },
+    { name = "rich" },
+    { name = "scikit-learn" },
+    { name = "textual" },
+    { name = "tokenizers" },
+]
+
+[package.optional-dependencies]
+semantic = [
     { name = "optimum", extra = ["onnxruntime"] },
     { name = "safetensors" },
-    { name = "tokenizers" },
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -1843,23 +1839,22 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "joblib", marker = "extra == 'ml'", specifier = ">=1.3" },
-    { name = "lightgbm", marker = "extra == 'ml'", specifier = ">=4.0" },
-    { name = "numpy", marker = "extra == 'ml'", specifier = ">=1.26" },
-    { name = "numpy", marker = "extra == 'semantic'", specifier = ">=1.26" },
-    { name = "onnxruntime", marker = "extra == 'semantic'", specifier = ">=1.17" },
+    { name = "joblib", specifier = ">=1.3" },
+    { name = "lightgbm", specifier = ">=4.0" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "onnxruntime", specifier = ">=1.17" },
     { name = "optimum", extras = ["onnxruntime"], marker = "extra == 'semantic'", specifier = ">=1.16" },
     { name = "prompt-toolkit", specifier = ">=3.0.43" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "rich", specifier = ">=13.7.0" },
     { name = "safetensors", marker = "extra == 'semantic'", specifier = ">=0.4" },
-    { name = "scikit-learn", marker = "extra == 'ml'", specifier = ">=1.4" },
+    { name = "scikit-learn", specifier = ">=1.4" },
     { name = "textual", specifier = ">=0.70.0" },
-    { name = "tokenizers", marker = "extra == 'semantic'", specifier = ">=0.15" },
+    { name = "tokenizers", specifier = ">=0.15" },
     { name = "torch", marker = "extra == 'semantic'", specifier = ">=2.2" },
     { name = "transformers", marker = "extra == 'semantic'", specifier = ">=4.40" },
 ]
-provides-extras = ["ml", "semantic"]
+provides-extras = ["semantic"]
 
 [package.metadata.requires-dev]
 dev = [

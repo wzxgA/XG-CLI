@@ -10,22 +10,19 @@ dependencies = [
     "httpx>=0.27.0",
     "python-dotenv>=1.0.1",
     "textual>=0.70.0",
-]
-
-[project.optional-dependencies]
-# SmartRouter ML 精判（第 5 期）：仅离线训练/推理需要，主进程不 import，不装不影响
-ml = [
+    # SmartRouter ML 精判（原 ml extras 并入核心）：TF-IDF + LightGBM 离线训练与精判
     "numpy>=1.26",
     "scikit-learn>=1.4",
     "lightgbm>=4.0",
     "joblib>=1.3",
-]
-# SmartRouter 语义精判（第 6 期）：运行时仅 onnxruntime + tokenizers；
-# torch/transformers/optimum 只在离线导出脚本 tools/export_bge_onnx.py 中 import
-semantic = [
+    # SmartRouter 语义精判（运行时推理两件；torch 等导出大件仍为可选语义 extras）
     "onnxruntime>=1.17",
     "tokenizers>=0.15",
-    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# SmartRouter 语义导出（仅 tools/export_bge_onnx.py 离线重导出模型时需要，通常无需安装）
+semantic = [
     "optimum[onnxruntime]>=1.16",
     "transformers>=4.40",
     "torch>=2.2",

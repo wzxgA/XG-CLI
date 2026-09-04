@@ -7,8 +7,8 @@
     python tools/train_router.py --feedback-only          # 仅 feedback.log（无 TF-IDF 词信号）
     python tools/train_router.py labeled.jsonl --out m.bin
 
-依赖（optional extras，主进程不 import）：
-    pip install ".[ml]"
+依赖（已随项目核心依赖安装，主进程仅离线脚本使用）：
+    pip install -e .
 
 样本来源与去噪（设计依据 phase-05 文档 + 反推标签规则）：
 - 标注数据 JSONL，每行 {"text": "...", "tier": 0..3 或档位名}，权重 1.0；
@@ -199,7 +199,7 @@ def train_and_save(
         from sklearn.model_selection import train_test_split
     except ImportError as exc:  # pragma: no cover - 依赖缺失走友好提示
         raise SystemExit(
-            f"缺少 ML 依赖：{exc}\n请先安装：pip install \".[ml]\""
+            f"缺少 ML 依赖：{exc}\n请先安装：pip install -e . （ML 依赖已并入项目核心）"
         ) from exc
 
     if len(samples) < 2:  # LightGBM 分类器最少需要 2 条样本

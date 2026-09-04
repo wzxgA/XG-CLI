@@ -1,10 +1,11 @@
 # Third-Party Notices
 
-本项目通过 optional extras（`pip install ".[ml]"` / `pip install ".[semantic]"`）
-引入以下第三方依赖，仅用于 SmartRouter 离线训练与可选精判；不安装时主进程不
-加载、功能自动禁用。
+本项目通过核心依赖与 optional extras（`pip install ".[semantic]"`）引入以下第三方依赖。
+ML 精判与语义推理所依赖的 numpy / scikit-learn / LightGBM / joblib / onnxruntime /
+tokenizers 已并入项目核心依赖，`pip install -e .` 即随装；torch/transformers/optimum 等
+重依赖仅在离线导出脚本（`tools/export_bge_onnx.py`）中按需安装，不进入交互主进程。
 
-运行时（交互主进程）仅轻量依赖（onnxruntime + tokenizers / LightGBM 等）；
+运行时（交互主进程）仅用轻量依赖（onnxruntime + tokenizers + LightGBM 等）；
 torch/transformers/optimum 这类重依赖只在离线导出脚本使用。
 
 | 依赖                    | 版本要求   | 许可证          | 用途                          |
