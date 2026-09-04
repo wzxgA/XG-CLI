@@ -105,8 +105,9 @@ class TestErrors:
             await collect(client, [Message(role="user", content="hi")])
 
     async def test_missing_config_raises(self):
-        with pytest.raises(LlmError, match="XG_<PROVIDER>_API_BASE"):
-            OpenAICompatClient("", "", "m")
+        client = OpenAICompatClient("", "", "m")
+        with pytest.raises(LlmError, match="缺少可用的 base provider"):
+            await collect(client, [Message(role="user", content="hi")])
 
     @respx.mock
     async def test_transient_504_retries_then_succeeds(self, settings):

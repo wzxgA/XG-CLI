@@ -1,0 +1,111 @@
+"""测试 /provider 命令（execute_provider_command / CommandService 路由）。"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from tests.test_config import make_manager
+from tests.test_provider_service import raw_manager
+from xg.cli.commands import (
+    CommandContext,
+    CommandResult,
+    CommandService,
+    execute_provider_command,
+)
+
+
+def cmd(manager, raw):
+    return execute_provider_command(manager, None, raw)
+
+
+def test_default_usage_when_no_subcommand(tmp_path: Path):
+    manager = raw_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider")
+    assert ok is True
+    assert "尚未配置任何 provider" in msg
+
+
+def test_add_full_args_sets_base(tmp_path: Path):
+    manager = raw_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider add myproxy https://gateway.my.com/v1 --model deepseek-v4 --set-base")
+    assert ok is True
+    assert "已添加 provider: myproxy" in msg
+    assert "base 已切换: myproxy / deepseek-v4" in msg
+    cfg = manager._merged_config()
+    assert cfg["active_provider"] == "myproxy"
+    assert cfg["active_model"] == "deepseek-v4"
+
+
+def test_add_rejects_backtick(tmp_path: Path):
+    manager = raw_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider add bad `https://x.com/v1 --model m")
+    assert ok is False
+    assert "反引号" in msg
+
+
+def test_add_rejects_duplicate(tmp_path: Path):
+    manager = make_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider add openai https://x.com/v1 --model m")
+    assert ok is False
+    assert "已存在" in msg
+
+
+def test_show_masks_key(tmp_path: Path):
+    manager = make_manager(tmp_path, env={"XG_OPENAI_API_KEY": "sk-abcd12345"})
+    msg, ok = cmd(manager, "/provider show openai")
+    assert ok is True
+    assert "sk-abcd12345" not in msg  # 不暴露明文
+    assert "api_key" in msg
+
+
+def test_set_field(tmp_path: Path):
+    manager = make_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider set openai default_model gpt-5o")
+    assert ok is True
+    assert manager.get_config_value("providers.openai.default_model") == "gpt-5o"
+
+
+def test_switch(tmp_path: Path):
+    manager = make_manager(tmp_path, user_cfg={"active_provider": "openai"})
+    msg, ok = cmd(manager, "/provider switch deepseek")
+    assert ok is True
+    assert manager.active().provider_name == "deepseek"
+
+
+def test_remove_needs_yes(tmp_path: Path):
+    manager = make_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider remove openai")
+    assert ok is False
+    assert "--yes" in msg
+    msg, ok = cmd(manager, "/provider remove openai --yes")
+    assert ok is True
+    assert manager.resolve_provider("openai") is None
+
+
+def test_key_write_needs_yes_when_exists(tmp_path: Path):
+    manager = make_manager(
+        tmp_path, user_cfg={"providers": {"deepseek": {"api_key": "old"}}}
+    )
+    msg, ok = cmd(manager, "/provider key deepseek new")
+    assert ok is False
+    assert "已配置 key" in msg
+    assert "覆盖请加 --yes" in msg
+    msg, ok = cmd(manager, "/provider key deepseek new --yes")
+    assert ok is True
+    assert manager.resolve_provider("deepseek").api_key == "new"  # type: ignore[union-attr]
+
+
+def test_command_service_routes_provider(tmp_path: Path):
+    class FakeSettings:
+        provider = ""
+        model = ""
+
+    class FakeAgent:
+        input_history = None
+
+    manager = raw_manager(tmp_path)
+    ctx = CommandContext(agent=FakeAgent(), settings=FakeSettings(), manager=manager)
+    result = asyncio.run(CommandService(ctx).execute("/provider"))
+    assert isinstance(result, CommandResult)
+    assert "尚未配置任何 provider" in result.message

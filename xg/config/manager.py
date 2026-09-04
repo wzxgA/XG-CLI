@@ -144,7 +144,10 @@ class ConfigManager:
         return sorted(names)
 
     def resolve_provider(self, name: str) -> Provider | None:
-        """返回合并配置后的 provider；未定义返回 None。"""
+        """返回合并配置后的 provider；未定义返回 None。
+
+        API Key: 优先 providers.<name>.api_key；若缺失且占位值则视为未配置。
+        """
         cfg = (self._merged_config().get("providers") or {}).get(name)
         if not isinstance(cfg, dict):
             cfg = None
@@ -153,27 +156,37 @@ class ConfigManager:
         if base is None and cfg is None:
             return None
 
+        def _extract_api_key(cfg_dict: dict | None) -> str:
+            if not cfg_dict:
+                return ""
+            key = str(cfg_dict.get("api_key", "")).strip()
+            if _is_placeholder(key):
+                return ""
+            return key
+
         if base is None:
             required = ("api_base", "default_model")
             if not cfg or not all(cfg.get(k) for k in required):
                 return None
+            api_key = _extract_api_key(cfg)
             return Provider(
                 name=name,
                 display_name=str(cfg.get("display_name", name)),
                 api_base=str(cfg["api_base"]),
-                api_key_env=str(cfg.get("api_key_env") or _api_key_env_for(name)),
                 default_model=str(cfg["default_model"]),
+                api_key=api_key,
                 context_window=int(cfg.get("context_window", DEFAULT_CONTEXT_WINDOW)),
                 supports_cache=bool(cfg.get("supports_cache", False)),
                 supports_vision=bool(cfg.get("supports_vision", False)),
             )
 
+        api_key = _extract_api_key(cfg) or base.api_key
         return Provider(
             name=base.name,
             display_name=str((cfg or {}).get("display_name", base.display_name)),
             api_base=str((cfg or {}).get("api_base", base.api_base)),
-            api_key_env=str((cfg or {}).get("api_key_env", base.api_key_env)),
             default_model=str((cfg or {}).get("default_model", base.default_model)),
+            api_key=api_key,
             context_window=int((cfg or {}).get("context_window", base.context_window)),
             supports_cache=base.supports_cache,
             supports_vision=base.supports_vision,
@@ -183,21 +196,15 @@ class ConfigManager:
         return [p for name in self.provider_names() if (p := self.resolve_provider(name))]
 
     def resolve_api_base(self, provider: Provider) -> str:
-        """URL 读取链：XG_<NAME>_API_BASE 环境变量 > 配置文件/预设 > （openai）兼容旧键 XG_API_BASE。"""
-        env_base = self.env.get(f"XG_{provider.name.upper()}_API_BASE")
-        if not env_base and provider.name == "openai":
-            env_base = self.env.get("XG_API_BASE")
-        return env_base or provider.api_base
+        """URL 读取：provider 来自 config.json 的 providers.<name>.api_base（不走 .env）。"""
+        return provider.api_base
 
     def resolve_api_key(self, provider: Provider) -> str:
-        """API Key：仅使用专属 XG_<NAME>_API_KEY，不设通用兜底。
+        """API Key：读取 config.json 的 providers.<name>.api_key（不走 .env）。
 
         占位值（如 sk-xxx / xxx）视为未配置，避免占位符被当真实 key 使用。
         """
-        value = self.env.get(provider.api_key_env, "")
-        if not _is_placeholder(value):
-            return value
-        return ""
+        return provider.api_key if not _is_placeholder(provider.api_key) else ""
 
     def resolve_window(self, provider: Provider) -> int:
         """上下文窗口：XG_CONTEXT_WINDOW 环境变量 > provider 能力。"""
@@ -211,24 +218,24 @@ class ConfigManager:
 
     def active(self) -> ActiveConfig:
         merged = self._merged_config()
-        # 激活的 base provider：环境变量 XG_PROVIDER > 配置文件 active_provider。
-        # 不再有隐式 openai 兜底——未配置可用的 provider 时 fail-fast 提示。
-        provider_name = self.env.get("XG_PROVIDER", "") or str(merged.get("active_provider", "") or "")
+        # 激活的 base provider 只认 config.json 的 active_provider（不再读 XG_PROVIDER）。
+        # 未配置可用的 provider 时 fail-fast 提示。
+        provider_name = str(merged.get("active_provider", "") or "")
         provider = self.resolve_provider(provider_name) if provider_name else None
         if provider is None:
             raise ProviderNotConfigured(
-                f"未配置可用的 base provider。请设置 XG_PROVIDER（或配置 active_provider）"
-                f"，并在 providers 中定义；API Key 通过 {_api_key_env_for(provider_name) if provider_name else "XG_<NAME>_API_KEY"} 提供。"
+                "未配置可用的 base provider。请在 config.json 的 providers 中定义 "
+                f"{provider_name or '<name>'}（name / api_base / default_model / api_key），"
+                "并设置 active_provider 选中 base；配置可全程用 /provider 命令或 TUI 面板完成。"
             )
 
-        # 模型：配置 active_model > 环境变量 XG_MODEL > provider 默认
+        # 模型：配置 active_model > provider 默认（不再读 XG_MODEL）
         model = (
             str(merged.get("active_model", "") or "")
-            or self.env.get("XG_MODEL", "")
             or provider.default_model
         )
-        # base url：专属环境变量 > 配置文件/预设；旧键 XG_API_BASE 仅兜底 openai
-        api_base = self.resolve_api_base(provider)
+        # base url：来自 config.json 的 api_base
+        api_base = provider.api_base
 
         return ActiveConfig(
             provider_name=provider.name,
@@ -261,6 +268,51 @@ class ConfigManager:
             node = nxt
         node[keys[-1]] = value
         self._write_config(self.user_config_path, user)
+
+    # ---------- provider 分层读写 ----------
+
+    def provider_layer(self, name: str) -> str:
+        """返回定义该 provider 的配置层：project > user > ''（项目级优先）。"""
+        project = (self._read_config(self.project_config_path).get("providers") or {})
+        user = (self._read_config(self.user_config_path).get("providers") or {})
+        if name in project:
+            return "project"
+        if name in user:
+            return "user"
+        return ""
+
+    def upsert_provider(self, name: str, fields: dict) -> str:
+        """写入/更新 provider 字段到其**生效层**（项目级优先，缺省 user）。
+
+        返回实际写入的层名（``user`` / ``project``）。只有 ``None`` 值的字段会被忽略，
+        以便做部分更新（如只改 api_base 时保留 display_name）。
+        """
+        layer = self.provider_layer(name) or "user"
+        path = self.project_config_path if layer == "project" else self.user_config_path
+        data = self._read_config(path)
+        providers = data.setdefault("providers", {})
+        existing = providers.get(name)
+        updates = {k: v for k, v in fields.items() if v is not None}
+        if isinstance(existing, dict):
+            existing.update(updates)
+        else:
+            providers[name] = updates
+        self._write_config(path, data)
+        return layer
+
+    def delete_provider(self, name: str) -> bool:
+        """从用户级与项目级配置中删除该 provider；返回是否实际删除（清理悬空节）。"""
+        changed = False
+        for path in (self.user_config_path, self.project_config_path):
+            data = self._read_config(path)
+            providers = data.get("providers")
+            if isinstance(providers, dict) and name in providers:
+                del providers[name]
+                if not providers:
+                    data.pop("providers", None)
+                self._write_config(path, data)
+                changed = True
+        return changed
 
     def get_config_value(self, dotted_key: str) -> str | None:
         """从合并配置读取值；非标量时返回 JSON 字符串。"""

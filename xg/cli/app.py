@@ -26,7 +26,7 @@ from xg.agent.react import DEFAULT_SYSTEM_PROMPT, AgentEvent, ReActAgent
 from xg.agent.team import TeamEvent, TeamExecutor, TeamPlan, TeamTask
 from xg.adaptive.feedback import FeedbackRecorder, text_hash
 from xg.adaptive.signals import capture_interrupt, capture_turn_signals
-from xg.config.manager import ConfigManager, mask_key
+from xg.config.manager import ConfigManager, ProviderNotConfigured, mask_key
 from xg.config.mcp import McpConfigManager
 from xg.config.settings import Settings, load_settings
 from xg.config.web import WebConfigManager
@@ -696,6 +696,10 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
                 from xg.cli.commands import execute_history_command
 
                 message, should_exit = await execute_history_command(agent, user_input)
+            elif user_input.split(maxsplit=1)[0].lower() == "/provider":
+                from xg.cli.commands import execute_provider_command
+
+                message, should_exit = execute_provider_command(manager, settings, user_input)
             else:
                 message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:
@@ -751,6 +755,13 @@ def _handle_command(
         return _cmd_smart_router(agent, settings, manager, arg), False
     if cmd == "/config":
         return _cmd_config(agent, settings, manager, arg), False
+    if cmd == "/provider":
+        from xg.cli.commands import execute_provider_command
+
+        message, ok = execute_provider_command(manager, settings, raw)
+        if ok:
+            _reapply_active(agent, settings, manager)
+        return message, ok
     if cmd == "/hitl":
         return _cmd_hitl(agent, arg), False
     if cmd == "/save":
@@ -1051,7 +1062,7 @@ def _attach_model(
         return f"未知 provider: {provider_name}"
     key = manager.resolve_api_key(provider)
     if not key:
-        return f"缺少 {provider.api_key_env} 配置，无法使用 {provider.name}。"
+        return f"缺少 {provider.name} 的 api_key 配置，无法使用。请用 /provider key {provider.name} <KEY> 写入 config.json。"
     agent.llm = create_client(
         manager.resolve_api_base(provider), key, model,
         retry_enabled=settings.llm_retry_enabled,
@@ -1147,8 +1158,8 @@ def _switch(
     key = manager.resolve_api_key(provider)
     if not key:
         return (
-            f"缺少 {provider.api_key_env} 配置，无法切换到 {provider.name}。"
-            f"请在 .env / 环境变量中配置。"
+            f"缺少 {provider.name} 的 api_key 配置，无法切换到 {provider.name}。"
+            f"请用 /provider key {provider.name} <KEY> 写入 config.json。"
         )
     model = model or provider.default_model
 
@@ -1170,6 +1181,22 @@ def _switch(
     )
     manager.set_active(provider.name, model)
     return f"已切换: {provider.display_name} / {model}"
+
+
+def _reapply_active(
+    agent: ReActAgent, settings: Settings, manager: ConfigManager
+) -> None:
+    """/provider 变更后把运行中 client 同步到当前 base，配好即用、无需重启。
+
+    仅同步到能解析的 base；key/api_base 仍缺时保持原样，由调用期引导兜底。
+    """
+    try:
+        active = manager.active()
+    except ProviderNotConfigured:
+        return
+    msg = _switch(agent, settings, manager, active.provider_name, active.model)
+    if msg.startswith("已切换"):
+        console.print(Text(msg, style="dim"))
 
 
 def _cmd_config(
@@ -1264,28 +1291,25 @@ def main(argv: list[str] | None = None) -> None:
         console.print(
             Panel(
                 Text(
-                    "未配置 base provider。请在 config.json 的 providers 中自定义服务商"
-                    "（name / api_base / default_model），设置 XG_PROVIDER（或 active_provider）"
-                    "选中 base，并为其配置 XG_<NAME>_API_KEY。"
+                    "尚未配置 base provider。启动不阻断，可正常进入会话："
+                    "输入 /provider（TUI 或按 Ctrl+P）配置服务商与 API Key 后即可使用；"
+                    "仅在真正调用模型时才会提示缺失。"
                 ),
-                style="red",
+                style="yellow",
             )
         )
-        sys.exit(1)
-    if not settings.api_base or not settings.api_key:
+    elif not settings.api_base or not settings.api_key:
         console.print(
             Panel(
                 Text(
-                    "缺少 API Key 配置。请在 .env / 环境变量中配置，例如 "
-                    "XG_OPENAI_API_KEY 或 XG_DEEPSEEK_API_KEY；或用 /model 切换 provider。"
+                    "当前 base provider 缺少 API Key 配置。进入后可用 /provider show <name> 查看、"
+                    "/provider key <name> <KEY> 写入；仅在真正调用模型时才会提示缺失。"
                 ),
-                style="red",
+                style="yellow",
             )
         )
-        sys.exit(1)
-    if not settings.model:
-        console.print(Panel(Text("缺少模型配置（XG_MODEL 或 provider 默认模型）。"), style="red"))
-        sys.exit(1)
+    elif not settings.model:
+        console.print(Panel(Text("当前 base provider 缺少模型配置（provider 需指定 default_model）。"), style="yellow"))
 
     agent = build_agent(settings, config_manager=manager)
     try:

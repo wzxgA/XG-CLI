@@ -186,11 +186,15 @@ class TestModelTiers:
         project_dir = tmp_path / "proj_xg"
         user_dir.mkdir(exist_ok=True)
         project_dir.mkdir(exist_ok=True)
-        (user_dir / "config.json").write_text(
-            _json.dumps(seed_config({})), encoding="utf-8"
-        )
+        cfg = seed_config({})
+        env = env or {}
+        for name in list(cfg.get("providers", {})):
+            ek = f"XG_{name.upper()}_API_KEY"
+            if env.get(ek):
+                cfg["providers"][name]["api_key"] = env[ek]
+        (user_dir / "config.json").write_text(_json.dumps(cfg), encoding="utf-8")
         return ConfigManager(user_dir=user_dir, project_dir=project_dir,
-                             env=dict(env or {}), load_env=False)
+                             env=dict(env), load_env=False)
 
     def test_fallback_when_not_configured(self):
         t = resolve(0, "deepseek", "deepseek-chat")
@@ -245,11 +249,18 @@ class TestModelTiersValidation:
         project_dir = tmp_path / "proj_xg"
         user_dir.mkdir(exist_ok=True)
         project_dir.mkdir(exist_ok=True)
+        cfg = seed_config(user_cfg or {})
+        env = env or {}
+        # env 里 XG_<NAME>_API_KEY 迁到 config 的 providers.<name>.api_key
+        for name in list(cfg.get("providers", {})):
+            ek = f"XG_{name.upper()}_API_KEY"
+            if env.get(ek):
+                cfg["providers"][name]["api_key"] = env[ek]
         (user_dir / "config.json").write_text(
-            _json.dumps(seed_config(user_cfg or {})), encoding="utf-8"
+            _json.dumps(cfg), encoding="utf-8"
         )
         return ConfigManager(user_dir=user_dir, project_dir=project_dir,
-                             env=dict(env or {}), load_env=False)
+                             env=dict(env), load_env=False)
 
     def test_valid_provider_with_key_passes(self, tmp_path):
         manager = self._manager(tmp_path, env={"XG_GLM_API_KEY": "gk"})

@@ -141,6 +141,32 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
         ),
     ),
     SlashCommandSpec(
+        "/provider",
+        usage="/provider [list|add|show|set|switch|remove|key] ...",
+        description="在界面内管理 provider（增删改查、切 base、写 Key）",
+        category="config",
+        details=(
+            "全程界面配置即可，无需手改文件：provider 定义与 API Key 一律写入 config.json。",
+            "add 参数齐全即直接执行；缺省参数会提示所需字段。",
+            "remove 与覆盖已有 Key 需加 --yes 确认。",
+        ),
+        subcommands=(
+            SlashSubcommandSpec("list", "/provider", "列出所有 provider（标注是否 base 与来源层）"),
+            SlashSubcommandSpec("add", "/provider add <name> <api_base> [--model M] [--label L] [--key K] [--set-base]", "新增一个 provider"),
+            SlashSubcommandSpec("show", "/provider show <name>", "查看单个 provider（Key 脱敏）"),
+            SlashSubcommandSpec("set", "/provider set <name> <field> <value>", "改单一字段：api_base|default_model|display_name"),
+            SlashSubcommandSpec("switch", "/provider switch <name> [model]", "切换 base provider"),
+            SlashSubcommandSpec("remove", "/provider remove <name> [--yes]", "删除 provider（需 --yes 确认）"),
+            SlashSubcommandSpec("key", "/provider key <name> <KEY> [--yes]", "写入/覆盖 API Key 到 config.json"),
+        ),
+        examples=(
+            "/provider",
+            "/provider add myproxy https://gateway.my.com/v1 --model deepseek-v4 -k sk_x --set-base",
+            "/provider switch deepseek",
+            "/provider show myproxy",
+        ),
+    ),
+    SlashCommandSpec(
         "/mcp",
         usage="/mcp status|restart|logs|enable|disable|resources",
         description="管理 MCP Server",
@@ -369,6 +395,15 @@ class CommandService:
         if parts[0].lower() in ("/lang", "/language"):
             return _execute_language_command(self.context.settings, self.context.manager, raw)
 
+        if parts[0].lower() == "/provider":
+            message, ok = execute_provider_command(self.context.manager, self.context.settings, raw)
+            if ok and self.context.agent is not None:
+                # TUI/CommandService 路径：/provider 变更后热同步运行中 client
+                #（与 inline _handle_command 保持一致，配好即用、无需重启）。
+                from xg.cli.app import _reapply_active
+
+                _reapply_active(self.context.agent, self.context.settings, self.context.manager)
+            return CommandResult(ok=ok, message=message)
         if parts[0].lower() == "/mcp":
             message, ok = await execute_mcp_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
@@ -565,3 +600,156 @@ async def execute_history_command(agent: Any, raw: str) -> tuple[str, bool]:
         count = history.clear(persistent=True)
         return f"已清理输入历史（{count} 条）。", True
     return "用法: /history status|clear", False
+
+
+# ---------------------------------------------------------------------------
+# /provider 命令（共享给 inline 与 TUI；确定性实现，确认动作走 --yes）
+# ---------------------------------------------------------------------------
+
+def _provider_service(manager: Any, settings: Any) -> Any:
+    from xg.config.provider_service import ProviderConfigService
+
+    return ProviderConfigService(manager, settings)
+
+
+def _provider_usage(sub: str) -> str:
+    usage = {
+        "list": "/provider",
+        "add": "/provider add <name> <api_base> [--model M] [--label L] [--key K] [--set-base]",
+        "show": "/provider show <name>",
+        "set": "/provider set <name> <field> <value>  （field: api_base|default_model|display_name）",
+        "switch": "/provider switch <name> [model]",
+        "remove": "/provider remove <name> [--yes]",
+        "key": "/provider key <name> <KEY> [--yes]",
+    }
+    return usage.get(sub, "/provider [list|add|show|set|switch|remove|key]")
+
+
+def _consume_flags(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
+    """把 ``--key k --model m`` 这类选项从 tokens 中拆出；返回 (flags, 剩余位置参数)。"""
+    flags: dict[str, str] = {}
+    positional: list[str] = []
+    i = 0
+    alias = {"--label": "--label", "-l": "--label", "--model": "--model", "-m": "--model", "--key": "--key", "-k": "--key"}
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in alias:
+            # --label 可接单个 token（空格分隔暂不拼接多词 display_name）
+            if i + 1 < len(tokens):
+                flags[alias[tok]] = tokens[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok in ("--set-base",):
+            flags["--set-base"] = "1"
+            i += 1
+            continue
+        if tok in ("--yes", "-y"):
+            flags["--yes"] = "1"
+            i += 1
+            continue
+        positional.append(tok)
+        i += 1
+    return flags, positional
+
+
+def execute_provider_command(manager: Any, settings: Any, raw: str) -> tuple[str, bool]:
+    """执行 /provider 子命令，返回 (message, ok)。"""
+    parts = raw.split()
+    sub = parts[1].lower() if len(parts) > 1 else "list"
+    service = _provider_service(manager, settings)
+
+    if sub in {"list", ""}:
+        if sub != "list" and len(parts) > 1 and parts[1].lower() != "list":
+            return _provider_usage("list"), False
+        return _render_provider_list(service), True
+
+    if sub == "add":
+        flags, positional = _consume_flags(parts[2:])
+        if len(positional) < 2:
+            return _provider_usage("add"), False
+        name, api_base = positional[0], positional[1]
+        result = service.add(
+            name,
+            api_base,
+            flags.get("--model", ""),
+            display_name=flags.get("--label"),
+            api_key=flags.get("--key"),
+        )
+        if not result.ok:
+            return result.message, False
+        if "--set-base" in flags:
+            switch_result = service.switch(name)
+            return f"{result.message}\n{switch_result.message}", switch_result.ok
+        return result.message, True
+
+    if sub == "show":
+        flags, positional = _consume_flags(parts[2:])
+        if not positional:
+            return _provider_usage("show"), False
+        row = service.get(positional[0])
+        if row is None:
+            return f"未知 provider: {positional[0]}", False
+        return "\n".join(
+            [
+                f"name:        {row['name']}",
+                f"display:     {row['display_name']}",
+                f"api_base:    {row['api_base']}",
+                f"default:     {row['default_model']}",
+                f"api_key:     {row['api_key_masked']}（config.json）",
+                f"key 已配置:    {'✓' if row['has_key'] else '✗'}",
+                f"is_base:     {'✓' if row['is_base'] else '✗'}",
+                f"来源层:       {row['layer']}",
+            ]
+        ), True
+
+    if sub == "switch":
+        flags, positional = _consume_flags(parts[2:])
+        if not positional:
+            return _provider_usage("switch"), False
+        model = positional[1] if len(positional) > 1 else None
+        result = service.switch(positional[0], model)
+        return result.message, result.ok
+
+    if sub == "set":
+        flags, positional = _consume_flags(parts[2:])
+        if len(positional) < 3:
+            return _provider_usage("set"), False
+        name, field, value = positional[0], positional[1], positional[2]
+        result = service.update(name, {field: value})
+        return result.message, result.ok
+
+    if sub == "key":
+        flags, positional = _consume_flags(parts[2:])
+        if len(positional) < 2:
+            return _provider_usage("key"), False
+        result = service.set_api_key(positional[0], positional[1], yes="--yes" in flags)
+        return result.message, result.ok
+
+    if sub == "remove":
+        flags, positional = _consume_flags(parts[2:])
+        if not positional:
+            return _provider_usage("remove"), False
+        result = service.remove(positional[0], yes="--yes" in flags)
+        return result.message, result.ok
+
+    return _provider_usage(""), False
+
+
+def _render_provider_list(service: Any) -> str:
+    rows = service.list()
+    if not rows:
+        return "尚未配置任何 provider。\n用法: /provider add <name> <api_base> --model <M> [--key K] [--set-base]"
+    lines = ["NAME              DISPLAY        BASE_URL                              DEFAULT_MODEL   KEY  BASE  LAYER"]
+    for row in rows:
+        lines.append(
+            f"{row['name']:<16}"
+            f"{row['display_name'][:12]:<12}"
+            f"{row['api_base'][:36]:<36}"
+            f"{row['default_model'][:18]:<18}"
+            f"{'✓' if row['has_key'] else '✗':^4}"
+            f"{'●' if row['is_base'] else ' ':^6}"
+            f"{row['layer']}"
+        )
+    return "\n".join(lines)

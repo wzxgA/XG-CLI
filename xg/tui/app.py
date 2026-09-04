@@ -62,6 +62,7 @@ class XgTuiApp(App[None]):
         ("ctrl+4", "inspector_safety", "Inspector Safety"),
         ("ctrl+tab", "inspector_next", "下一个 Inspector 视图"),
         ("ctrl+shift+tab", "inspector_previous", "上一个 Inspector 视图"),
+        ("ctrl+p", "provider_panel", "Provider 面板"),
     ]
 
     def __init__(self, agent, settings: Settings, manager: ConfigManager) -> None:
@@ -584,6 +585,11 @@ class XgTuiApp(App[None]):
 
     def action_inspector_previous(self) -> None:
         self.controller.cycle_inspector_view(-1)
+
+    def action_provider_panel(self) -> None:
+        from xg.tui.widgets.provider_panel import open_provider_screen
+
+        open_provider_screen(self, self.manager, self.settings)
 
     async def on_unmount(self) -> None:
         self._stop_progress_timer()

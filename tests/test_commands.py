@@ -32,21 +32,42 @@ def make_context(tmp_path: Path, env: dict) -> tuple[ReActAgent, Settings, Confi
     project_dir = tmp_path / "proj_xg"
     user_dir.mkdir(exist_ok=True)
     project_dir.mkdir(exist_ok=True)
-    # 命令测试以 openai 作为显式 base provider；未提供时默认 openai（不再隐式兜底）。
-    # 注入默认自定义 providers 保证 manager 可解析；已有配置（如 smart_router）保留。
+    # 命令测试以 openai 作为显式 base provider（不再隐式兜底）。
+    # provider 身份/key/url 一律进 config.json；env 不再参与 provider 选型。
     cfg_path = user_dir / "config.json"
     existing = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
-    cfg_path.write_text(json.dumps(seed_config(existing)), encoding="utf-8")
-    full_env = {"XG_PROVIDER": "openai", **dict(env)}
+    merged = seed_config(existing)
+    providers = merged.setdefault("providers", {})
+    # 兼容旧测试写法：把 env 里 XG_<NAME>_API_KEY 迁到 config 的 providers.<name>.api_key
+    for pname in providers:
+        ek = f"XG_{pname.upper()}_API_KEY"
+        if env.get(ek):
+            providers[pname]["api_key"] = env[ek]
+    # base 选型 / 模型：由 env 迁到 config（active_provider / active_model）。
+    # 保持旧命令测试语义：默认 base 为 openai（除非显式传 XG_PROVIDER）。
+    merged["active_provider"] = env.get("XG_PROVIDER", "openai")
+    if "XG_MODEL" in env:
+        merged["active_model"] = env["XG_MODEL"]
+    # XG_<NAME>_API_BASE：迁到 config 的 providers.<name>.api_base
+    for pname in providers:
+        eurl = f"XG_{pname.upper()}_API_BASE"
+        if env.get(eurl):
+            providers[pname]["api_base"] = env[eurl]
+    cfg_path.write_text(json.dumps(merged), encoding="utf-8")
+
     manager = ConfigManager(
-        user_dir=user_dir, project_dir=project_dir, env=dict(full_env), load_env=False
+        user_dir=user_dir, project_dir=project_dir, env=dict(env), load_env=False
     )
+    try:
+        active = manager.active()
+    except ProviderNotConfigured:
+        active = None
     settings = Settings(
-        provider="openai",
-        api_base=env.get("XG_API_BASE", "https://api.openai.com/v1"),
-        api_key=env.get("XG_OPENAI_API_KEY", ""),
-        model=env.get("XG_MODEL", "gpt-4o-mini"),
-        context_window=128_000,
+        provider=active.provider_name if active else "",
+        api_base=active.api_base if active else env.get("XG_API_BASE", "https://api.openai.com/v1"),
+        api_key=active.api_key if active else "",
+        model=active.model if active else env.get("XG_MODEL", "gpt-4o-mini"),
+        context_window=active.context_window if active else 128_000,
     )
     agent = ReActAgent(llm=DummyClient(), tools=build_registry(base_dir=tmp_path), settings=settings)
     return agent, settings, manager
@@ -126,11 +147,11 @@ class TestModelCommand:
         """无通用兜底：目标 provider 未配专属 Key 时拒绝切换。"""
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "缺少 XG_DEEPSEEK_API_KEY" in output
+        assert "缺少 deepseek 的 api_key" in output
         assert settings.provider == "openai"
         assert isinstance(agent.llm, DummyClient)
         cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
-        assert "active_provider" not in cfg  # 拒绝的切换不应持久化
+        assert cfg["active_provider"] == "openai"  # 拒绝的切换不应改变 base
 
     def test_switch_without_any_key_rejected(self, tmp_path):
         """完全没有 Key 时拒绝切换。"""
@@ -140,7 +161,7 @@ class TestModelCommand:
         assert settings.provider == "openai"
         assert isinstance(agent.llm, DummyClient)
         cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
-        assert "active_provider" not in cfg  # 拒绝的切换不应持久化
+        assert cfg["active_provider"] == "openai"  # 拒绝的切换不应改变 base
 
     def test_unknown_token_treated_as_model_name(self, tmp_path):
         """不在 provider 列表中的参数，按当前 provider 内切换模型处理。"""
@@ -150,11 +171,11 @@ class TestModelCommand:
         assert settings.model == "my-fancy-model"
 
     def test_custom_provider_switchable(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {"XG_CUSTOM_API_KEY": "ck"})
+        agent, settings, manager = make_context(tmp_path, {})
         manager.set_config_value(
             "providers.myproxy.api_base", "https://my-proxy.test/v1"
         )
-        manager.set_config_value("providers.myproxy.api_key_env", "XG_CUSTOM_API_KEY")
+        manager.set_config_value("providers.myproxy.api_key", "ck")
         manager.set_config_value("providers.myproxy.default_model", "my-model")
         output = run_cmd(agent, settings, manager, "/model myproxy")
         assert "已切换: myproxy / my-model" in output
@@ -357,7 +378,7 @@ class TestSmartRouterCommand:
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         run_cmd(agent, settings, manager, "/smartRouter on")
         output = run_cmd(agent, settings, manager, "/model deepseek")  # 无 deepseek key
-        assert "缺少 XG_DEEPSEEK_API_KEY" in output
+        assert "缺少 deepseek 的 api_key" in output
         assert settings.smart_router_enabled is True  # 保持开启
 
 
@@ -397,7 +418,7 @@ class TestSmartRouterRouting:
         assert agent.llm.model == "glm-4-plus"  # type: ignore[attr-defined]
         # 关键：不写回持久化 active_provider/active_model
         cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
-        assert "active_provider" not in cfg
+        assert cfg["active_provider"] == "openai"  # 路由切换不改变持久化 base
 
     def test_route_same_model_keeps_client(self, tmp_path):
         from xg.cli.app import _route_user_turn
@@ -434,7 +455,7 @@ class TestSmartRouterRouting:
 
 def test_slash_command_catalog_is_stable_and_prefix_filtered():
     assert [spec.name for spec in filter_slash_commands("/")][:5] == [
-        "/plan", "/team", "/model", "/config", "/mcp"
+        "/plan", "/team", "/model", "/config", "/provider"
     ]
     assert [spec.name for spec in filter_slash_commands("/m")] == ["/model", "/mcp", "/memory"]
     assert [spec.name for spec in filter_slash_commands("/PL")] == ["/plan"]

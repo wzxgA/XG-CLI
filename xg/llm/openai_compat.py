@@ -86,9 +86,8 @@ class OpenAICompatClient(LlmClient):
         retry_total_timeout: float = 30.0,
         respect_retry_after: bool = True,
     ) -> None:
-        if not api_base or not api_key:
-            raise LlmError("缺少 API 配置：请设置 XG_<PROVIDER>_API_BASE / XG_<PROVIDER>_API_KEY（见 .env.example）")
-        self.api_base = api_base.rstrip("/")
+        # F5：允许以空配置构造（启动不阻断），真正调用时再拦截并给出引导。
+        self.api_base = (api_base or "").rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
@@ -154,6 +153,12 @@ class OpenAICompatClient(LlmClient):
     async def _stream_once(
         self, messages: list[Message], tools: list[dict] | None
     ) -> AsyncIterator[StreamEvent]:
+        if not self.api_base or not self.api_key or not self.model:
+            # F5：仅调用 LLM 时拦截，提示在会话内配置即可用，无需重启。
+            raise LlmError(
+                "缺少可用的 base provider / API Key。请在会话内用 /provider 配置，"
+                "例如 /provider add <name> <api_base> --model M --key K --set-base。"
+            )
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [m.to_api() for m in messages],
