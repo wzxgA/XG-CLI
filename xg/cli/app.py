@@ -1011,6 +1011,18 @@ def _cmd_smart_router(
                 lines.append(f"  ML 精判: 可用{suffix}")
             else:
                 lines.append("  ML 精判: 离线（未训练 / 未装依赖，回落规则路由）")
+            # 语义通道（phase-06 C3）：可用性/产物/耗时/有效样本 观测
+            sem = ml.semantic
+            if sem is not None:
+                if sem.available:
+                    lines.append(
+                        f"  语义通道: 可用（{sem.dim}维，已编码 {sem.calls} 次，"
+                        f"平均 {sem.avg_ms:.1f}ms/次，最近 {sem.last_ms:.1f}ms）"
+                    )
+                elif sem.artifact_exists:
+                    lines.append("  语义通道: 不可用（产物存在但加载失败 / 缺依赖，回落纯 TF-IDF）")
+                else:
+                    lines.append("  语义通道: 未安装（无产物，回落纯 TF-IDF 精判）")
         return "\n".join(lines)
 
     return "用法: /smartRouter on|off|status|reset"

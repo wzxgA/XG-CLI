@@ -98,6 +98,11 @@ class MLRouter:
         """训练时并入的语义特征维度（0=无语义，纯第 5 期行为）。"""
         return self._sem_dim
 
+    @property
+    def semantic(self) -> object | None:
+        """绑定的语义编码器（可能为 None）；供 status 观测。"""
+        return self._semantic
+
     # -- 预测 -----------------------------------------------------------
     def _encode(self, text: str, features: dict | None):
         """把 text + 数值特征 拼成 (TF-IDF, 数值) 稀疏输入；无需义时行为同第 5 期。

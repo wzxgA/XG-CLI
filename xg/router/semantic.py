@@ -29,6 +29,10 @@ class SemanticEncoder:
         self._path = onnx_path or _default_onnx_path()
         self._session = None
         self._tokenizer = None
+        # C3 观测：成功编码统计（每轮耗时 + 有效样本量），供 /smartRouter status 展示
+        self._calls = 0
+        self._total_ms = 0.0
+        self._last_ms = 0.0
         self._load()
 
     def _load(self) -> None:
@@ -67,13 +71,35 @@ class SemanticEncoder:
     def dim(self) -> int:
         return _EMBED_DIM
 
+    @property
+    def artifact_exists(self) -> bool:
+        """产物（.onnx）是否存在于预期路径（C3 观测）。"""
+        return self._path.exists()
+
+    @property
+    def calls(self) -> int:
+        """成功完成编码的轮次数（有效样本量观测）。"""
+        return self._calls
+
+    @property
+    def avg_ms(self) -> float:
+        """累计平均每轮编码耗时（毫秒）。"""
+        return (self._total_ms / self._calls) if self._calls else 0.0
+
+    @property
+    def last_ms(self) -> float:
+        """最近一轮编码耗时（毫秒）。"""
+        return self._last_ms
+
     def encode(self, text: str) -> list[float] | None:
         """把整段文本编码为 512 维向量；不可用返回 None（静默回落）。
 
-        bge 取 first token（[CLS]）向量并做 L2 归一化。
+        bge 取 first token（[CLS]）向量并做 L2 归一化；成功时记录轮次耗时。
         """
         if not self.available or not text:
             return None
+        import time  # noqa: PLC0415
+        t0 = time.perf_counter()
         try:
             import numpy as np  # noqa: PLC0415
             enc = self._tokenizer.encode(text)
@@ -92,6 +118,9 @@ class SemanticEncoder:
             norm = float(np.linalg.norm(vec))
             if norm < 1e-9:
                 return [0.0] * _EMBED_DIM
+            self._last_ms = (time.perf_counter() - t0) * 1000.0
+            self._total_ms += self._last_ms
+            self._calls += 1
             return (vec / norm).tolist()
         except Exception:
             return None
