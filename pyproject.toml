@@ -20,6 +20,17 @@ ml = [
     "lightgbm>=4.0",
     "joblib>=1.3",
 ]
+# SmartRouter 语义精判（第 6 期）：运行时仅 onnxruntime + tokenizers；
+# torch/transformers/optimum 只在离线导出脚本 tools/export_bge_onnx.py 中 import
+semantic = [
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "numpy>=1.26",
+    "optimum[onnxruntime]>=1.16",
+    "transformers>=4.40",
+    "torch>=2.2",
+    "safetensors>=0.4",
+]
 
 [project.scripts]
 xg = "xg.cli.app:main"

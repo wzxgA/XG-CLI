@@ -16,10 +16,12 @@ from typing import Any
 
 from . import data_dir
 
-# 三个数据文件名
+# 数据文件名
 FEEDBACK_LOG = "feedback.log"        # JSONL 追加，只增不改
 CALIBRATION_JSON = "calibration.json"  # 校准结果，原子写
-LEARNED_RULES_JSON = "learned_rules.json"  # 自学习规则，re_learn 落盘（见 learned_rules.py）
+LEARNED_RULES_JSON = "learned_rules.json"  # 自学习规则
+ML_ROUTER_BIN = "router.lgb"         # 第 5 期 ML 精判产物（joblib 容器）
+SEMANTIC_ONNX = "router_semantics.onnx"  # 第 6 期 bge 语义编码器（ONNX int8）落盘（见 learned_rules.py）
 
 
 def feedback_log_path() -> Path:
@@ -32,6 +34,10 @@ def calibration_path() -> Path:
 
 def learned_rules_path() -> Path:
     return data_dir() / LEARNED_RULES_JSON
+
+
+def semantic_onnx_path() -> Path:
+    return data_dir() / SEMANTIC_ONNX
 
 
 def reset_adaptive_data() -> list[str]:
