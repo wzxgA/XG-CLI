@@ -59,9 +59,21 @@ class TestSemanticFallback:
         import xg.router.semantic as s
         assert callable(s.load_semantic_encoder)
 
-    def test_factory_returns_unavailable(self, monkeypatch):
-        monkeypatch.setenv("XG_ADAPTIVE_DIR", "C:/__xg_never_exists__")
-        assert not load_semantic_encoder(None).available
+    def test_factory_returns_unavailable(self, tmp_path):
+        # 传显式缺失路径 → 不触发随包落位，回落（available=False）
+        p = tmp_path / "no_such" / "router_semantics.onnx"
+        assert not p.exists()
+        assert not load_semantic_encoder(p).available
+
+
+@pytest.mark.skipif(not _semantic_available(), reason="未安装 semantic extras")
+def test_factory_bundles_artifact_to_empty_dir(tmp_path, monkeypatch):
+    """B：空数据目录首启调用 factory → 随包产物(xg/assets)自动落位并可用。"""
+    monkeypatch.setenv("XG_ADAPTIVE_DIR", str(tmp_path))
+    enc = load_semantic_encoder(None)
+    assert enc.available
+    assert enc.artifact_exists
+    assert (tmp_path / "router_semantics.json").exists()
 
 
 @pytest.mark.skipif(not _semantic_available(), reason="未安装 semantic extras")

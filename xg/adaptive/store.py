@@ -22,6 +22,7 @@ CALIBRATION_JSON = "calibration.json"  # 校准结果，原子写
 LEARNED_RULES_JSON = "learned_rules.json"  # 自学习规则
 ML_ROUTER_BIN = "router.lgb"         # 第 5 期 ML 精判产物（joblib 容器）
 SEMANTIC_ONNX = "router_semantics.onnx"  # 第 6 期 bge 语义编码器（ONNX int8）落盘（见 learned_rules.py）
+SEMANTIC_ONNX_TOK = "router_semantics.json"  # 与 .onnx 同名的伴生 tokenizer（semantic.py 按主文件同级取）
 
 
 def feedback_log_path() -> Path:
@@ -62,6 +63,50 @@ def ensure_dir() -> Path:
     d = data_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _atomic_copy(src: Path, dst: Path) -> None:
+    """二进制原子复制：写 tmp 后 os.replace，避免写一半损坏产物。"""
+    ensure_dir()
+    fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=dst.name, suffix=".tmp")
+    os.close(fd)
+    try:
+        import shutil  # noqa: PLC0415
+        shutil.copyfile(str(src), tmp)
+        os.replace(tmp, dst)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def ensure_default_artifacts() -> None:
+    """首启把随包语义产物复制到数据目录；目标已存在则跳过（不覆盖用户数据）。
+
+    随包资源在 ``xg/assets/``（router_semantics.onnx + .json）。无随包资源、
+    目标已存在或复制失败时静默跳过——语义通道维持离线回落，绝不影响启动。
+    """
+    target = semantic_onnx_path()
+    if target.exists():
+        return
+    try:
+        from importlib.resources import as_file, files  # noqa: PLC0415
+        root = files("xg").joinpath("assets")
+        src_onnx = root.joinpath(SEMANTIC_ONNX)
+        if not src_onnx.is_file():
+            return
+        with as_file(src_onnx) as p_src:
+            _atomic_copy(Path(p_src), target)
+        src_tok = root.joinpath(SEMANTIC_ONNX_TOK)
+        if src_tok.is_file():
+            with as_file(src_tok) as p_src:
+                _atomic_copy(Path(p_src), target.with_suffix(".json"))
+    except Exception:
+        # 内存/沙箱/只读等任何失败都静默，绝不打断启动
+        pass
 
 
 def _atomic_replace(path: Path, payload: str) -> None:
