@@ -73,14 +73,63 @@ def test_switch(tmp_path: Path):
     assert manager.active().provider_name == "deepseek"
 
 
-def test_remove_needs_yes(tmp_path: Path):
-    manager = make_manager(tmp_path)
-    msg, ok = cmd(manager, "/provider remove openai")
+def test_remove_needs_yes_and_refuses_base(tmp_path: Path):
+    manager = make_manager(tmp_path, user_cfg={"active_provider": "openai"})  # active base = openai
+    msg, ok = cmd(manager, "/provider remove openai --yes")
+    assert ok is False
+    assert "不能删除当前 base provider" in msg
+    assert manager.resolve_provider("openai") is not None  # base 未被删除
+    # 非 base provider 需 --yes
+    msg, ok = cmd(manager, "/provider remove deepseek")
     assert ok is False
     assert "--yes" in msg
-    msg, ok = cmd(manager, "/provider remove openai --yes")
+    assert manager.resolve_provider("deepseek") is not None
+    msg, ok = cmd(manager, "/provider remove deepseek --yes")
     assert ok is True
-    assert manager.resolve_provider("openai") is None
+    assert "已删除 provider: deepseek" in msg
+    assert manager.resolve_provider("deepseek") is None
+    # 传错 provider 名
+    msg, ok = cmd(manager, "/provider remove nope --yes")
+    assert ok is False
+    assert "未知 provider" in msg
+
+
+def test_model_add_and_rm(tmp_path: Path):
+    manager = make_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider openai model gpt-4o")
+    assert ok is True
+    assert "已为 openai 添加模型: gpt-4o" in msg
+    assert "gpt-4o" in manager.resolve_provider("openai").models  # type: ignore[union-attr]
+
+    # 重复添加被拦截
+    msg, ok = cmd(manager, "/provider openai model gpt-4o")
+    assert ok is False
+    assert "已存在" in msg
+
+    # 删除模型
+    msg, ok = cmd(manager, "/provider openai model rm gpt-4o")
+    assert ok is True
+    assert "已从 openai 移除模型: gpt-4o" in msg
+    assert "gpt-4o" not in manager.resolve_provider("openai").models  # type: ignore[union-attr]
+
+    # 删除不存在的模型 → 报错
+    msg, ok = cmd(manager, "/provider openai model rm nope")
+    assert ok is False
+    assert "不在列表" in msg
+
+
+def test_model_unknown_provider(tmp_path: Path):
+    manager = raw_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider nope model x")
+    assert ok is False
+    assert "未知 provider" in msg
+
+
+def test_model_default_usage_when_incomplete(tmp_path: Path):
+    manager = make_manager(tmp_path)
+    msg, ok = cmd(manager, "/provider openai model")
+    assert ok is False
+    assert "model" in msg and "<name>" in msg
 
 
 def test_key_write_needs_yes_when_exists(tmp_path: Path):

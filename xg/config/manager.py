@@ -164,6 +164,15 @@ class ConfigManager:
                 return ""
             return key
 
+        def _extract_models(cfg_dict: dict | None) -> tuple[str, ...]:
+            if not cfg_dict:
+                return ()
+            raw = cfg_dict.get("models")
+            if not isinstance(raw, list):
+                return ()
+            models = [str(m).strip() for m in raw if str(m).strip()]
+            return tuple(dict.fromkeys(models))  # 去重保序
+
         if base is None:
             required = ("api_base", "default_model")
             if not cfg or not all(cfg.get(k) for k in required):
@@ -174,6 +183,7 @@ class ConfigManager:
                 display_name=str(cfg.get("display_name", name)),
                 api_base=str(cfg["api_base"]),
                 default_model=str(cfg["default_model"]),
+                models=_extract_models(cfg),
                 api_key=api_key,
                 context_window=int(cfg.get("context_window", DEFAULT_CONTEXT_WINDOW)),
                 supports_cache=bool(cfg.get("supports_cache", False)),
@@ -186,6 +196,7 @@ class ConfigManager:
             display_name=str((cfg or {}).get("display_name", base.display_name)),
             api_base=str((cfg or {}).get("api_base", base.api_base)),
             default_model=str((cfg or {}).get("default_model", base.default_model)),
+            models=_extract_models(cfg) or base.models,
             api_key=api_key,
             context_window=int((cfg or {}).get("context_window", base.context_window)),
             supports_cache=base.supports_cache,

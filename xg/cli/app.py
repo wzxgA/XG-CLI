@@ -50,7 +50,7 @@ console = Console()
 
 BANNER = """\
 [XG] Agent CLI v0.1.0
-输入任务开始对话；/plan 先拆解计划再执行，/team 使用多 Agent 协作，/model 切换 provider 或模型，
+输入任务开始对话；/plan 先拆解计划再执行，/team 使用多 Agent 协作，/provider 管理服务商，/model 在当前 provider 内切换模型，
 /config 查看/设置配置，/init 初始化项目记忆，/save 保存记忆，
 /memory 管理记忆，/mcp 管理外部能力，/web 查看联网能力，/hitl 审批开关，/clear 清空上下文，/exit 退出。
 也可以使用 /skill list|load|enable|disable 管理本地任务规范，/history status|clear 管理输入历史。
@@ -699,7 +699,7 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
             elif user_input.split(maxsplit=1)[0].lower() == "/provider":
                 from xg.cli.commands import execute_provider_command
 
-                message, should_exit = execute_provider_command(manager, settings, user_input)
+                message, _ok = execute_provider_command(manager, settings, user_input)
             else:
                 message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:
@@ -761,7 +761,7 @@ def _handle_command(
         message, ok = execute_provider_command(manager, settings, raw)
         if ok:
             _reapply_active(agent, settings, manager)
-        return message, ok
+        return message, False
     if cmd == "/hitl":
         return _cmd_hitl(agent, arg), False
     if cmd == "/save":
@@ -906,20 +906,28 @@ def _cmd_hitl(agent: ReActAgent, arg: str) -> str:
 def _cmd_model(
     agent: ReActAgent, settings: Settings, manager: ConfigManager, arg: str
 ) -> str:
-    if not arg or arg.strip().lower() in ("list", "provider"):
+    """/model：list 查看；否则在当前 base provider 内切模型（限模型列表内）。"""
+    if not arg or arg.strip().lower() == "list":
         return _model_catalog(manager)
 
-    if "/" in arg:
-        provider_name, model = (x.strip() for x in arg.split("/", 1))
-        result = _switch(agent, settings, manager, provider_name, model)
-    elif arg in manager.provider_names():
-        result = _switch(agent, settings, manager, arg, None)
-    else:
-        # 不带 provider 前缀时，视为当前 provider 内的模型切换
-        result = _switch(agent, settings, manager, settings.provider, arg)
+    model = arg.strip()
+    provider = manager.resolve_provider(settings.provider) if settings.provider else None
+    if provider is None:
+        return "当前无可用 base provider，无法切换模型。\n" + _model_catalog(manager)
 
-    # 手动优先接管：/model 切换成功即关闭 SmartRouter 并清除快照
+    allowed = [provider.default_model, *provider.models]
+    if model not in allowed:
+        available = "、".join(allowed) if allowed else "（无）"
+        return (
+            f"模型 {model} 不在 {provider.name} 的可用列表中。可用: {available}。"
+            f"如需使用，可运行 /provider {provider.name} model {model} 添加。"
+        )
+
+    result = _switch(agent, settings, manager, provider.name, model)
+
+    # 手动优先接管：/model 切换成功即持久化并关闭 SmartRouter 清除快照
     if result.startswith("已切换:"):
+        manager.set_config_value("active_model", model)
         _disable_smart_router(settings, manager)
         return result + "\n→ SmartRouter 已自动关闭（手动 /model 优先）"
     return result
@@ -1136,10 +1144,12 @@ def _model_catalog(manager: ConfigManager) -> str:
         "可用 providers:",
     ]
     for p in manager.list_providers():
+        models = "、".join(p.models) if p.models else "（无）"
         cache = "cache" if p.supports_cache else "-"
         vision = "vision" if p.supports_vision else "-"
         lines.append(
-            f"  {p.name:<10} {p.default_model:<18} 窗口 {p.context_window:<6} {cache:<5} {vision}"
+            f"  {p.name:<10} default={p.default_model}  models=[{models}]  "
+            f"窗口 {p.context_window:<6} {cache:<5} {vision}"
         )
     return "\n".join(lines)
 

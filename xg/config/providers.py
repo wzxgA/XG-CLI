@@ -17,6 +17,7 @@ class Provider:
     display_name: str
     api_base: str             # base url（来自 config.json）
     default_model: str
+    models: tuple[str, ...] = ()   # 该 provider 可切换的模型列表（config.json 的 providers.<name>.models）
     api_key: str = ""         # API Key（明文存于 config.json 的 providers.<name>.api_key）
     api_key_env: str = ""     # 兼容保留项：旧「环境变量读取」模式，现已不使用
     context_window: int = 0   # 上下文窗口（token），用于预算控制

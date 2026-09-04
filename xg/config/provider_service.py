@@ -50,6 +50,15 @@ def validate_name(name: str) -> str | None:
     return None
 
 
+def validate_model(model: str) -> str | None:
+    """校验模型名；非法时返回提示（非法字符/空白）。"""
+    if not model or model != model.strip():
+        return "模型名不能为空或包含首尾空白"
+    if any(ch in model for ch in ("`", " ")):
+        return "模型名含非法字符（如反引号或空格），请去掉后重试"
+    return None
+
+
 class ProviderConfigService:
     """面向界面的 provider 管理服务（无内置预设，纯用户自定义）。"""
 
@@ -83,6 +92,7 @@ class ProviderConfigService:
                     "display_name": provider.display_name,
                     "api_base": provider.api_base,
                     "default_model": provider.default_model,
+                    "models": list(provider.models),
                     "has_key": configured,
                     "is_base": name == active,
                     "layer": self.manager.provider_layer(name) or "user",
@@ -101,6 +111,7 @@ class ProviderConfigService:
             "display_name": provider.display_name,
             "api_base": provider.api_base,
             "default_model": provider.default_model,
+            "models": list(provider.models),
             "api_key": raw if configured else "",
             "api_key_masked": mask_key(raw if configured else ""),
             "has_key": configured,
@@ -172,12 +183,15 @@ class ProviderConfigService:
         provider = self.manager.resolve_provider(name)
         if provider is None:
             return OpResult(False, f"未知 provider: {name}")
+        if name == self._active_provider():
+            return OpResult(
+                False,
+                f"不能删除当前 base provider: {name}（否则没有可用 base）。请先 /provider switch <其它> 再删。",
+            )
         referenced = self.referenced_by(name)
         warnings = []
         if referenced:
             warnings.append(f"被 SmartRouter 档位引用：{', '.join(referenced)}（删除后这些档位会回落 base）")
-        if name == self._active_provider():
-            warnings.append("这是当前 base provider，删除后将没有可用 base")
         if not yes:
             head = "；".join(warnings) + "。" if warnings else "此操作会删除该 provider。"
             return OpResult(False, f"{head} 确认请加 --yes（/provider remove {name} --yes）")
@@ -213,6 +227,34 @@ class ProviderConfigService:
         status = "已写入" if (existing and existing != key) or not existing else "未改动"
         extra = f"（覆盖旧值 {mask_key(existing)}）" if existing and existing != key else ""
         return OpResult(True, f"{status} providers.{name}.api_key -> config.json，仅显示 {mask_key(key)}{extra}")
+
+    def add_model(self, name: str, model: str) -> OpResult:
+        """把模型加入 provider 的模型列表（去重；写入生效层）。"""
+        provider = self.manager.resolve_provider(name)
+        if provider is None:
+            return OpResult(False, f"未知 provider: {name}，可用: {', '.join(self.manager.provider_names()) or '（无）'}")
+        err = validate_model(model)
+        if err:
+            return OpResult(False, err)
+        model = model.strip()
+        current = list(provider.models)
+        if model in current:
+            return OpResult(False, f"模型已存在: {name} 的列表中已有 {model}")
+        current.append(model)
+        layer = self.manager.upsert_provider(name, {"models": current})
+        return OpResult(True, f"已为 {name} 添加模型: {model}（写入 {layer} 配置。可用: /model {model} 切换）")
+
+    def remove_model(self, name: str, model: str) -> OpResult:
+        """把模型从 provider 的模型列表移除。"""
+        provider = self.manager.resolve_provider(name)
+        if provider is None:
+            return OpResult(False, f"未知 provider: {name}，可用: {', '.join(self.manager.provider_names()) or '（无）'}")
+        model = model.strip()
+        if model not in provider.models:
+            return OpResult(False, f"模型不在列表: {name} 的模型列表中没有 {model}")
+        remaining = [m for m in provider.models if m != model]
+        layer = self.manager.upsert_provider(name, {"models": remaining})
+        return OpResult(True, f"已从 {name} 移除模型: {model}（写入 {layer} 配置）")
 
     # ---------- 校验 ----------
 

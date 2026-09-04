@@ -53,10 +53,15 @@ def make_manager(tmp_path, env: dict) -> ConfigManager:
     project_dir = tmp_path / "proj_xg"
     user_dir.mkdir(exist_ok=True)
     project_dir.mkdir(exist_ok=True)
-    # 注入默认自定义 providers（openai/deepseek/glm/kimi），保证 /model 可解析。
+    # 注入默认自定义 providers（openai/deepseek/glm/kimi），并把 env 里的
+    # XG_<NAME>_API_KEY 迁到 providers.<name>.api_key（provider 身份/key 一律来自 config）。
     cfg_path = user_dir / "config.json"
-    if not cfg_path.exists():
-        cfg_path.write_text(json.dumps(seed_config({})), encoding="utf-8")
+    cfg = seed_config({}) if not cfg_path.exists() else json.loads(cfg_path.read_text(encoding="utf-8"))
+    for pname, pdef in cfg["providers"].items():
+        key = env.get(f"XG_{pname.upper()}_API_KEY")
+        if key:
+            pdef["api_key"] = key
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     return ConfigManager(user_dir=user_dir, project_dir=project_dir, env=dict(env), load_env=False)
 
 
@@ -140,8 +145,8 @@ async def test_switch_mid_conversation_preserves_history(tmp_path):
     assert events[-1].kind == "done"
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "hello multi-provider"
 
-    # 中途切换：openai -> deepseek
-    message, _ = _handle_command(agent, settings, manager, "/model deepseek")
+    # 中途切换 base：openai -> deepseek（/provider switch）
+    message, _ = _handle_command(agent, settings, manager, "/provider switch deepseek")
     assert "已切换" in message
     assert agent.llm.api_base == BASE_B  # type: ignore[attr-defined]
 

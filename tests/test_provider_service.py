@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from xg.config.manager import ConfigManager
-from xg.config.provider_service import ProviderConfigService, validate_api_base, validate_name
+from xg.config.provider_service import (
+    ProviderConfigService,
+    validate_api_base,
+    validate_model,
+    validate_name,
+)
 from tests.test_config import make_manager
 
 
@@ -41,6 +46,14 @@ def test_validate_api_base():
     assert validate_api_base("http://api.example.com") is None
     assert validate_api_base("ftp://api.example.com") is not None  # 非法 scheme
     assert validate_api_base("//example.com") is not None  # 缺 scheme
+
+
+def test_validate_model():
+    assert validate_model("") is not None
+    assert validate_model("  ") is not None
+    assert validate_model("my model") is not None  # 空格非法
+    assert validate_model("deepseek-r1") is None
+    assert validate_model("asdf`r1") is not None  # 反引号非法
 
 
 class TestService:
@@ -98,15 +111,52 @@ class TestService:
         assert not res.ok
         assert "不支持字段" in res.message
 
-    def test_remove_requires_yes(self, tmp_path: Path):
+    def test_add_model_and_remove_model(self, tmp_path: Path):
         manager = make_manager(tmp_path)
         svc = ProviderConfigService(manager)
-        res = svc.remove("openai", yes=False)
+        res = svc.add_model("openai", "gpt-4o")
+        assert res.ok
+        assert "已为 openai 添加模型: gpt-4o" in res.message
+        assert "gpt-4o" in svc.get("openai")["models"]
+        openai_row = next(r for r in svc.list() if r["name"] == "openai")
+        assert list(openai_row["models"]) == ["gpt-4o"]
+        # 重复添加拦截
+        res = svc.add_model("openai", "gpt-4o")
+        assert not res.ok
+        assert "已存在" in res.message
+        # 移除
+        res = svc.remove_model("openai", "gpt-4o")
+        assert res.ok
+        assert "gpt-4o" not in svc.get("openai")["models"]
+
+    def test_add_model_rejects_bad_model_or_unknown_provider(self, tmp_path: Path):
+        manager = raw_manager(tmp_path)
+        svc = ProviderConfigService(manager)
+        res = svc.add_model("nope", "x")
+        assert not res.ok
+        assert "未知 provider" in res.message
+        manager.upsert_provider("p", {"api_base": "https://x.com/v1", "default_model": "m"})
+        res = svc.add_model("p", "bad model")
+        assert not res.ok
+        assert "模型名" in res.message or "非法字符" in res.message
+
+    def test_remove_requires_yes(self, tmp_path: Path):
+        manager = make_manager(tmp_path)  # active base 为 openai
+        svc = ProviderConfigService(manager)
+        res = svc.remove("deepseek", yes=False)
         assert not res.ok
         assert "确认请加 --yes" in res.message
-        res = svc.remove("openai", yes=True)
+        res = svc.remove("deepseek", yes=True)
         assert res.ok
-        assert svc.get("openai") is None
+        assert svc.get("deepseek") is None
+
+    def test_remove_refuses_active_base(self, tmp_path: Path):
+        manager = make_manager(tmp_path, user_cfg={"active_provider": "openai"})  # active base 为 openai
+        svc = ProviderConfigService(manager)
+        res = svc.remove("openai", yes=True)
+        assert not res.ok
+        assert "不能删除当前 base provider" in res.message
+        assert svc.get("openai") is not None
 
     def test_switch_base_changes_active(self, tmp_path: Path):
         manager = make_manager(tmp_path, user_cfg={"active_provider": "openai"})

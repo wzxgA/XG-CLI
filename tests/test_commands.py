@@ -88,98 +88,62 @@ class TestModelCommand:
         assert "glm" in output
 
     def test_list_keyword_does_not_switch(self, tmp_path):
-        # `list` and `provider` are declared subcommands, not model names.
+        # `list` 是声明的子命令，切换模型不接受它。
         agent, settings, manager = make_context(
             tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
         )
-        for sub in ("list", "provider"):
-            output = run_cmd(agent, settings, manager, f"/model {sub}")
-            assert "当前:" in output and "可用 providers:" in output
-            assert output.strip().startswith("当前:")
-            # 不应被当作模型切换
-            assert "已切换" not in output
-        assert settings.provider != "deepseek"
+        output = run_cmd(agent, settings, manager, "/model list")
+        assert "当前:" in output and "可用 providers:" in output
+        assert output.strip().startswith("当前:")
+        assert "已切换" not in output
+        assert settings.provider == "openai"
 
-    def test_switch_provider(self, tmp_path):
-        agent, settings, manager = make_context(
-            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
-        )
-        output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "已切换: DeepSeek / deepseek-chat" in output
-        assert settings.provider == "deepseek"
-        assert settings.api_base == "https://api.deepseek.com/v1"
-        assert settings.api_key == "dk"
-        assert settings.context_window == 128_000
-        assert agent.llm.model == "deepseek-chat"  # type: ignore[attr-defined]
-        # 持久化
-        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
-        assert cfg["active_provider"] == "deepseek"
-
-    def test_switch_provider_with_model(self, tmp_path):
-        agent, settings, manager = make_context(
-            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_GLM_API_KEY": "gk"}
-        )
-        output = run_cmd(agent, settings, manager, "/model glm/glm-4-plus")
-        assert "已切换: GLM / glm-4-plus" in output
-        assert agent.llm.model == "glm-4-plus"  # type: ignore[attr-defined]
-
-    def test_switch_respects_per_provider_url(self, tmp_path):
-        agent, settings, manager = make_context(
-            tmp_path,
-            {
-                "XG_OPENAI_API_KEY": "k",
-                "XG_DEEPSEEK_API_KEY": "dk",
-                "XG_DEEPSEEK_API_BASE": "https://my-proxy.test/v1",
-            },
-        )
-        output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "已切换: DeepSeek / deepseek-chat" in output
-        assert settings.api_base == "https://my-proxy.test/v1"
-        assert agent.llm.api_base == "https://my-proxy.test/v1"  # type: ignore[attr-defined]
-
-    def test_switch_model_within_provider(self, tmp_path):
+    def test_switch_default_model_within_provider(self, tmp_path):
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/model gpt-4o-mini")
+        assert "已切换: OpenAI / gpt-4o-mini" in output
+        assert settings.provider == "openai"
+        assert settings.model == "gpt-4o-mini"
+        # 持久化 active_model
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert cfg["active_model"] == "gpt-4o-mini"
+
+    def test_reject_model_not_in_list(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        output = run_cmd(agent, settings, manager, "/model gpt-4o")
+        assert "不在 openai 的可用列表中" in output
+        assert "gpt-4o-mini" in output  # 提示可用模型
+        assert settings.model == "gpt-4o-mini"  # 未变化
+        assert isinstance(agent.llm, DummyClient)
+
+    def test_switch_after_adding_model(self, tmp_path):
+        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
+        add = run_cmd(agent, settings, manager, "/provider openai model gpt-4o")
+        assert "已为 openai 添加模型: gpt-4o" in add
         output = run_cmd(agent, settings, manager, "/model gpt-4o")
         assert "已切换: OpenAI / gpt-4o" in output
         assert settings.model == "gpt-4o"
-
-    def test_switch_requires_specific_key(self, tmp_path):
-        """无通用兜底：目标 provider 未配专属 Key 时拒绝切换。"""
-        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
-        output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "缺少 deepseek 的 api_key" in output
-        assert settings.provider == "openai"
-        assert isinstance(agent.llm, DummyClient)
         cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
-        assert cfg["active_provider"] == "openai"  # 拒绝的切换不应改变 base
+        assert cfg["active_model"] == "gpt-4o"
 
-    def test_switch_without_any_key_rejected(self, tmp_path):
-        """完全没有 Key 时拒绝切换。"""
-        agent, settings, manager = make_context(tmp_path, {})
-        output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "缺少" in output
-        assert settings.provider == "openai"
-        assert isinstance(agent.llm, DummyClient)
-        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
-        assert cfg["active_provider"] == "openai"  # 拒绝的切换不应改变 base
-
-    def test_unknown_token_treated_as_model_name(self, tmp_path):
-        """不在 provider 列表中的参数，按当前 provider 内切换模型处理。"""
-        agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
-        output = run_cmd(agent, settings, manager, "/model my-fancy-model")
-        assert "已切换: OpenAI / my-fancy-model" in output
-        assert settings.model == "my-fancy-model"
-
-    def test_custom_provider_switchable(self, tmp_path):
-        agent, settings, manager = make_context(tmp_path, {})
-        manager.set_config_value(
-            "providers.myproxy.api_base", "https://my-proxy.test/v1"
+    def test_cannot_switch_provider_with_model_command(self, tmp_path):
+        """base provider 不通过 /model 切换（走 /provider switch）。"""
+        agent, settings, manager = make_context(
+            tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
         )
-        manager.set_config_value("providers.myproxy.api_key", "ck")
-        manager.set_config_value("providers.myproxy.default_model", "my-model")
-        output = run_cmd(agent, settings, manager, "/model myproxy")
-        assert "已切换: myproxy / my-model" in output
-        assert settings.api_base == "https://my-proxy.test/v1"
+        output = run_cmd(agent, settings, manager, "/model deepseek")
+        assert "不在 openai 的可用列表中" in output
+        assert settings.provider == "openai"
+        cfg = json.loads((tmp_path / "user_xg" / "config.json").read_text(encoding="utf-8"))
+        assert cfg["active_provider"] == "openai"  # base 未变
+
+    def test_missing_key_rejects(self, tmp_path):
+        """无可用 key 时拒绝对当前 provider 切模型。"""
+        agent, settings, manager = make_context(tmp_path, {})
+        output = run_cmd(agent, settings, manager, "/model gpt-4o-mini")
+        assert "缺少 openai 的 api_key" in output
+        assert settings.provider == "openai"
+        assert isinstance(agent.llm, DummyClient)
 
 
 class TestConfigCommand:
@@ -257,8 +221,9 @@ class TestOtherCommands:
         assert "/memory list 10" in output
 
         output = run_cmd(agent, settings, manager, "/help model")
-        assert "/model <provider>/<model>" in output
-        assert "/model deepseek/deepseek-chat" in output
+        assert "/model <model-name>" in output
+        assert "/model deepseek-chat" in output
+        assert "/provider <name> model <model>" in output
 
     def test_help_unknown_command_is_actionable(self, tmp_path):
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
@@ -313,8 +278,8 @@ class TestSmartRouterCommand:
         agent, settings, manager = make_context(
             tmp_path, {"XG_OPENAI_API_KEY": "k", "XG_DEEPSEEK_API_KEY": "dk"}
         )
-        # 先切到 deepseek，再开启 smartRouter（快照为 deepseek/deepseek-chat）
-        run_cmd(agent, settings, manager, "/model deepseek")
+        # 先切 base 到 deepseek，再开启 smartRouter（快照为 deepseek/deepseek-chat）
+        run_cmd(agent, settings, manager, "/provider switch deepseek")
         run_cmd(agent, settings, manager, "/smartRouter on")
         assert settings.provider == "deepseek"
         # 手动用 /model 再切到 glm（不应走 smartRouter 关闭还原逻辑，这里直接用 off 验证恢复快照）
@@ -364,8 +329,8 @@ class TestSmartRouterCommand:
         run_cmd(agent, settings, manager, "/smartRouter on")
         assert settings.smart_router_enabled is True
 
-        output = run_cmd(agent, settings, manager, "/model deepseek")
-        assert "已切换: DeepSeek" in output
+        output = run_cmd(agent, settings, manager, "/model gpt-4o-mini")
+        assert "已切换: OpenAI" in output
         assert "SmartRouter 已自动关闭" in output
         assert settings.smart_router_enabled is False
         assert settings.smart_router_saved is None
@@ -374,11 +339,11 @@ class TestSmartRouterCommand:
         assert cfg["smart_router"]["enabled"] is False
 
     def test_failed_switch_keeps_smart_router(self, tmp_path):
-        """/model 切换失败（缺 key）不应关闭 SmartRouter。"""
+        """/model 切换失败（模型不在列表内）不应关闭 SmartRouter。"""
         agent, settings, manager = make_context(tmp_path, {"XG_OPENAI_API_KEY": "k"})
         run_cmd(agent, settings, manager, "/smartRouter on")
-        output = run_cmd(agent, settings, manager, "/model deepseek")  # 无 deepseek key
-        assert "缺少 deepseek 的 api_key" in output
+        output = run_cmd(agent, settings, manager, "/model no-such-model")
+        assert "不在 openai 的可用列表中" in output
         assert settings.smart_router_enabled is True  # 保持开启
 
 
@@ -502,4 +467,4 @@ async def test_command_service_uses_shared_help_formatter(tmp_path):
     result = await CommandService(CommandContext(agent, settings, manager)).execute("/help model")
     assert result.ok is True
     assert result.message.startswith("/model —")
-    assert "用法：/model [provider] [model]" in result.message
+    assert "用法：/model [list|<model-name>]" in result.message

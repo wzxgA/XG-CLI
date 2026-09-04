@@ -98,24 +98,24 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     ),
     SlashCommandSpec(
         "/model",
-        usage="/model [provider] [model]",
-        description="查看或切换 provider / 模型",
+        usage="/model [list|<model-name>]",
+        description="查看当前模型，或在当前 provider 内切换模型",
         category="config",
         details=(
-            "不带参数时查看当前模型和可用 provider。",
-            "可以只切换 provider、切换 provider 与模型，或只切换当前 provider 内的模型。",
+            "不带参数或带 list 时，查看当前模型和可用 provider（含各 provider 模型列表）。",
+            "`<model-name>` 在当前 base provider 内切换模型，仅接受该 provider 的模型列表内模型"
+            "（含 default_model）。",
+            "切换 provider 请用 /provider switch <name>；给 provider 添加模型请用 "
+            "/provider <name> model <model>。",
         ),
         subcommands=(
             SlashSubcommandSpec("list", "/model", "查看当前模型和可用 provider"),
-            SlashSubcommandSpec("provider", "/model <provider>", "切换到 provider 的默认模型"),
-            SlashSubcommandSpec("provider/model", "/model <provider>/<model>", "切换 provider 和指定模型"),
-            SlashSubcommandSpec("model", "/model <model>", "在当前 provider 内切换模型"),
+            SlashSubcommandSpec("model", "/model <model-name>", "在当前 provider 内切换模型"),
         ),
         examples=(
             "/model",
-            "/model deepseek",
-            "/model deepseek/deepseek-chat",
-            "/model gpt-4o",
+            "/model list",
+            "/model deepseek-chat",
         ),
     ),
     SlashCommandSpec(
@@ -142,26 +142,31 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     ),
     SlashCommandSpec(
         "/provider",
-        usage="/provider [list|add|show|set|switch|remove|key] ...",
-        description="在界面内管理 provider（增删改查、切 base、写 Key）",
+        usage="/provider [list|add|show|set|switch|key|remove|<name> model ...]",
+        description="在界面内管理 provider（增删改查、切 base、写 Key、维护模型列表）",
         category="config",
         details=(
-            "全程界面配置即可，无需手改文件：provider 定义与 API Key 一律写入 config.json。",
+            "全程界面配置即可，无需手改文件：provider 定义、API Key 与模型列表一律写入 config.json。",
             "add 参数齐全即直接执行；缺省参数会提示所需字段。",
-            "remove 与覆盖已有 Key 需加 --yes 确认。",
+            "给某 provider 加/删模型：/provider <name> model <model>；删除 /provider <name> model rm <model>。",
+            "remove 与覆盖已有 Key 需加 --yes 确认；不能删除当前 base provider。",
         ),
         subcommands=(
-            SlashSubcommandSpec("list", "/provider", "列出所有 provider（标注是否 base 与来源层）"),
+            SlashSubcommandSpec("list", "/provider", "列出所有 provider（默认/模型列表、是否 base 与来源层）"),
             SlashSubcommandSpec("add", "/provider add <name> <api_base> [--model M] [--label L] [--key K] [--set-base]", "新增一个 provider"),
-            SlashSubcommandSpec("show", "/provider show <name>", "查看单个 provider（Key 脱敏）"),
+            SlashSubcommandSpec("show", "/provider show <name>", "查看单个 provider（Key 脱敏、含模型列表）"),
             SlashSubcommandSpec("set", "/provider set <name> <field> <value>", "改单一字段：api_base|default_model|display_name"),
             SlashSubcommandSpec("switch", "/provider switch <name> [model]", "切换 base provider"),
-            SlashSubcommandSpec("remove", "/provider remove <name> [--yes]", "删除 provider（需 --yes 确认）"),
             SlashSubcommandSpec("key", "/provider key <name> <KEY> [--yes]", "写入/覆盖 API Key 到 config.json"),
+            SlashSubcommandSpec("remove", "/provider remove <name> [--yes]", "删除 provider（需 --yes；base 不可删）"),
+            SlashSubcommandSpec("model", "/provider <name> model <model>", "给某 provider 添加模型到列表"),
+            SlashSubcommandSpec("model rm", "/provider <name> model rm <model>", "从某 provider 的模型列表移除模型"),
         ),
         examples=(
             "/provider",
             "/provider add myproxy https://gateway.my.com/v1 --model deepseek-v4 -k sk_x --set-base",
+            "/provider myproxy model deepseek-r1",
+            "/provider myproxy model rm deepseek-r1",
             "/provider switch deepseek",
             "/provider show myproxy",
         ),
@@ -619,10 +624,11 @@ def _provider_usage(sub: str) -> str:
         "show": "/provider show <name>",
         "set": "/provider set <name> <field> <value>  （field: api_base|default_model|display_name）",
         "switch": "/provider switch <name> [model]",
-        "remove": "/provider remove <name> [--yes]",
         "key": "/provider key <name> <KEY> [--yes]",
+        "remove": "/provider remove <name> [--yes]",
+        "model": "/provider <name> model <model> 或 /provider <name> model rm <model>",
     }
-    return usage.get(sub, "/provider [list|add|show|set|switch|remove|key]")
+    return usage.get(sub, "/provider [list|add|show|set|switch|key|remove|<name> model ...]")
 
 
 def _consume_flags(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
@@ -655,14 +661,16 @@ def _consume_flags(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
 
 
 def execute_provider_command(manager: Any, settings: Any, raw: str) -> tuple[str, bool]:
-    """执行 /provider 子命令，返回 (message, ok)。"""
+    """执行 /provider 子命令，返回 (message, ok)。
+
+    首个参数优先按子命令解析（list/add/show/set/switch/key）；否则若它
+    是既有 provider 名，则进入 provider 作用域（model 加/删）。其余报用法。
+    """
     parts = raw.split()
     sub = parts[1].lower() if len(parts) > 1 else "list"
     service = _provider_service(manager, settings)
 
     if sub in {"list", ""}:
-        if sub != "list" and len(parts) > 1 and parts[1].lower() != "list":
-            return _provider_usage("list"), False
         return _render_provider_list(service), True
 
     if sub == "add":
@@ -691,12 +699,14 @@ def execute_provider_command(manager: Any, settings: Any, raw: str) -> tuple[str
         row = service.get(positional[0])
         if row is None:
             return f"未知 provider: {positional[0]}", False
+        models = "、".join(row["models"]) if row["models"] else "（无，可用 /provider <name> model <model> 添加）"
         return "\n".join(
             [
                 f"name:        {row['name']}",
                 f"display:     {row['display_name']}",
                 f"api_base:    {row['api_base']}",
                 f"default:     {row['default_model']}",
+                f"models:      {models}",
                 f"api_key:     {row['api_key_masked']}（config.json）",
                 f"key 已配置:    {'✓' if row['has_key'] else '✗'}",
                 f"is_base:     {'✓' if row['is_base'] else '✗'}",
@@ -734,6 +744,19 @@ def execute_provider_command(manager: Any, settings: Any, raw: str) -> tuple[str
         result = service.remove(positional[0], yes="--yes" in flags)
         return result.message, result.ok
 
+    # provider 作用域：/provider <name> model [rm] <model>
+    if len(parts) >= 3 and parts[2].lower() == "model":
+        tokens = [t.lower() if t.lower() in ("model", "rm") else t for t in parts[3:]]
+        if not tokens:
+            return _provider_usage("model"), False
+        if tokens[0] == "rm":
+            if len(tokens) < 2:
+                return _provider_usage("model"), False
+            result = service.remove_model(parts[1], tokens[1])
+            return result.message, result.ok
+        result = service.add_model(parts[1], tokens[0])
+        return result.message, result.ok
+
     return _provider_usage(""), False
 
 
@@ -741,13 +764,14 @@ def _render_provider_list(service: Any) -> str:
     rows = service.list()
     if not rows:
         return "尚未配置任何 provider。\n用法: /provider add <name> <api_base> --model <M> [--key K] [--set-base]"
-    lines = ["NAME              DISPLAY        BASE_URL                              DEFAULT_MODEL   KEY  BASE  LAYER"]
+    lines = ["NAME              DISPLAY        DEFAULT_MODEL   MODELS                                              KEY  BASE  LAYER"]
     for row in rows:
+        models = "、".join(row["models"]) if row["models"] else "-"
         lines.append(
             f"{row['name']:<16}"
             f"{row['display_name'][:12]:<12}"
-            f"{row['api_base'][:36]:<36}"
-            f"{row['default_model'][:18]:<18}"
+            f"{row['default_model'][:15]:<15}"
+            f"{models[:50]:<50}"
             f"{'✓' if row['has_key'] else '✗':^4}"
             f"{'●' if row['is_base'] else ' ':^6}"
             f"{row['layer']}"
