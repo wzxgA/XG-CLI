@@ -23,7 +23,8 @@ class ProviderForm(ModalScreen[None]):
         super().__init__()
         self.service = service
         self.mode = mode
-        self.name = name
+        # 用独立属性承载目标 provider 名，避开 ModalScreen.name 只读属性
+        self._target = name
         self._row = service.get(name) if name else None
 
     def compose(self) -> ComposeResult:
@@ -33,7 +34,7 @@ class ProviderForm(ModalScreen[None]):
             if self.mode in ("add", "edit"):
                 yield Static("名称", id="f-name-label")
                 yield Input(
-                    value=self.name or "", id="name",
+                    value=self._target or "", id="name",
                     placeholder="仅字母数字下划线连字符，不含空格",
                     disabled=self.mode == "edit",
                 )
@@ -51,8 +52,8 @@ class ProviderForm(ModalScreen[None]):
                 yield Static("display_name（可选）", id="f-label-label")
                 yield Input(value=(self._row or {}).get("display_name", ""), id="display_name")
             elif self.mode == "key":
-                yield Static(f"API Key（{self.name}）", id="f-key-label")
-                yield Input(value="", id="api_key", password=True, placeholder=f"XG_{self.name.upper()}_API_KEY")
+                yield Static(f"API Key（{self._target}）", id="f-key-label")
+                yield Input(value="", id="api_key", password=True, placeholder=f"XG_{self._target.upper()}_API_KEY")
             with Horizontal(id="provider-form-actions"):
                 yield Button("保存", id="save", variant="primary")
                 yield Button("取消", id="cancel")
@@ -87,10 +88,10 @@ class ProviderForm(ModalScreen[None]):
             err = validate_api_base(base)
             if err:
                 return self.notify(err, severity="error")
-            result = self.service.update(self.name, {"api_base": base, "display_name": label})
+            result = self.service.update(self._target, {"api_base": base, "display_name": label})
         else:  # key
             key = self.query_one("#api_key", Input).value.strip()
-            result = self.service.set_api_key(self.name, key, overwrite=True, yes=True)
+            result = self.service.set_api_key(self._target, key, overwrite=True, yes=True)
         self.notify(result.message, severity="error" if not result.ok else "information")
         if result.ok:
             self.dismiss(None)
