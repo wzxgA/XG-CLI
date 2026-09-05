@@ -11,7 +11,13 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-from xg.config.provider_service import ProviderConfigService, validate_api_base, validate_name
+from xg.config.provider_service import (
+    OpResult,
+    ProviderConfigService,
+    validate_api_base,
+    validate_model,
+    validate_name,
+)
 
 
 class ProviderForm(ModalScreen[None]):
@@ -38,17 +44,23 @@ class ProviderForm(ModalScreen[None]):
                     placeholder="仅字母数字下划线连字符，不含空格",
                     disabled=self.mode == "edit",
                 )
-                if self.mode == "add":
-                    yield Static("api_base", id="f-base-label")
-                    yield Input(value=(self._row or {}).get("api_base", ""), id="api_base",
-                                placeholder="https://gateway.my.com/v1")
-                    yield Static("default_model", id="f-model-label")
-                    yield Input(value=(self._row or {}).get("default_model", ""), id="default_model")
-                    yield Static("display_name（可选）", id="f-label-label")
-                    yield Input(value=(self._row or {}).get("display_name", ""), id="display_name")
+            if self.mode == "add":
+                yield Static("api_base", id="f-base-label")
+                yield Input(value=(self._row or {}).get("api_base", ""), id="api_base",
+                            placeholder="https://gateway.my.com/v1")
+                yield Static("default_model", id="f-model-label")
+                yield Input(value=(self._row or {}).get("default_model", ""), id="default_model")
+                yield Static("display_name（可选）", id="f-label-label")
+                yield Input(value=(self._row or {}).get("display_name", ""), id="display_name")
+                yield Static("API Key（可选，稍后也可用「写Key」）", id="f-key-label")
+                yield Input(value="", id="api_key", password=True, placeholder="XG_{NAME}_API_KEY")
             elif self.mode == "edit":
                 yield Static("api_base", id="f-base-label")
                 yield Input(value=(self._row or {}).get("api_base", ""), id="api_base")
+                yield Static("default_model", id="f-model-label")
+                yield Input(value=(self._row or {}).get("default_model", ""), id="default_model")
+                yield Static("models（逗号分隔，覆盖式同步）", id="f-models-label")
+                yield Input(value=", ".join((self._row or {}).get("models") or []), id="models")
                 yield Static("display_name（可选）", id="f-label-label")
                 yield Input(value=(self._row or {}).get("display_name", ""), id="display_name")
             elif self.mode == "key":
@@ -72,23 +84,55 @@ class ProviderForm(ModalScreen[None]):
         if event.button.id == "" and self.mode in ("add", "edit", "key"):
             self._save()
 
+    def _sync_models(self, name: str, raw: str, current: list[str]) -> None:
+        """把编辑表单的模型串（逗号分隔）覆盖式同步到 provider 模型列表。"""
+        seen: set[str] = set()
+        desired = []
+        for m in raw.split(","):
+            m = m.strip()
+            if m and m not in seen:
+                seen.add(m)
+                desired.append(m)
+        for m in [x for x in current if x not in desired]:
+            self.service.remove_model(name, m)
+        for m in desired:
+            self.service.add_model(name, m)
+
     def _save(self) -> None:
         if self.mode == "add":
             name = self.query_one("#name", Input).value.strip()
             base = self.query_one("#api_base", Input).value.strip()
             model = self.query_one("#default_model", Input).value.strip()
             label = self.query_one("#display_name", Input).value.strip() or None
+            key = self.query_one("#api_key", Input).value.strip()
             err = validate_name(name) or validate_api_base(base)
             if err:
                 return self.notify(err, severity="error")
             result = self.service.add(name, base, model, display_name=label)
+            if result.ok and key:
+                key_result = self.service.set_api_key(name, key, overwrite=True, yes=True)
+                result = OpResult(
+                    True,
+                    f"{result.message}；{key_result.message}",
+                ) if key_result.ok else key_result
         elif self.mode == "edit":
             base = self.query_one("#api_base", Input).value.strip()
+            model = self.query_one("#default_model", Input).value.strip()
             label = self.query_one("#display_name", Input).value.strip() or None
-            err = validate_api_base(base)
+            err = validate_api_base(base) or validate_model(model)
+            if not model:
+                err = err or "default_model 必填"
             if err:
                 return self.notify(err, severity="error")
-            result = self.service.update(self._target, {"api_base": base, "display_name": label})
+            result = self.service.update(
+                self._target, {"api_base": base, "default_model": model, "display_name": label}
+            )
+            if result.ok:
+                self._sync_models(
+                    self._target,
+                    self.query_one("#models", Input).value,
+                    list((self._row or {}).get("models") or []),
+                )
         else:  # key
             key = self.query_one("#api_key", Input).value.strip()
             result = self.service.set_api_key(self._target, key, overwrite=True, yes=True)

@@ -11,7 +11,8 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static
+from textual.widgets import Button, OptionList, Static
+from textual.widgets.option_list import Option
 
 from xg.config.provider_service import ProviderConfigService
 from xg.config.smart_router_service import SmartRouterConfigService
@@ -29,6 +30,7 @@ class ConfigScreen(ModalScreen[None]):
         self.provider_service = ProviderConfigService(manager, settings)
         self.router_service = SmartRouterConfigService(manager, settings)
         self._rows: list[dict] = []
+        self._sel = 0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="config-dialog"):
@@ -36,7 +38,9 @@ class ConfigScreen(ModalScreen[None]):
             with Vertical(id="cfg-body"):
                 with Vertical(id="provider-section"):
                     yield Static("Provider 管理（或 /provider 命令）", id="cfg-sec-title")
-                    yield Static(self._render_providers(), id="provider-list")
+                    yield Static("↑↓ 选中行 · 操作作用于当前选中", id="provider-hint")
+                    yield OptionList(id="provider-list")
+                    yield Static("", id="provider-detail")
                     with Horizontal(id="provider-actions"):
                         yield Button("新增", id="add", variant="primary")
                         yield Button("编辑", id="edit")
@@ -52,20 +56,63 @@ class ConfigScreen(ModalScreen[None]):
                         yield Button("刷新", id="refresh")
                         yield Button("关闭", id="close")
 
-    def _render_providers(self) -> str:
+    def _provider_label(self, row: dict) -> str:
+        return (
+            f"{row['name']:<12}"
+            f"{row['default_model'][:16]:<16}"
+            f"{'✓' if row['has_key'] else '✗':^5}"
+            f"{'●' if row['is_base'] else ' ':^6}"
+            f"{row['layer']}"
+        )
+
+    def _rebuild_provider_list(self, ol: OptionList) -> None:
         self._rows = self.provider_service.list()
+        ol.clear_options()
         if not self._rows:
-            return "尚未配置任何 provider。\n请用 [新增]，或 /provider add <name> <api_base> --model <M> --key K"
-        lines = ["NAME        MODEL             KEY  BASE  LAYER"]
+            self._sel = 0
+            return
         for row in self._rows:
-            lines.append(
-                f"{row['name']:<12}"
-                f"{row['default_model'][:16]:<16}"
-                f"{'✓' if row['has_key'] else '✗':^5}"
-                f"{'●' if row['is_base'] else ' ':^6}"
-                f"{row['layer']}"
-            )
-        return "\n".join(lines)
+            ol.add_option(Option(self._provider_label(row), id=row["name"]))
+        if self._sel >= len(self._rows):
+            self._sel = 0
+        ol.highlighted = self._sel
+
+    async def on_mount(self) -> None:
+        self._rebuild_provider_list(self.query_one("#provider-list", OptionList))
+        self.query_one("#sr-body", Static).update(self._render_router())
+        self._update_detail()
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        self._sel = event.option_index
+        self._update_detail()
+
+    def _update_detail(self) -> None:
+        """展示当前选中 provider 的详情（等价 /provider show，key 脱敏）。"""
+        if not self._rows:
+            detail = "（无 provider，请新增）"
+        else:
+            name = self._rows[self._sel]["name"]
+            info = self.provider_service.get(name)
+            if info is None:
+                detail = f"{name}: 未知 provider"
+            else:
+                lines = [
+                    f"{info['name']}{'  ●base' if info['is_base'] else ''}  [{info['layer']} 层]",
+                    f"api_base     : {info['api_base']}",
+                    f"default_model: {info['default_model']}",
+                ]
+                if info.get("display_name"):
+                    lines.insert(1, f"display_name : {info['display_name']}")
+                models = info.get("models") or []
+                lines.append(f"models({len(models)})    : {', '.join(models) if models else '（空）'}")
+                lines.append(
+                    f"api_key      : {info['api_key_masked'] if info['has_key'] else '（未配置）'}"
+                )
+                refs = self.provider_service.referenced_by(name)
+                if refs:
+                    lines.append(f"SmartRouter 引用: {', '.join(refs)}")
+                detail = "\n".join(lines)
+        self.query_one("#provider-detail", Static).update(detail)
 
     def _render_router(self) -> str:
         cfg = self.router_service.get()
@@ -81,8 +128,9 @@ class ConfigScreen(ModalScreen[None]):
         return "\n".join(lines)
 
     def _refresh(self) -> None:
-        self.query_one("#provider-list", Static).update(self._render_providers())
+        self._rebuild_provider_list(self.query_one("#provider-list", OptionList))
         self.query_one("#sr-body", Static).update(self._render_router())
+        self._update_detail()
 
     def _sync_header(self) -> None:
         """开关 / 档位变更后即时重建顶部 Header 路由行。"""
@@ -122,21 +170,21 @@ class ConfigScreen(ModalScreen[None]):
             return
         if bid == "edit":
             return self.app.push_screen(
-                ProviderForm(self.provider_service, name=self._rows[0]["name"], mode="edit"),
+                ProviderForm(self.provider_service, name=self._rows[self._sel]["name"], mode="edit"),
                 callback=self._after_form,
             )
         if bid == "switch":
-            self.notify(self.provider_service.switch(self._rows[0]["name"]).message)
+            self.notify(self.provider_service.switch(self._rows[self._sel]["name"]).message)
             self._refresh()
             return
         if bid == "remove":
-            result = self.provider_service.remove(self._rows[0]["name"], yes=True)
+            result = self.provider_service.remove(self._rows[self._sel]["name"], yes=True)
             self.notify(result.message, severity="error" if not result.ok else "information")
             self._refresh()
             return
         if bid == "key":
             return self.app.push_screen(
-                ProviderForm(self.provider_service, name=self._rows[0]["name"], mode="key"),
+                ProviderForm(self.provider_service, name=self._rows[self._sel]["name"], mode="key"),
                 callback=self._after_form,
             )
 
