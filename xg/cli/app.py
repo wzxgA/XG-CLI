@@ -1067,7 +1067,7 @@ def _cmd_smart_router(
             if ml.available:
                 n = ml.n_samples
                 suffix = f"，样本 {n}" if n is not None else ""
-                lines.append(f"  ML 精判: 可用{suffix}")
+                lines.append(f"  ML 精判: 可用{suffix}，sem_dim={ml.sem_dim}")
             else:
                 lines.append("  ML 精判: 离线（未训练 / 未装依赖，回落规则路由）")
             # 语义通道（phase-06 C3）：可用性/产物/耗时/有效样本 观测
