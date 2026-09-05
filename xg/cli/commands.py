@@ -435,7 +435,7 @@ class CommandService:
                 _reapply_active(self.context.agent, self.context.settings, self.context.manager)
             return CommandResult(ok=ok, message=message)
         if parts[0].lower() == "/tier":
-            message, ok = execute_tier_command(self.context.manager, raw)
+            message, ok = execute_tier_command(self.context.manager, self.context.settings, raw)
             return CommandResult(ok=ok, message=message)
         if parts[0].lower() == "/mcp":
             message, ok = await execute_mcp_command(self.context.agent, raw)
@@ -807,7 +807,7 @@ def _render_provider_list(service: Any) -> str:
     return "\n".join(lines)
 
 
-def execute_tier_command(manager: Any, raw: str) -> tuple[str, bool]:
+def execute_tier_command(manager: Any, settings: Any, raw: str) -> tuple[str, bool]:
     """执行 /tier 子命令（list/show/set/clear）。"""
     from xg.config.smart_router_service import (  # 延迟导入避免环
         SmartRouterConfigService,
@@ -816,7 +816,7 @@ def execute_tier_command(manager: Any, raw: str) -> tuple[str, bool]:
 
     parts = raw.split()
     sub = parts[1].lower() if len(parts) > 1 else "list"
-    service = SmartRouterConfigService(manager)
+    service = SmartRouterConfigService(manager, settings)
 
     if sub in {"list", ""}:
         rows = service.list_tiers()

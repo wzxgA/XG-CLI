@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from xg.config.manager import ConfigManager, _SMART_ROUTER_TIERS
 from xg.config.provider_service import validate_model
@@ -18,8 +19,11 @@ class OpResult:
 
 
 class SmartRouterConfigService:
-    def __init__(self, manager: ConfigManager) -> None:
+    def __init__(self, manager: ConfigManager, settings: Any = None) -> None:
         self.manager = manager
+        # 运行的 Settings 对象（可选）；用于配置档位时同步运行态开关，
+        # 使“自动开启”在当前会话立即生效，而非仅持久化到 config.json。
+        self._settings = settings
 
     # ---------- 读取 ----------
 
@@ -84,8 +88,16 @@ class SmartRouterConfigService:
         if merr:
             return OpResult(False, merr)
 
+        was_enabled = bool(self.get().get("enabled", False))
         self.manager.set_smart_router_tier(tier, prov.name, resolved_model)
-        return OpResult(True, f"档位 {tier} → {prov.name}/{resolved_model}")
+        msg = f"档位 {tier} → {prov.name}/{resolved_model}"
+        if not was_enabled:
+            # 配置/修改档位后自动生效：开启开关并同步运行态。
+            self.manager.set_smart_router_enabled(True)
+            if self._settings is not None:
+                self._settings.smart_router_enabled = True
+            msg += "（SmartRouter 已自动开启）"
+        return OpResult(True, msg)
 
     def clear_tier(self, tier: str) -> OpResult:
         err = self._validate_tier(tier)

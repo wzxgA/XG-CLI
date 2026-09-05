@@ -595,7 +595,7 @@ class XgTuiApp(App[None]):
     def action_smart_router_panel(self) -> None:
         from xg.tui.widgets.smart_router_panel import open_smart_router_screen
 
-        open_smart_router_screen(self, self.controller.manager)
+        open_smart_router_screen(self, self.controller.manager, self.settings)
 
     async def on_unmount(self) -> None:
         self._stop_progress_timer()

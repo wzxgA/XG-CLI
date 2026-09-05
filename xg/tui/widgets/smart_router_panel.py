@@ -18,9 +18,9 @@ from xg.tui.widgets.smart_router_form import SmartRouterForm
 class SmartRouterScreen(ModalScreen[None]):
     BINDINGS = [("escape", "close", "关闭")]
 
-    def __init__(self, manager) -> None:
+    def __init__(self, manager, settings=None) -> None:
         super().__init__()
-        self.service = SmartRouterConfigService(manager)
+        self.service = SmartRouterConfigService(manager, settings)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="smart-router-dialog"):
@@ -48,6 +48,12 @@ class SmartRouterScreen(ModalScreen[None]):
     def _refresh(self) -> None:
         self.query_one("#sr-body", Static).update(self._render_state())
 
+    def _sync_header(self) -> None:
+        """让顶部 Header 路由行即时重建（开关 / 档位变更后无需等对话）。"""
+        controller = getattr(self.app, "controller", None)
+        if controller is not None:
+            controller._sync_smart_router_snapshot()
+
     def action_close(self) -> None:
         self.dismiss(None)
 
@@ -64,6 +70,7 @@ class SmartRouterScreen(ModalScreen[None]):
             on = not bool(cfg.get("enabled", False))
             self.notify(self.service.set_enabled(on).message)
             self._refresh()
+            self._sync_header()
             return
         if bid == "edit":
             return self.app.push_screen(
@@ -72,8 +79,9 @@ class SmartRouterScreen(ModalScreen[None]):
 
     def _after_form(self, _result: object) -> None:
         self._refresh()
+        self._sync_header()
 
 
-def open_smart_router_screen(app, manager) -> None:
+def open_smart_router_screen(app, manager, settings=None) -> None:
     """外部调用：打开 SmartRouter 面板。"""
-    app.push_screen(SmartRouterScreen(manager))
+    app.push_screen(SmartRouterScreen(manager, settings))
