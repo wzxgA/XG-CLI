@@ -123,7 +123,7 @@ class SessionController:
                 hitl_enabled=bool(agent.approval_policy and agent.approval_policy.enabled),
             )
         )
-        self.command_service = CommandService(CommandContext(agent, settings, manager))
+        self.command_service = CommandService(CommandContext(agent, settings, manager), log_sink=self._append_system)
         self._counter = itertools.count(1)
         self._queue_counter = itertools.count(1)
         self._queue: deque[QueuedSubmission] = deque()

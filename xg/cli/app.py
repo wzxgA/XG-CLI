@@ -704,6 +704,8 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
                 from xg.cli.commands import execute_tier_command
 
                 message, _ok = execute_tier_command(manager, settings, user_input)
+            elif user_input.split(maxsplit=1)[0].lower() == "/train":
+                message = _run_train_inline(user_input)
             else:
                 message, should_exit = _handle_command(agent, settings, manager, user_input)
             if message:
@@ -731,6 +733,35 @@ async def _run_loop_body(agent: ReActAgent, settings: Settings, manager: ConfigM
             console.print(Text("（已中断本轮任务）", style="yellow"))
         except LlmError as e:
             console.print(Panel(Text(f"请求失败: {e}"), style="red"))
+
+
+def _run_train_inline(raw: str) -> str | None:
+    """inline 版 /train：确认 + 同步阻塞逐行打印训练日志，返回汇总消息。
+
+    训练是显式手动触发：不带 --yes 只回确认提示；带 --yes 才 spawn 阻塞运行，
+    每行即时打印到 stdout（实时进度），结束后返回简短汇总。
+    """
+    from xg.cli.train import (  # noqa: PLC0415
+        check_train_deps,
+        confirmation_message,
+        parse_train_command,
+        run_training_sync,
+    )
+
+    plan, err = parse_train_command(raw)
+    if err:
+        return err
+    dep_err = check_train_deps()
+    if dep_err:
+        return dep_err
+    if not plan.overwrite:
+        return confirmation_message(plan)
+
+    ok, lines = run_training_sync(plan, on_line=lambda line: console.print(Text(line, style="dim")))
+    # 行日志已逐行实时上屏，这里只返回简短收尾，避免重复。
+    if ok:
+        return "训练完成，产物已写入。"
+    return "训练失败，详见上方日志。"
 
 
 def _handle_command(

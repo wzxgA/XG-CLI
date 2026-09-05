@@ -15,7 +15,7 @@ from xg.cli.commands import (
 
 
 def cmd(manager, raw):
-    return execute_tier_command(manager, raw)
+    return execute_tier_command(manager, None, raw)
 
 
 def test_default_list_when_no_subcommand(tmp_path: Path):

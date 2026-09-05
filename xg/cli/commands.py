@@ -355,6 +355,20 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
         ),
         examples=("/smartRouter", "/smartRouter on", "/smartRouter status", "/smartRouter reset"),
     ),
+    SlashCommandSpec(
+        "/train",
+        usage="/train [<dataset>] [--output <path>] [--yes]",
+        description="训练 SmartRouter ML 模型（手动触发）",
+        category="general",
+        details=(
+            "缺省只用 feedback.log 累积样本；可给手动标注 JSONL 路径混合训练。",
+            "命令输入后需加 --yes 确认才会执行；训练过程实时输出进度日志。",
+            "训练跑在独立子进程 tools/train_router.py，不阻塞主界面；产物写 router.lgb。",
+            "语义编码器非必需：缺失时自动回退 TF-IDF-only 特征。",
+        ),
+        options=("--yes", "--output <path>", "--feedback-only"),
+        examples=("/train", "/train labeled.jsonl --yes", "/train --output router.lgb --yes"),
+    ),
     SlashCommandSpec("/cancel", aliases=("/c",), usage="/cancel", description="取消当前任务", category="control", examples=("/cancel",)),
     SlashCommandSpec("/exit", aliases=("/quit",), usage="/exit", description="退出程序", category="control", examples=("/exit",)),
 )
@@ -402,8 +416,10 @@ def filter_slash_commands(query: str) -> tuple[SlashCommandSpec, ...]:
 class CommandService:
     """Execute slash commands without knowing anything about Textual."""
 
-    def __init__(self, context: CommandContext) -> None:
+    def __init__(self, context: CommandContext, log_sink: callable | None = None) -> None:
         self.context = context
+        # 可选的实时日志通道：由 TUI 传入，把训练/长流程的每一行即时上屏。
+        self.log_sink = log_sink
 
     async def execute(self, raw: str) -> CommandResult:
         raw = raw.strip()
@@ -437,6 +453,8 @@ class CommandService:
         if parts[0].lower() == "/tier":
             message, ok = execute_tier_command(self.context.manager, self.context.settings, raw)
             return CommandResult(ok=ok, message=message)
+        if parts[0].lower() == "/train":
+            return await execute_train_command(raw, log_sink=self.log_sink)
         if parts[0].lower() == "/mcp":
             message, ok = await execute_mcp_command(self.context.agent, raw)
             return CommandResult(ok=ok, message=message)
@@ -868,3 +886,36 @@ def _tier_usage(sub: str) -> str:
         "clear": "/tier clear <tier>",
     }
     return usage.get(sub, "/tier [list|show|set|clear]")
+
+
+async def execute_train_command(raw: str, log_sink: callable | None = None) -> CommandResult:
+    """执行 /train：不带 --yes 只返回确认提示；带 --yes 才 spawn 训练并流式上报日志。
+
+    log_sink 由 TUI 提供，逐行即时上屏；缺失时日志合并进返回的 message。
+    """
+    # 延迟导入避免与 app.py 的循环依赖；train 层不 import 训练逻辑（只 spawn 子进程）。
+    from xg.cli.train import (  # noqa: PLC0415
+        check_train_deps,
+        confirmation_message,
+        parse_train_command,
+        run_training_async,
+    )
+
+    plan, err = parse_train_command(raw)
+    if err:
+        return CommandResult(ok=False, message=err)
+    dep_err = check_train_deps()
+    if dep_err:
+        return CommandResult(ok=False, message=dep_err)
+    if not plan.overwrite:
+        return CommandResult(ok=False, message=confirmation_message(plan))
+
+    ok, lines = await run_training_async(plan, log_sink)
+    # log_sink 存在时行日志已逐行实时上屏，这里不再重复，只给简短收尾。
+    if ok:
+        return CommandResult(
+            ok=True,
+            message="训练完成，产物已写入。" if log_sink else ("\n".join(lines[-3:]) or "训练完成。"),
+        )
+    tail = "\n".join(lines[-6:]) or "训练失败（无输出）"
+    return CommandResult(ok=False, message="训练失败" if log_sink else f"训练失败：\n{tail}")
