@@ -29,24 +29,45 @@ class SmartRouterForm(ModalScreen[None]):
     def __init__(self, service: SmartRouterConfigService, *, tier: str | None = None) -> None:
         super().__init__()
         self.service = service
+        self.configs = {
+            r["name"]: {"provider": r.get("provider", ""), "model": r.get("model", "")}
+            for r in service.list_tiers()
+        }
+        # 默认定位：显式指定档位 > 首个已配置档位 > Basic
         self.tier = tier
+        if tier is None or tier not in _TIER_ORDER:
+            configured = next(
+                (t for t in _TIER_ORDER if self.configs[t]["provider"]), None
+            )
+            self.tier = configured or "Basic"
 
     def compose(self) -> ComposeResult:
+        cur = self.configs.get(self.tier, {"provider": "", "model": ""})
         with Vertical(id="tier-form"):
             yield Static("SmartRouter 档位", id="tier-form-title")
             yield Static("档位", id="t-tier-label")
             yield Select(
                 ((_TIER_LABELS.get(t), t) for t in _TIER_ORDER),
-                value=self.tier or "Basic",
+                value=self.tier,
+                allow_blank=False,
                 id="tier",
             )
             yield Static("provider（留空 = 清空该档位）", id="t-provider-label")
-            yield Input(value="", id="provider", placeholder="如 deepseek")
+            yield Input(
+                value=cur["provider"], id="provider", placeholder="如 deepseek"
+            )
             yield Static("model（可选，缺省取 default_model）", id="t-model-label")
-            yield Input(value="", id="model", placeholder="如 deepseek-chat")
+            yield Input(value=cur["model"], id="model", placeholder="如 deepseek-chat")
             with Horizontal(id="tier-form-actions"):
                 yield Button("保存", id="save", variant="primary")
                 yield Button("取消", id="cancel")
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """切换档位时联动加载对应 provider/model 配置。"""
+        tier = str(event.value or self.tier)
+        cur = self.configs.get(tier, {"provider": "", "model": ""})
+        self.query_one("#provider", Input).value = cur["provider"]
+        self.query_one("#model", Input).value = cur["model"]
 
     def action_cancel(self) -> None:
         self.dismiss(None)
