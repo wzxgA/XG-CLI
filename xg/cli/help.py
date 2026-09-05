@@ -33,6 +33,9 @@ SHORTCUTS = (
     ("Ctrl+C", "取消当前任务"),
     ("Ctrl+L", "清屏"),
     ("Ctrl+R", "显示或隐藏侧栏"),
+    ("Ctrl+T", "打开配置面板（Provider 与 SmartRouter）"),
+    ("Ctrl+1..4", "切换 Inspector 视图（Session/Plan/Memory/Safety）"),
+    ("Ctrl+Tab", "Inspector 视图循环切换（Ctrl+Shift+Tab 反向）"),
     ("Esc", "关闭弹窗、取消当前交互或清除输入"),
 )
 

@@ -745,6 +745,8 @@ def _handle_command(
         return format_command_help(arg) if arg else format_help(), False
     if cmd in ("/exit", "/quit"):
         return "再见。", True
+    if cmd in ("/cancel", "/c"):
+        return "inline 模式下没有可取消的排队任务；任务执行中可用 Ctrl+C 中断。", False
     if cmd == "/clear":
         agent.clear()
         return "上下文已清空。", False
@@ -775,7 +777,10 @@ def _handle_command(
     if cmd == "/mcp":
         mcp = getattr(agent, "mcp_manager", None)
         return (mcp.format_status() if mcp is not None else "MCP 未初始化。"), False
-    return f"未知命令: {cmd}。可用: /plan /team /model /config /mcp /smartRouter /init /save /memory /hitl /clear /exit", False
+    from xg.cli.commands import SLASH_COMMANDS
+
+    names = " ".join(spec.name for spec in SLASH_COMMANDS)
+    return f"未知命令: {cmd}。可用: {names}。输入 /help 查看详情。", False
 
 
 def _memory_manager(agent: ReActAgent) -> MemoryManager | None:
