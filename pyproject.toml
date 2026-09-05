@@ -30,7 +30,7 @@ semantic = [
 ]
 
 [project.scripts]
-xg = "xg.cli.app:main"
+xg-cli = "xg.cli.app:main"
 
 [build-system]
 requires = ["hatchling"]

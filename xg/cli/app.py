@@ -1297,7 +1297,7 @@ def _cmd_config(
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="xg", description="XG Agent CLI")
+    parser = argparse.ArgumentParser(prog="xg-cli", description="XG Agent CLI")
     parser.add_argument("--tui", action="store_true", help="强制启动 Textual 全屏界面")
     parser.add_argument("--inline", action="store_true", help="使用兼容的 inline CLI")
     parser.add_argument("--no-tui", action="store_true", help="--inline 的兼容别名")
