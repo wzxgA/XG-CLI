@@ -20,7 +20,7 @@ def _compact(value: int) -> str:
 
 def _watermelon_mark() -> str:
     """Return the brand mark with a safe ASCII fallback for dumb terminals."""
-    return "[XG]" if os.environ.get("TERM", "").lower() == "dumb" else "🍉 XG"
+    return "[XG CLI]" if os.environ.get("TERM", "").lower() == "dumb" else "🍉 XG CLI"
 
 
 def _status_label(phase: str) -> str:
@@ -97,8 +97,6 @@ class HeaderBar(Static):
         # useful visual hierarchy.
         text = Text()
         text.append(mark, style="bold bright_green")
-        text.append("\n")
-        text.append("XG Agent", style="bold")
         text.append("\n")
         text.append(provider_model, style="bold")
         text.append("\n")
