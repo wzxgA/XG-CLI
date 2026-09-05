@@ -13,6 +13,7 @@ from xg.cli.commands import (
 )
 from xg.cli.train import (
     TrainPlan,
+    _default_semantic_onnx,
     build_argv,
     check_train_deps,
     confirmation_message,
@@ -92,6 +93,45 @@ def test_build_argv_dataset_and_out():
     assert "d.jsonl" in argv
     assert "--out" in argv
     assert "o.bin" in argv
+
+
+def test_parse_no_semantic_flag():
+    plan, err = parse_train_command("/train --no-semantic --yes")
+    assert err is None
+    assert plan.semantic is False
+
+
+def test_parse_default_semantic_on():
+    plan, _ = parse_train_command("/train")
+    assert plan.semantic is True
+
+
+def test_default_semantic_probe_finds_bundled():
+    # 项目自带 xg/assets/router_semantics.onnx，默认探测应命中（数据目录通常无）。
+    assert _default_semantic_onnx() is not None
+
+
+def test_build_argv_default_attaches_semantic():
+    onnx = _default_semantic_onnx()
+    if onnx is None:
+        return
+    plan = TrainPlan(feedback_only=True)  # semantic 默认 True
+    argv = build_argv(plan)
+    assert "--semantic-onnx" in argv
+    assert str(onnx) in argv
+
+
+def test_build_argv_no_semantic_skips():
+    plan = TrainPlan(feedback_only=True, semantic=False)
+    argv = build_argv(plan)
+    assert "--semantic-onnx" not in argv
+
+
+def test_confirmation_message_semantic_flag():
+    msg = confirmation_message(TrainPlan(feedback_only=True, semantic=True))
+    assert "带语义列" in msg
+    off = confirmation_message(TrainPlan(feedback_only=True, semantic=False))
+    assert "纯 TF-IDF" in off
 
 
 def test_deps_available_or_hint():

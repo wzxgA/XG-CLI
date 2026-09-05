@@ -27,6 +27,7 @@ class TrainPlan:
     output: str | None = None
     overwrite: bool = False
     feedback_only: bool = False
+    semantic: bool = True  # 默认带语义列：自动探测语义编码器；--no-semantic 关闭
 
 
 def _default_output() -> Path:
@@ -34,6 +35,17 @@ def _default_output() -> Path:
     from xg.adaptive.store import data_dir  # noqa: PLC0415
 
     return data_dir() / "router.lgb"
+
+
+def _default_semantic_onnx() -> Path | None:
+    """自动探测默认语义编码器产物：数据目录 → 随包 assets 兜底，找到即返回路径。"""
+    from xg.adaptive.store import data_dir  # noqa: PLC0415
+
+    primary = data_dir() / "router_semantics.onnx"
+    if primary.exists():
+        return primary
+    bundled = Path(__file__).resolve().parents[1] / "assets" / "router_semantics.onnx"
+    return bundled if bundled.exists() else None
 
 
 def check_train_deps() -> str | None:
@@ -70,6 +82,8 @@ def parse_train_command(raw: str) -> tuple[TrainPlan, str | None]:
             plan.overwrite = True
         elif t == "--feedback-only":
             plan.feedback_only = True
+        elif t == "--no-semantic":
+            plan.semantic = False
         elif t in ("--output", "--out", "-o"):
             i += 1
             if i >= len(tokens):
@@ -95,17 +109,23 @@ def confirmation_message(plan: TrainPlan) -> str:
     """未带 --yes 时返回的确认提示：告知将如何训练、需加 --yes 才执行。"""
     src = "反馈日志 feedback.log" if plan.feedback_only else f"数据集 {plan.dataset}"
     out = plan.output or str(_default_output())
+    sem_note = "带语义列（默认，自动探测语义编码器）" if plan.semantic else "纯 TF-IDF（--no-semantic）"
     return (
         "确认将运行 SmartRouter 训练：\n"
         f"  样本来源: {src}\n"
         f"  产物路径: {out}\n"
+        f"  语义特征: {sem_note}\n"
         "完整数据集 / feedback 样本会被去噪后用于训练；训练为手动触发，"
         "不会自动运行。确认执行请在命令末尾加 --yes。"
     )
 
 
 def build_argv(plan: TrainPlan) -> list[str]:
-    """构造 tools/train_router.py 的 argv（output 缺省时不传，交给脚本默认）。"""
+    """构造 tools/train_router.py 的 argv（output 缺省时不传，交给脚本默认）。
+
+    语义列默认启用：plan.semantic 为真时自动探测默认语义编码器产物并传入
+    --semantic-onnx；未探测到或 --no-semantic 则不传，训练回退纯 TF-IDF 特征。
+    """
     argv = [sys.executable, str(_TRAIN_SCRIPT)]
     if plan.output:
         argv += ["--out", plan.output]
@@ -113,6 +133,10 @@ def build_argv(plan: TrainPlan) -> list[str]:
         argv += ["--feedback-only"]
     elif plan.dataset:
         argv += [plan.dataset]
+    if plan.semantic:
+        onnx = _default_semantic_onnx()
+        if onnx is not None:
+            argv += ["--semantic-onnx", str(onnx)]
     return argv
 
 
